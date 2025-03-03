@@ -108,7 +108,10 @@ function main() {
 
 				btn_play.onclick = () => ws_playback.playPause();
 				ws_playback.on("pause", () => {
-					setStatus("saved");
+					// on end of recording, only update status to saved if we're still playing
+					if (status == "playback") {
+						setStatus("saved");
+					}
 				});
 				ws_playback.on("play", () => {
 					setStatus("playback");
@@ -172,8 +175,8 @@ function main() {
 	// restart button
 	btn_clear.onclick = () => {
 		// if already playing, pause
-		if (status == "playing") {
-			console.log("already playing");
+		if (status == "playback") {
+			console.log("Interrupting playback to clear");
 			ws_rec.playPause();
 		}
 		setStatus("ready");
