@@ -10,11 +10,11 @@ function main() {
 	let btn_play = recorder.querySelector("#rec-playback");
 	let btn_clear = recorder.querySelector("#rec-clear");
 	let btn_save = recorder.querySelector("#rec-save");
-	let btn_save_text = btn_save.querySelector(".recorder_btn-text");
-	let msg_large = recorder.querySelector(".recorder_msg-l");
+	let btn_submit = recorder.querySelector("#rec-submit"); // fake submit button
+	// let btn_save_text = btn_save.querySelector(".recorder_btn-text");
+	let msg = recorder.querySelector(".recorder_msg-l");
 	let waveform = recorder.querySelector("recorder_visualiser");
 	let status = "ready";
-	//let btn_submit = document.querySelector("#submit"); // fake submit button
 	let form = recorder.querySelector("#rec-form");
 	let isRecording = false;
 	let recordedBlob = null;
@@ -32,11 +32,18 @@ function main() {
 		return status;
 	}
 
-	function updateMessage(msg) {
-		if (!msg) {
-			msg_large.innerHTML = "Ready?";
+	function updateMessage(message, size) {
+		if (!message) {
+			msg.innerHTML = "Ready?";
 		} else {
-			msg_large.innerHTML = msg;
+			msg.innerHTML = message;
+		}
+		if (size == "small") {
+			msg.classList.remove("recorder_msg-l");
+			msg.classList.add("recorder_msg-s");
+		} else {
+			msg.classList.remove("recorder_msg-s");
+			msg.classList.add("recorder_msg-l");
 		}
 	}
 
@@ -49,20 +56,44 @@ function main() {
 
 		// Get the ddg_id from the URL
 		const ddgIdValue = getQueryParam("ddg_id");
+		if (!ddgIdValue) {
+			console.log("DDG ID not found");
+			updateMessage("Error :(");
+			recorder.style.pointerEvents = "none";
+		}
 
 		// Populate the input field if ddg_id exists in the URL
 		if (ddgIdValue) {
-			const ddgIdInput = recorder.getElementById("ddg-id");
+			const ddgIdInput = recorder.querySelector("#ddg-id");
 			if (ddgIdInput) {
 				ddgIdInput.value = ddgIdValue;
 			} else {
 				console.warn("DDG ID input field not found!");
 			}
 		}
+
+		// get name
+		const name = getQueryParam("ddg_name");
+		if (!name) {
+			console.log("DDG name not found");
+		} else {
+			let nameLength = name.length;
+			const section = document.querySelector(".outreach-hero");
+			if (nameLength > 6) {
+				section.classList.add("is-md");
+			} else if (nameLength > 12) {
+				section.classList.add("is-sm");
+			}
+
+			let names = document.querySelectorAll(".outreach-hero_word.is-name");
+			names.forEach((el) => {
+				el.innerHTML = name;
+			});
+		}
 	}
 
-	// TODO - handle no ID
 	loadData();
+	setStatus("ready");
 
 	const createWaveSurfer = () => {
 		// Destroy the previous wavesurfer instance
@@ -95,7 +126,7 @@ function main() {
 		record.on("record-end", (blob) => {
 			if (isRecording) {
 				setStatus("saved");
-				btn_save_text.innerHTML = "Submit";
+				// btn_save_text.innerHTML = "Submit";
 
 				const container = document.querySelector(".recorder_ws-container");
 				const recordedUrl = URL.createObjectURL(blob);
@@ -169,7 +200,10 @@ function main() {
 		btn_clear.disabled = false;
 		btn_save.disabled = false;
 		btn_record.disabled = false;
-		updateMessage("(submit msg goes here)");
+		updateMessage(
+			"Hit the submit button to send us your voice recording. You can only do this once, so feel free to play it back and have a listen 👂",
+			"small"
+		);
 	};
 
 	// restart button
@@ -180,7 +214,7 @@ function main() {
 			ws_rec.playPause();
 		}
 		setStatus("ready");
-		btn_save_text.innerHTML = "Save";
+		// btn_save_text.innerHTML = "Save";
 		updateMessage();
 		isRecording = false;
 		record.stopRecording();
@@ -196,40 +230,41 @@ function main() {
 		recordedBlob = blob; // Store the blob for later
 	});
 
-	// btn_submit.addEventListener("click", async (e) => {
-	// 	e.preventDefault(); // Prevent default form submission
+	btn_submit.addEventListener("click", async (e) => {
+		e.preventDefault(); // Prevent default form submission
 
-	// 	if (!recordedBlob) {
-	// 		alert("No recording found. Please record before submitting.");
-	// 		return;
-	// 	}
+		if (!recordedBlob) {
+			console.log("No recording found. Please record before submitting.");
+			return;
+		}
 
-	// 	console.log("Uploading recording...");
-	// 	const formData = new FormData();
-	// 	formData.append("file", recordedBlob, "voice_note.webm");
-	// 	formData.append("upload_preset", "ddg-prototype"); // Replace with Cloudinary upload preset
+		console.log("Uploading recording...");
+		const formData = new FormData();
+		formData.append("file", recordedBlob, "voice_note.webm");
+		formData.append("upload_preset", "ddg-prototype"); // Replace with Cloudinary upload preset
 
-	// 	// Upload to Cloudinary (or your preferred storage)
-	// 	const response = await fetch(
-	// 		"https://api.cloudinary.com/v1_1/daoliqze4/video/upload",
-	// 		{
-	// 			method: "POST",
-	// 			body: formData,
-	// 		}
-	// 	);
+		// Upload to Cloudinary (or your preferred storage)
+		const response = await fetch(
+			"https://api.cloudinary.com/v1_1/daoliqze4/video/upload",
+			{
+				method: "POST",
+				body: formData,
+			}
+		);
 
-	// 	const data = await response.json();
-	// 	if (!data.secure_url) {
-	// 		alert("Upload failed!");
-	// 		return;
-	// 	}
+		const data = await response.json();
+		if (!data.secure_url) {
+			alert("Upload failed!");
+			return;
+		}
 
-	// 	console.log("Uploaded file URL:", data.secure_url);
+		console.log("Uploaded file URL:", data.secure_url);
 
-	// 	// Store the Cloudinary URL in the hidden form field
-	// 	document.getElementById("file-url").value = data.secure_url;
+		// Store the Cloudinary URL in the hidden form field
+		console.log(form.querySelector("#file-url"));
+		form.querySelector("#file-url").value = data.secure_url;
 
-	// 	// Now submit the Webflow form
-	// 	document.querySelector('[type="submit"]').click();
-	// });
+		// Now submit the Webflow form
+		form.querySelector('[type="submit"]').click();
+	});
 }
