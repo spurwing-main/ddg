@@ -19,6 +19,8 @@ function main() {
 	let isRecording = false;
 	let recordedBlob = null;
 	let ws_playback;
+	let ddgIdValue;
+	let isTestMode = false;
 
 	btn_play.disabled = true;
 	btn_clear.disabled = true;
@@ -30,6 +32,16 @@ function main() {
 		status = newStatus;
 		console.log("Status updated from " + oldStatus + " to " + newStatus);
 		return status;
+	}
+
+	function redirectError() {
+		window.location.replace("/development/recipient-outreach-error");
+	}
+
+	function redirectSuccess() {
+		window.location.replace(
+			"/development/recipient-outreach-success?ddg_id=" + ddgIdValue
+		);
 	}
 
 	function updateMessage(message, size) {
@@ -54,12 +66,15 @@ function main() {
 			return urlParams.get(param);
 		}
 
+		isTestMode = getQueryParam("test_mode");
+
 		// Get the ddg_id from the URL
-		const ddgIdValue = getQueryParam("ddg_id");
+		ddgIdValue = getQueryParam("ddg_id");
 		if (!ddgIdValue) {
 			console.log("DDG ID not found");
 			updateMessage("Error :(");
 			recorder.style.pointerEvents = "none";
+			redirectError();
 		}
 
 		// Populate the input field if ddg_id exists in the URL
@@ -69,6 +84,7 @@ function main() {
 				ddgIdInput.value = ddgIdValue;
 			} else {
 				console.warn("DDG ID input field not found!");
+				redirectError();
 			}
 		}
 
@@ -92,7 +108,36 @@ function main() {
 		}
 	}
 
+	// check if user has already submitted a recording
+	async function checkSubmission() {
+		const response = await fetch(
+			"https://hook.eu2.make.com/82eitnupdvhl1yn3agge1riqmonwlvg3?ddg_id=" +
+				ddgIdValue
+		);
+		const data = await response.json();
+		console.log(data);
+
+		if (!data) {
+			console.log("can't check id");
+			redirectError();
+		} else if (data.status === "no-id") {
+			console.log("no id");
+			// id missing
+			redirectError();
+		} else if (data.status === "recording") {
+			// recording already exists
+			console.log("recording already exists");
+
+			redirectSuccess();
+		} else {
+			// no recording, proceed
+		}
+	}
+
 	loadData();
+	if (!isTestMode) {
+		checkSubmission();
+	}
 	setStatus("ready");
 
 	const createWaveSurfer = () => {
@@ -254,7 +299,8 @@ function main() {
 
 		const data = await response.json();
 		if (!data.secure_url) {
-			alert("Upload failed!");
+			console.log("Upload failed!");
+			redirectError();
 			return;
 		}
 
@@ -266,5 +312,11 @@ function main() {
 
 		// Now submit the Webflow form
 		form.querySelector('[type="submit"]').click();
+	});
+
+	// on form submission, redirect to success page
+	form.addEventListener("submit", function (event) {
+		event.preventDefault(); // Prevent default Webflow submission behavior
+		redirectSuccess();
 	});
 }
