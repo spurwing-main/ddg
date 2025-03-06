@@ -11,9 +11,9 @@ function main() {
 	let btn_clear = recorder.querySelector("#rec-clear");
 	let btn_save = recorder.querySelector("#rec-save");
 	let btn_submit = recorder.querySelector("#rec-submit"); // fake submit button
-	// let btn_save_text = btn_save.querySelector(".recorder_btn-text");
 	let msg = recorder.querySelector(".recorder_msg-l");
-	let waveform = recorder.querySelector("recorder_visualiser");
+	let waveform = recorder.querySelector(".recorder_visualiser");
+	let progress = recorder.querySelector(".recorder_timer");
 	let status = "ready";
 	let form = recorder.querySelector("#rec-form");
 	let isRecording = false;
@@ -202,14 +202,14 @@ function main() {
 
 	// const progress = document.querySelector("#progress");
 	const updateProgress = (time) => {
-		//   // time will be in milliseconds, convert it to mm:ss format
-		//   const formattedTime = [
-		//     Math.floor((time % 3600000) / 60000), // minutes
-		//     Math.floor((time % 60000) / 1000), // seconds
-		//   ]
-		//     .map((v) => (v < 10 ? '0' + v : v))
-		//     .join(':')
-		//   progress.textContent = formattedTime
+		// time will be in milliseconds, convert it to mm:ss format
+		const formattedTime = [
+			Math.floor((time % 3600000) / 60000), // minutes
+			Math.floor((time % 60000) / 1000), // seconds
+		]
+			.map((v) => (v < 10 ? "0" + v : v))
+			.join(":");
+		progress.textContent = formattedTime;
 	};
 
 	createWaveSurfer();
