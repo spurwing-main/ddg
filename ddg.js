@@ -221,6 +221,10 @@ function main() {
 				ws_playback.on("play", () => {
 					setStatus("playback");
 				});
+
+				ws_playback.on("timeupdate", (time) => {
+					updateProgress(time, "s");
+				});
 			}
 		});
 
@@ -229,15 +233,25 @@ function main() {
 		});
 	};
 
-	// const progress = document.querySelector("#progress");
-	const updateProgress = (time) => {
+	const updateProgress = (time, unit) => {
+		let formattedTime;
+		if (unit === "s") {
+			formattedTime = [
+				Math.floor((time % 3600000) / 60), // minutes
+				Math.floor((time % 60000) / 1), // seconds
+			]
+				.map((v) => (v < 10 ? "0" + v : v))
+				.join(":");
+		}
 		// time will be in milliseconds, convert it to mm:ss format
-		const formattedTime = [
-			Math.floor((time % 3600000) / 60000), // minutes
-			Math.floor((time % 60000) / 1000), // seconds
-		]
-			.map((v) => (v < 10 ? "0" + v : v))
-			.join(":");
+		else {
+			formattedTime = [
+				Math.floor((time % 3600000) / 60000), // minutes
+				Math.floor((time % 60000) / 1000), // seconds
+			]
+				.map((v) => (v < 10 ? "0" + v : v))
+				.join(":");
+		}
 		progress.textContent = formattedTime;
 	};
 
