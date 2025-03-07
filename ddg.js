@@ -17,12 +17,13 @@ function main() {
 	let progress = recorder.querySelector(".recorder_timer");
 	let status = "ready";
 	let form = recorder.querySelector("#rec-form");
-	// let click1 = recorder.querySelector("#click-1");
-	// let click2 = recorder.querySelector("#click-2");
-	let click1_url =
+
+	let click_1 =
 		"https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3";
-	let click2_url =
+	let click_2 =
 		"https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3";
+	let click_full =
+		"https://res.cloudinary.com/daoliqze4/video/upload/v1741276320/click-full_yzygvh.mp3";
 	let sound = new Audio();
 	let isRecording = false;
 	let recordedBlob = null;
@@ -52,13 +53,12 @@ function main() {
 		let buttons = document.querySelectorAll(".recorder_btn");
 
 		buttons.forEach((button) => {
-			button.addEventListener("mousedown", () => playSound(click1_url));
-			button.addEventListener("mouseup", () => playSound(click2_url));
+			button.addEventListener("mousedown", () => playSound(click_1));
+			button.addEventListener("mouseup", () => playSound(click_2));
 
 			button.addEventListener("touchstart", (event) => {
 				event.preventDefault(); // Prevents ghost clicks
-				playSound(click1_url);
-				playSound(click2_url);
+				playSound(click_full);
 			});
 		});
 	}
