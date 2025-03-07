@@ -57,7 +57,6 @@ function main() {
 			button.addEventListener("mouseup", () => playSound(click_2));
 
 			button.addEventListener("touchstart", (event) => {
-				event.preventDefault(); // Prevents ghost clicks
 				playSound(click_full);
 			});
 		});
