@@ -1,4 +1,5 @@
 function main() {
+	console.log("start");
 	let recorder = document.querySelector(".recorder");
 	if (!recorder) {
 		return;
