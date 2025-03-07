@@ -56,9 +56,9 @@ function main() {
 			button.addEventListener("mousedown", () => playSound(click_1));
 			button.addEventListener("mouseup", () => playSound(click_2));
 
-			button.addEventListener("touchstart", (event) => {
-				playSound(click_full);
-			});
+			// button.addEventListener("touchstart", (event) => {
+			// 	playSound(click_full);
+			// });
 		});
 	}
 
