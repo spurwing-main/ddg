@@ -167,7 +167,7 @@ function main() {
 		checkSubmission();
 	}
 	setStatus("ready");
-	addSounds();
+	//addSounds();
 
 	const createWaveSurfer = () => {
 		// Destroy the previous wavesurfer instance
