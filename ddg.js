@@ -135,6 +135,8 @@ function main() {
 			names.forEach((el) => {
 				el.innerHTML = name;
 			});
+
+			gsap.to(".outreach-hero_content", { autoAlpha: 1, duration: 0.1 });
 		}
 	}
 
