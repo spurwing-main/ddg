@@ -1,4 +1,4 @@
-function handleRecording() {
+function main() {
 	let recorder = document.querySelector(".recorder");
 	if (!recorder) {
 		return;
@@ -367,29 +367,5 @@ function handleRecording() {
 	form.addEventListener("submit", function (event) {
 		event.preventDefault(); // Prevent default Webflow submission behavior
 		redirectSuccess();
-	});
-}
-
-function handleSplits() {
-	const textEls = document.querySelectorAll("[ddg-text-anim='true']");
-
-	textEls.forEach((textEl) => {
-		// split text
-		const split = new SplitText(textEl, { type: "chars, words" });
-		// get characters to change
-		for (var i = 1; i < 4; i++) {
-			let char = textEl.getAttribute("ddg-text-anim-" + i);
-			char = char - 1; // account for zero-based index
-			// set font family and size
-			gsap.set(split.chars[char], {
-				fontFamily: "Tiny5",
-				letterSpacing: "-0.05em",
-				fontSize: "1.18em",
-			});
-			// increase letter spacing of preceding character
-			gsap.set(split.chars[char - 1], { letterSpacing: "0.05em" });
-			// decrease letter spacing of following character
-			gsap.set(split.chars[char + 1], { letterSpacing: "-0.05em" });
-		}
 	});
 }
