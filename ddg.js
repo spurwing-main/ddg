@@ -16,6 +16,9 @@ function main() {
 	let progress = recorder.querySelector(".recorder_timer");
 	let status = "ready";
 	let form = recorder.querySelector("#rec-form");
+	let welcomeURL =
+		"https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3";
+	let welcomeHasPlayed = false;
 
 	let click_1 =
 		"https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3";
@@ -264,8 +267,49 @@ function main() {
 	createWaveSurfer();
 
 	// record button
-	btn_record.onclick = () => {
+	btn_record.onclick = async () => {
+		btn_save.disabled = true;
+		btn_clear.disabled = true;
+		btn_play.disabled = true;
+		btn_record.disabled = true;
+		btn_submit.disabled = true;
+
+		// first time button is clicked, play welcome message
+		if (!welcomeHasPlayed) {
+			welcomeHasPlayed = true;
+			setStatus("welcome");
+
+			sound = new Audio(welcomeURL);
+			await sound.play();
+			updateMessage(
+				"👋<br>What's the craic!<br>You've reached the DropDeadGenerous answering machine.<br>Leave your story after the tone...",
+				"small"
+			);
+
+			sound.onended = async () => {
+				console.log("Welcome message finished. Starting countdown...");
+
+				// Countdown display
+				updateMessage("3", "large");
+				await new Promise((resolve) => setTimeout(resolve, 1000));
+				updateMessage("2", "large");
+				await new Promise((resolve) => setTimeout(resolve, 1000));
+				updateMessage("1", "large");
+				await new Promise((resolve) => setTimeout(resolve, 1000));
+
+				beep(300, 900, 0.7);
+				await new Promise((resolve) => setTimeout(resolve, 700)); // Wait for beep to finish
+				startRecording(); // Now start recording
+			};
+		} else {
+			// If welcome has already played, start recording directly
+			startRecording();
+		}
+	};
+
+	function startRecording() {
 		isRecording = true;
+		btn_record.disabled = false;
 		btn_save.disabled = false;
 		btn_clear.disabled = false;
 		btn_play.disabled = true;
@@ -284,7 +328,7 @@ function main() {
 				setStatus("recording");
 			});
 		}
-	};
+	}
 
 	// stop button
 	btn_save.onclick = () => {
@@ -334,8 +378,8 @@ function main() {
 
 		console.log("Uploading recording...");
 		const formData = new FormData();
-		formData.append("file", recordedBlob, "voice_note.webm");
-		formData.append("upload_preset", "ddg-prototype"); // Replace with Cloudinary upload preset
+		formData.append("file", recordedBlob, ddgIdValue + ".webm");
+		formData.append("upload_preset", "ddg-recordings"); // Replace with Cloudinary upload preset
 
 		// Upload to Cloudinary (or your preferred storage)
 		const response = await fetch(
@@ -368,4 +412,23 @@ function main() {
 		event.preventDefault(); // Prevent default Webflow submission behavior
 		redirectSuccess();
 	});
+
+	function beep(duration = 500, frequency = 1000, volume = 1) {
+		const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+		const oscillator = audioCtx.createOscillator();
+		const gainNode = audioCtx.createGain();
+
+		oscillator.type = "sine"; // Sine wave gives a smooth beep sound
+		oscillator.frequency.value = frequency; // Frequency in Hz
+		gainNode.gain.value = volume; // Volume level
+
+		oscillator.connect(gainNode);
+		gainNode.connect(audioCtx.destination);
+
+		oscillator.start();
+		setTimeout(() => {
+			oscillator.stop();
+			audioCtx.close();
+		}, duration);
+	}
 }
