@@ -340,6 +340,7 @@ function main() {
 		btn_clear.disabled = false;
 		btn_save.disabled = false;
 		btn_record.disabled = false;
+		btn_submit.disabled = false;
 		updateMessage(
 			"Hit the submit button to send us your voice recording. You can only do this once, so feel free to play it back and have a listen 👂",
 			"small"
