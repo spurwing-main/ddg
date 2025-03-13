@@ -374,6 +374,14 @@ function main() {
 	btn_submit.addEventListener("click", async (e) => {
 		e.preventDefault(); // Prevent default form submission
 
+		if (status == "playback") {
+			console.log("Interrupting playback to submit");
+			ws_playback.pause();
+		}
+
+		setStatus("submitting");
+		updateMessage("Uploading your recording...", "small");
+
 		if (!recordedBlob) {
 			console.log("No recording found. Please record before submitting.");
 			return;
