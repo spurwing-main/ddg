@@ -222,7 +222,10 @@ function main() {
 					url: recordedUrl,
 				});
 
-				btn_play.onclick = () => ws_playback.playPause();
+				btn_play.onclick = () => {
+					ws_playback.playPause();
+					console.log("clicked play");
+				};
 				ws_playback.on("pause", () => {
 					// on end of recording, only update status to saved if we're still playing
 					if (status == "playback") {
@@ -320,6 +323,10 @@ function main() {
 			setStatus("recording-paused");
 			record.pauseRecording();
 			ws_rec.empty(); // Clears the waveform
+			updateMessage(
+				"Recording paused.<br>When you're done, hit Save and then you can listen back to your message.",
+				"small"
+			);
 			return;
 		} else if (record.isPaused()) {
 			setStatus("recording");
