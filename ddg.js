@@ -324,7 +324,7 @@ function main() {
 			record.pauseRecording();
 			ws_rec.empty(); // Clears the waveform
 			updateMessage(
-				"Recording paused.<br>When you're done, hit Save and then you can listen back to your message.",
+				"Recording paused.<br>You can continue adding to your recording, and when you're finished, hit Save to listen back.",
 				"small"
 			);
 			return;
