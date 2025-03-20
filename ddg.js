@@ -65,13 +65,11 @@ function main() {
 	}
 
 	function redirectError() {
-		window.location.replace("/development/recipient-outreach-error");
+		window.location.replace("/share-your-story-error");
 	}
 
 	function redirectSuccess() {
-		window.location.replace(
-			"/development/recipient-outreach-success?ddg_id=" + ddgIdValue
-		);
+		window.location.replace("/share-your-story-success?ddg_id=" + ddgIdValue);
 	}
 
 	function updateMessage(message, size) {
