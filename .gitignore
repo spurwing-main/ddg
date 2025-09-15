@@ -1,1 +1,18 @@
-/node_modules
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env
+.env
+.env.local
+apps/webflow-cloud/.env.local
+
+# Next.js
+.next/
+out/
+dist/
+
+# Misc
+.DS_Store
