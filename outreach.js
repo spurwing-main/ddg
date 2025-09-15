@@ -1,4 +1,5 @@
 function main() {
+	console.log("Outreach script loaded");
 	let recorder = document.querySelector(".recorder");
 	if (!recorder) {
 		return;
@@ -20,10 +21,8 @@ function main() {
 		"https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3";
 	let welcomeHasPlayed = false;
 
-	let click_1 =
-		"https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3";
-	let click_2 =
-		"https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3";
+	let click_1 = "https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3";
+	let click_2 = "https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3";
 	let click_full =
 		"https://res.cloudinary.com/daoliqze4/video/upload/v1741276320/click-full_yzygvh.mp3";
 	let sound = new Audio();
@@ -141,8 +140,7 @@ function main() {
 	// check if user has already submitted a recording
 	async function checkSubmission() {
 		const response = await fetch(
-			"https://hook.eu2.make.com/82eitnupdvhl1yn3agge1riqmonwlvg3?ddg_id=" +
-				ddgIdValue
+			"https://hook.eu2.make.com/82eitnupdvhl1yn3agge1riqmonwlvg3?ddg_id=" + ddgIdValue
 		);
 		const data = await response.json();
 		console.log(data);
@@ -398,13 +396,10 @@ function main() {
 		formData.append("upload_preset", "ddg-recordings"); // Replace with Cloudinary upload preset
 
 		// Upload to Cloudinary (or your preferred storage)
-		const response = await fetch(
-			"https://api.cloudinary.com/v1_1/daoliqze4/video/upload",
-			{
-				method: "POST",
-				body: formData,
-			}
-		);
+		const response = await fetch("https://api.cloudinary.com/v1_1/daoliqze4/video/upload", {
+			method: "POST",
+			body: formData,
+		});
 
 		const data = await response.json();
 		if (!data.secure_url) {
