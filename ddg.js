@@ -1,4 +1,8 @@
 function main() {
+	const filterPanel = document.querySelector(".c-home-filters");
+	let previousBodyOverflow = "";
+	let isScrollLocked = false;
+
 	function pageProgress() {
 		const progressBar = document.querySelector(".page-progress_bar");
 		if (!progressBar) return;
@@ -91,7 +95,7 @@ function main() {
 	}
 
 	function tickerTapeHover() {
-		const tapeSpeed = 2000; // pixels per second
+		const tapeSpeed = 5000; // pixels per second
 		let splitTextInstances = [];
 		let comingSoonItems = [];
 
@@ -102,8 +106,8 @@ function main() {
 			gsap.to(lines, {
 				"--home-list--tape-r": 0,
 				duration: (i, el) => el.offsetWidth / tapeSpeed, // maintain speed across line widths
-				ease: "power2.out",
-				stagger: 0.05,
+				ease: "linear",
+				// stagger: 0.05,
 			});
 		}
 
@@ -114,8 +118,8 @@ function main() {
 			gsap.to(lines, {
 				"--home-list--tape-r": "100%",
 				duration: (i, el) => el.offsetWidth / tapeSpeed,
-				ease: "power2.out",
-				stagger: 0.05,
+				ease: "linear",
+				// stagger: 0.05,
 			});
 		}
 
@@ -140,6 +144,7 @@ function main() {
 		}
 
 		function refresh() {
+			console.log("refresh");
 			teardown();
 
 			comingSoonItems = Array.from(
@@ -154,8 +159,15 @@ function main() {
 				const splitTextInstance = setupSplitLines(item);
 				splitTextInstances.push(splitTextInstance);
 
+				// for coming soon items, need to keep hrefs but disable navigation
+				if (item.tagName === "A") {
+					item.addEventListener("click", (e) => e.preventDefault());
+				}
+
 				item.addEventListener("mouseenter", handleHoverIn);
 				item.addEventListener("mouseleave", handleHoverOut);
+
+				console.log(splitTextInstance);
 			});
 		}
 
@@ -183,58 +195,54 @@ function main() {
 		};
 	}
 
+	const setAriaHidden = (el, isHidden) => {
+		el.setAttribute("aria-hidden", isHidden ? "true" : "false");
+	};
+
+	const lockBodyScroll = () => {
+		if (isScrollLocked) return;
+		previousBodyOverflow = document.body.style.overflow;
+		document.body.style.overflow = "hidden";
+		isScrollLocked = true;
+	};
+
+	const unlockBodyScroll = () => {
+		if (!isScrollLocked) return;
+		if (previousBodyOverflow) {
+			document.body.style.overflow = previousBodyOverflow;
+		} else {
+			document.body.style.removeProperty("overflow");
+		}
+		previousBodyOverflow = "";
+		isScrollLocked = false;
+	};
+
+	const openModal = (el) => {
+		el.classList.add("is-open");
+		el.style.display = "block";
+		setAriaHidden(el, false);
+		lockBodyScroll();
+	};
+
+	const closeModal = (el) => {
+		el.classList.remove("is-open");
+		el.style.display = "none";
+		setAriaHidden(el, true);
+		unlockBodyScroll();
+	};
+
 	function toggleFilters() {
-		const filterPanel = document.querySelector(".c-home-filters");
 		const searchButtons = document.querySelectorAll(".c-search-btn");
 		const closeButtons = document.querySelectorAll(".filters_close, .filters_submit");
 
 		if (!filterPanel || !searchButtons.length) return;
-
-		let previousBodyOverflow = "";
-		let isScrollLocked = false;
-
-		const setAriaHidden = (isHidden) => {
-			filterPanel.setAttribute("aria-hidden", isHidden ? "true" : "false");
-		};
-
-		const lockBodyScroll = () => {
-			if (isScrollLocked) return;
-			previousBodyOverflow = document.body.style.overflow;
-			document.body.style.overflow = "hidden";
-			isScrollLocked = true;
-		};
-
-		const unlockBodyScroll = () => {
-			if (!isScrollLocked) return;
-			if (previousBodyOverflow) {
-				document.body.style.overflow = previousBodyOverflow;
-			} else {
-				document.body.style.removeProperty("overflow");
-			}
-			previousBodyOverflow = "";
-			isScrollLocked = false;
-		};
-
-		const openFilters = () => {
-			filterPanel.classList.add("is-open");
-			filterPanel.style.display = "block";
-			setAriaHidden(false);
-			lockBodyScroll();
-		};
-
-		const closeFilters = () => {
-			filterPanel.classList.remove("is-open");
-			filterPanel.style.display = "none";
-			setAriaHidden(true);
-			unlockBodyScroll();
-		};
 
 		searchButtons.forEach((button) => {
 			button.addEventListener("click", (event) => {
 				if (button.tagName === "A") {
 					event.preventDefault();
 				}
-				openFilters();
+				openModal(filterPanel);
 			});
 		});
 
@@ -243,36 +251,14 @@ function main() {
 				if (button.tagName === "A" || button.type === "button") {
 					event.preventDefault();
 				}
-				closeFilters();
+				closeModal(filterPanel);
 			});
 		});
 
 		// Ensure panel starts hidden for assistive tech if it isn't open by default
 		if (!filterPanel.classList.contains("is-open")) {
-			setAriaHidden(true);
+			setAriaHidden(filterPanel, true);
 		}
-
-		return { openFilters, closeFilters };
-	}
-
-	function registerFinsweetRefresh(refreshFn) {
-		if (typeof refreshFn !== "function") return;
-
-		window.fsAttributes = window.fsAttributes || [];
-		window.fsAttributes.push([
-			"cmsfilter",
-			(filterInstances) => {
-				filterInstances.forEach((instance) => {
-					if (typeof instance?.on === "function") {
-						instance.on("renderitems", () => {
-							requestAnimationFrame(() => {
-								refreshFn();
-							});
-						});
-					}
-				});
-			},
-		]);
 	}
 
 	function activityBar() {
@@ -299,13 +285,188 @@ function main() {
 		splide.mount(window.splide.Extensions);
 	}
 
+	function randomSelection() {
+		let randomHasRun = false;
+
+		const filterPanel = document.querySelector(".c-home-filters");
+
+		// Helper: tick the correct checkbox in the DOM and dispatch change
+		function checkFilterInput(fieldKey, value) {
+			const selector = `[fs-list-field="${fieldKey}"][fs-list-value="${value}"]`;
+			const input = document.querySelector(selector);
+			if (input) {
+				input.checked = true;
+				input.dispatchEvent(new Event("change", { bubbles: true }));
+				console.log(`☑️ UI synced: ${fieldKey} = ${value}`);
+			} else {
+				console.warn(`⚠️ Could not find input for ${fieldKey} = ${value}`);
+			}
+		}
+
+		window.FinsweetAttributes ||= [];
+		window.FinsweetAttributes.push([
+			"list",
+			(lists) => {
+				lists.forEach((listInstance) => {
+					// --- Helpers ---
+					function pickRandom(arr) {
+						if (!arr || arr.length === 0) return null;
+						return arr[Math.floor(Math.random() * arr.length)];
+					}
+
+					// Store the initial FS filter object so we can truly reset
+					const initialFilters = JSON.parse(JSON.stringify(listInstance.filters.value));
+					console.log("Initial filters:", initialFilters);
+
+					function resetFilters() {
+						listInstance.filters.value = JSON.parse(JSON.stringify(initialFilters));
+						listInstance.triggerHook("filter");
+
+						// Also uncheck any checkboxes
+						document.querySelectorAll("[fs-cmsfilter-field]").forEach((el) => {
+							if (el.type === "checkbox") el.checked = false;
+						});
+					}
+
+					// Global afterRender hook — only closes modal if randomHasRun = true
+					listInstance.addHook("afterRender", () => {
+						if (randomHasRun) {
+							console.log("✅ Randomiser finished, closing modal");
+							if (filterPanel) closeModal(filterPanel);
+							randomHasRun = false; // reset the flag
+						}
+					});
+
+					function applyRandomFilters(minResults = 3, maxTries = 20) {
+						const fieldsData = listInstance.allFieldsData.value;
+						const locationKey = Object.keys(fieldsData).find(
+							(key) => key.toLowerCase() === "location"
+						);
+						if (!locationKey) {
+							console.warn("⚠️ No 'location' field found in allFieldsData.");
+							return;
+						}
+
+						let attempt = 0;
+
+						function tryOnce() {
+							attempt++;
+
+							// --- Always apply a random Location ---
+							const locations = Array.from(fieldsData[locationKey].rawValues || []);
+							const chosenLocation = pickRandom(locations);
+
+							const groups = [
+								{
+									id: "rand-location",
+									conditionsMatch: "and",
+									conditions: [
+										{
+											id: "location-cond",
+											type: "checkbox",
+											fieldKey: locationKey,
+											value: chosenLocation,
+											op: "equal",
+											interacted: true,
+										},
+									],
+								},
+							];
+
+							console.log(`🎲 Random choice: ${locationKey} = ${chosenLocation}`);
+
+							// --- 50% chance to also add a secondary group ---
+							if (Math.random() < 0.5) {
+								const otherGroups = Object.keys(fieldsData).filter((key) => key !== locationKey);
+								const otherGroup = pickRandom(otherGroups);
+								const otherValues = otherGroup
+									? Array.from(fieldsData[otherGroup].rawValues || [])
+									: [];
+								const chosenOtherValue = pickRandom(otherValues);
+
+								if (otherGroup && chosenOtherValue) {
+									groups.push({
+										id: `rand-${otherGroup}`,
+										conditionsMatch: "and",
+										conditions: [
+											{
+												id: `${otherGroup}-cond`,
+												type: "checkbox",
+												fieldKey: otherGroup,
+												value: chosenOtherValue,
+												op: "equal",
+												interacted: true,
+											},
+										],
+									});
+									console.log(`🎲 Random choice: ${otherGroup} = ${chosenOtherValue}`);
+								}
+							}
+
+							// --- Reset, then apply new filters ---
+							resetFilters();
+
+							// Sync UI inputs (so checkboxes reflect chosen filters)
+							groups.forEach((g) => {
+								g.conditions.forEach((c) => {
+									checkFilterInput(c.fieldKey, c.value);
+								});
+							});
+
+							// Apply to FS reactive object
+							listInstance.filters.value = {
+								groupsMatch: "and",
+								groups,
+							};
+							listInstance.triggerHook("filter");
+
+							// Mark that this randomiser run is active
+							randomHasRun = true;
+
+							// --- Delay before count check to allow re-render ---
+							setTimeout(() => {
+								const count = listInstance.items.value.length;
+								if (count < minResults && attempt < maxTries) {
+									console.log(`⚠️ Attempt ${attempt}: ${count} results, retrying…`);
+									tryOnce();
+								} else {
+									console.log(`🎉 Filters applied after ${attempt} attempt(s): ${count} results`);
+									console.log("Applied filters:", listInstance.filters.value);
+
+									const counter = document.querySelector("#resultsCount");
+									if (counter) counter.textContent = count;
+								}
+							}, 200); // 200ms delay
+						}
+
+						tryOnce();
+					}
+
+					// --- Hook up UI buttons ---
+					document.querySelectorAll(".random-filter").forEach((btn) => {
+						btn.addEventListener("click", () => applyRandomFilters(3, 20));
+					});
+
+					// const clearBtn = document.querySelector("[fs-cmsfilter-clear]");
+					// if (clearBtn) {
+					// 	clearBtn.addEventListener("click", () => {
+					// 		console.log("🧹 Manual clear triggered");
+					// 		resetFilters();
+					// 		// ❌ Do not close modal here
+					// 	});
+					// }
+				});
+			},
+		]);
+	}
+
 	hideShowNav();
 	pageProgress();
 	// customCursor();
 	const tickerTape = tickerTapeHover();
 	toggleFilters();
-	// registerFinsweetRefresh(tickerTape && tickerTape.refresh);
 	activityBar();
+	randomSelection();
 
 	window.FinsweetAttributes ||= [];
 	window.FinsweetAttributes.push([
@@ -325,6 +486,11 @@ function main() {
 				});
 				list.addHook("afterRender", (items) => {
 					console.log("After render items:", items.length);
+					tickerTape.refresh();
+					// console.log("List fields data:", list.allFieldsData);
+					// console.log("List items:", list.items);
+					// console.log("List filters:", list.filters);
+					// console.log(list.items.value.length);
 				});
 			});
 		},
