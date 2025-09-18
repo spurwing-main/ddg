@@ -463,7 +463,7 @@ function main() {
 	hideShowNav();
 	pageProgress();
 	// customCursor();
-	const tickerTape = tickerTapeHover();
+	ddg.resources.tickerTape = tickerTapeHover();
 	toggleFilters();
 	activityBar();
 	randomSelection();
@@ -486,7 +486,7 @@ function main() {
 				});
 				list.addHook("afterRender", (items) => {
 					console.log("After render items:", items.length);
-					tickerTape.refresh();
+					ddg.resources.tickerTape.refresh();
 					// console.log("List fields data:", list.allFieldsData);
 					// console.log("List items:", list.items);
 					// console.log("List filters:", list.filters);
