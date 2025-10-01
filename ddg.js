@@ -233,7 +233,9 @@ function main() {
 
 	function toggleFilters() {
 		const searchButtons = document.querySelectorAll(".c-search-btn");
-		const closeButtons = document.querySelectorAll(".filters_close, .filters_submit");
+		const closeButtons = document.querySelectorAll(
+			".c-circle-button[data-action='close'], .filters_submit"
+		);
 
 		if (!filterPanel || !searchButtons.length) return;
 
@@ -460,6 +462,123 @@ function main() {
 		]);
 	}
 
+	function socialShares() {
+		const url = encodeURIComponent(window.location.href);
+		const title = encodeURIComponent(document.title);
+
+		document.querySelectorAll("[data-action='share'][data-custom-share]").forEach((btn) => {
+			btn.addEventListener("click", (e) => {
+				e.preventDefault();
+				const platform = btn.getAttribute("data-custom-share").toLowerCase();
+
+				let shareUrl = "";
+
+				switch (platform) {
+					case "facebook messenger":
+						// Mobile-only (no App ID for desktop)
+						shareUrl = `fb-messenger://share/?link=${url}`;
+						break;
+
+					case "whatsapp":
+						shareUrl = `https://wa.me/?text=${url}`;
+						break;
+
+					case "instagram":
+						// Instagram has no public web-share endpoint.
+						// Use Web Share API if supported, else fallback to profile link.
+						if (navigator.share) {
+							navigator
+								.share({ title: document.title, url: window.location.href })
+								.catch((err) => console.warn("Share cancelled or failed", err));
+							return;
+						} else {
+							alert(
+								"Instagram sharing isn’t supported directly. Opening Instagram profile instead."
+							);
+						}
+						break;
+
+					case "snapchat":
+						shareUrl = `https://www.snapchat.com/scan?attachmentUrl=${url}`;
+						break;
+
+					default:
+						console.warn("Unsupported share target:", platform);
+						return;
+				}
+
+				// Open in a new tab/window
+				if (shareUrl) window.open(shareUrl, "_blank", "noopener,noreferrer");
+			});
+		});
+	}
+
+	function formatStoryNumbers() {
+		document.querySelectorAll("[data-story-number]").forEach((el) => {
+			const raw = parseInt(el.getAttribute("data-story-number"), 10);
+			if (!isNaN(raw) && raw > 0) {
+				const formatted = `#${String(raw).padStart(4, "0")}`;
+				el.textContent = formatted;
+			}
+		});
+	}
+
+	function copyClip() {
+		// Get the base URL (no params, no hash)
+		const cleanUrl = window.location.origin + window.location.pathname;
+
+		// Find all Copyclip elements that should copy the current URL
+		document.querySelectorAll("[fs-copyclip-element='click']").forEach((el) => {
+			el.setAttribute("fs-copyclip-text", cleanUrl);
+		});
+	}
+
+	function duplicateMarqueeContent() {
+		document.querySelectorAll(".marquee_content-wrap").forEach((el) => {
+			const clone = el.cloneNode(true); // deep clone
+			el.parentNode.insertBefore(clone, el.nextSibling); // insert after original
+		});
+	}
+
+	function moreStories() {
+		const parent = document.querySelector(".more-stories_all");
+		if (!parent) return;
+
+		const allWraps = Array.from(parent.querySelectorAll(".more-stories_list-wrap"));
+		const searchBtn = parent.querySelector(".c-circle-btn");
+
+		// filter out empties
+		const nonEmpty = allWraps.filter((wrap) => !wrap.querySelector(".w-dyn-empty"));
+
+		// shuffle helper
+		function shuffle(arr) {
+			for (let i = arr.length - 1; i > 0; i--) {
+				const j = Math.floor(Math.random() * (i + 1));
+				[arr[i], arr[j]] = [arr[j], arr[i]];
+			}
+			return arr;
+		}
+
+		// shuffle and pick first 4
+		const chosen = shuffle(nonEmpty).slice(0, 4);
+
+		// hide all groups by default
+		allWraps.forEach((wrap) => {
+			wrap.style.display = "none";
+		});
+
+		// show chosen ones in random order
+		chosen.forEach((wrap) => {
+			wrap.style.display = "";
+			parent.insertBefore(wrap, searchBtn); // insert before the button
+		});
+
+		// ensure button is always last
+		if (searchBtn) parent.appendChild(searchBtn);
+
+		gsap.to(parent, { autoAlpha: 1, duration: 0.5 });
+	}
+
 	hideShowNav();
 	pageProgress();
 	// customCursor();
@@ -467,6 +586,11 @@ function main() {
 	toggleFilters();
 	activityBar();
 	randomSelection();
+	socialShares();
+	formatStoryNumbers();
+	copyClip();
+	duplicateMarqueeContent();
+	moreStories();
 
 	window.FinsweetAttributes ||= [];
 	window.FinsweetAttributes.push([
