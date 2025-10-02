@@ -1,18 +1,21 @@
 // ddg.js (loaded by your Home inline loader)
-window.ddg ??= {};
-
-// keep your namespaces
+(function () {
+const ddg = (window.ddg ??= {});
 ddg.functions ??= {};
 ddg.helperFunctions ??= {};
 ddg.resources ??= {};
 ddg._initedStories ??= new Set();
+ddg._homeBooted ??= false;
 
 const filterPanel = document.querySelector(".c-home-filters");
 let previousBodyOverflow = "";
 let isScrollLocked = false;
 
 /** Initialize anything global to Home (once) */
-ddg.initPage = function initHome() {
+
+ddg.initHome = function initHome() {
+	if (ddg._homeBooted) return;
+	ddg._homeBooted = true;
 	gsap.registerPlugin(ScrollTrigger);
 	hideShowNav();
 	pageProgress();
@@ -76,7 +79,7 @@ ddg.initStory = function initStory(root = document) {
 /** Entry point called by your inline loader after the script loads */
 ddg.boot = function boot() {
 	// 1) site-wide init
-	ddg.initPage();
+	ddg.initHome();
 
 	// 2) Direct story visits (standalone story page, no modal)
 	ddg.initStory(document);
@@ -240,7 +243,7 @@ function tickerTapeHover() {
 
 		comingSoonItems = Array.from(
 			document.querySelectorAll(
-				'.home-list_item-wrap[data-story-status="coming-soon"] > .home-list_item'
+				'.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item'
 			)
 		);
 
@@ -667,3 +670,4 @@ function moreStories() {
 
 	gsap.to(parent, { autoAlpha: 1, duration: 0.5 });
 }
+})();
