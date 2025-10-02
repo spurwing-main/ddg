@@ -1,6 +1,5 @@
 // ddg.js (loaded by your Home inline loader)
 window.ddg ??= {};
-const ddg = window.ddg;
 
 // keep your namespaces
 ddg.functions ??= {};
