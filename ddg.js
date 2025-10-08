@@ -44,6 +44,7 @@
 
 		return api;
 	};
+
 	const resolve_story_slug = (fragment, fallback = window.location.pathname) =>
 		fragment?.dataset?.storySlug || fallback;
 	const ensure_resource = (store, key, factory) => (store[key] ??= factory());
@@ -192,7 +193,7 @@
 
 			function refresh() {
 				teardown();
-				comingSoonItems = selectAll(
+				comingSoonItems = select_all(
 					'.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item'
 				);
 
@@ -476,7 +477,7 @@
 				listInstance.filters.value = cloneFilters(initialFilters);
 				listInstance.triggerHook("filter");
 
-				selectAll('[fs-cmsfilter-field]').forEach((el) => {
+				select_all('[fs-cmsfilter-field]').forEach((el) => {
 					if (el.type === "checkbox") el.checked = false;
 				});
 
@@ -614,7 +615,7 @@
 	// loads and manages the story overlay modal via htmx
 	function initStoryModal() {
 		const doc = document;
-		const selectors = createSelectorMap({
+		const selectors = create_selector_map({
 			modal: "#story-modal",
 			panel: "#story-modal-panel",
 			content: "#story-modal-content",
@@ -648,9 +649,14 @@
 		if (!modal || !content) return;
 		if (modal.dataset.ddgStoryModalInit === "true") return;
 		modal.dataset.ddgStoryModalInit = "true";
+		const fragmentsCache = ensure_resource(state.resources, "storyFragments", () => new Map());
+		let activeRequest = null;
 
 		let lastFocusEl = null;
 		let currentSlug = null;
+		const initialHomeUrl = isStoryPath(location.pathname)
+			? "/"
+			: `${location.pathname}${location.search}${location.hash}` || "/";
 
 		window.__ddgStoryQueue ||= [];
 
@@ -665,17 +671,6 @@
 		} else {
 			boot();
 		}
-
-		$body.on("htmx:afterSwap.ddgStoryModal", (event) => {
-			if (event.target === content) handleFragmentSwap();
-		});
-
-		$body.on("htmx:beforeRequest.ddgStoryModal", (event) => {
-			const trigger = event.detail?.elt;
-			if (trigger && trigger.dataset.ddgStoryLink === "true" && modal) {
-				modal.dataset.homeFallback = `${location.pathname}${location.search}`;
-			}
-		});
 
 		$modal?.on("click.ddgStoryModal", (event) => {
 			if ($j(event.target).closest(selectors.storyClose.selector).length) {
@@ -694,42 +689,12 @@
 		$window.on("popstate.ddgStoryModal", () => {
 			if (isStoryPath(location.pathname)) {
 				if (!modal.classList.contains("is-open")) openStoryModal();
-				if (currentSlug !== location.pathname) loadStory(location.pathname);
+				if (currentSlug !== location.pathname) loadStory(location.pathname, { pushState: false });
 			} else {
 				if (modal.classList.contains("is-open")) closeStoryModal();
 				applyQueryStateOnHome();
 			}
 		});
-
-		function handleFragmentSwap() {
-			const frag = select(selectors.storyFragment.selector, content);
-			if (!frag) {
-				$loading?.attr("hidden", "hidden");
-				return;
-			}
-
-			const slug = resolve_story_slug(frag, new URL(location.href).pathname);
-			currentSlug = slug;
-			content.dataset.currentSlug = slug;
-
-			if (modal && !modal.dataset.homeFallback) {
-				modal.dataset.homeFallback = "/";
-			}
-
-			ensureStoryInit(content);
-			$loading?.attr("hidden", "hidden");
-
-			if (!modal.classList.contains("is-open")) {
-				openStoryModal();
-			}
-
-			const focusTarget =
-				frag.querySelector("[data-modal-focus]") ||
-				select(selectors.focusTargets.selector, content);
-
-			focusTarget?.focus?.({ preventScroll: true });
-			window.ddg?.functions?.trackStoryView?.(slug, { source: "modal" });
-		}
 
 		function ensureStoryInit(root) {
 			if (window.ddg?.initStory) {
@@ -769,30 +734,153 @@
 			if (restoreFocus) lastFocusEl?.focus?.();
 		}
 
-		function loadStory(path) {
-			if (!path || typeof htmx === "undefined") return;
+		function loadStory(path, { pushState = true } = {}) {
+			if (!path) return Promise.resolve();
 
-			$loading?.removeAttr("hidden");
-			htmx.ajax("GET", path, {
-				target: "#story-modal-content",
-				select: "#ddg-story-fragment",
-				swap: "innerHTML transition:true",
+			const url = new URL(path, location.origin);
+			const requestKey = `${url.pathname}${url.search}`;
+			if (pushState) history.pushState({}, "", requestKey);
+
+			return ensureStoryFragment(requestKey, { prefetch: false }).then((html) => {
+				renderStoryContent(html, url.pathname);
+				return html;
+			});
+		}
+
+		function ensureStoryFragment(path, { prefetch } = {}) {
+			const url = new URL(path, location.origin);
+			const key = `${url.pathname}${url.search}`;
+
+			if (fragmentsCache.has(key)) {
+				return Promise.resolve(fragmentsCache.get(key));
+			}
+
+			if (!prefetch && activeRequest?.abort) {
+				activeRequest.abort();
+			}
+
+			if (!prefetch) {
+				$loading?.removeAttr("hidden");
+			}
+
+			const requestUrl = new URL(url.href, location.origin);
+			if (!requestUrl.searchParams.has("partial")) {
+				requestUrl.searchParams.set("partial", "1");
+			}
+
+			const xhr = $j.ajax({
+				url: requestUrl.toString(),
+				method: "GET",
+				dataType: "html",
+				cache: false,
+			});
+
+			if (!prefetch) activeRequest = xhr;
+
+			return new Promise((resolve, reject) => {
+				xhr
+					.done((response) => {
+						try {
+							const fragmentHtml = extractStoryFragment(response, key);
+							fragmentsCache.set(key, fragmentHtml);
+							resolve(fragmentHtml);
+						} catch (error) {
+							if (!prefetch) handleStoryError(error);
+							reject(error);
+						}
+					})
+					.fail((jqXHR, textStatus) => {
+						const error = new Error(`Unable to load story: ${textStatus || jqXHR.status}`);
+						if (!prefetch) handleStoryError(error);
+						reject(error);
+					})
+					.always(() => {
+						if (!prefetch && activeRequest === xhr) {
+							activeRequest = null;
+						}
+					});
+			});
+		}
+
+		function renderStoryContent(fragmentHtml, slugHint) {
+			if (!$content) return;
+
+			$content.html(fragmentHtml);
+
+			const frag = select(selectors.storyFragment.selector, content);
+			if (!frag) {
+				const error = new Error("Story fragment missing from response.");
+				handleStoryError(error);
+				throw error;
+			}
+
+			const slug = resolve_story_slug(frag, slugHint);
+			currentSlug = slug;
+			content.dataset.currentSlug = slug;
+
+			if (modal && !modal.dataset.homeFallback) {
+				modal.dataset.homeFallback = "/";
+			}
+
+			ensureStoryInit(content);
+			$loading?.attr("hidden", "hidden");
+
+			if (!modal.classList.contains("is-open")) {
+				openStoryModal();
+			}
+
+			const focusTarget =
+				frag.querySelector("[data-modal-focus]") ||
+				select(selectors.focusTargets.selector, content);
+
+			focusTarget?.focus?.({ preventScroll: true });
+			window.ddg?.functions?.trackStoryView?.(slug, { source: "modal" });
+		}
+
+		function extractStoryFragment(response, key) {
+			if (typeof response !== "string") {
+				response = response?.toString?.() ?? "";
+			}
+
+			if (!response.trim()) {
+				throw new Error(`Empty story response for ${key}`);
+			}
+
+			const parser = new DOMParser();
+			const doc = parser.parseFromString(response, "text/html");
+			const fragment = doc.querySelector("#ddg-story-fragment");
+
+			if (!fragment) {
+				throw new Error(`Story fragment missing for ${key}`);
+			}
+
+			return fragment.outerHTML;
+		}
+
+		function handleStoryError(error) {
+			console.error(error);
+			$loading?.attr("hidden", "hidden");
+			if ($content) {
+				$content.html(
+					'<div class="story-modal_error">Sorry, we could not load that story. Please try again.</div>'
+				);
+			}
+			if (!modal.classList.contains("is-open")) openStoryModal();
+		}
+
+		function prefetchStory(path) {
+			if (!path) return;
+			ensureStoryFragment(path, { prefetch: true }).catch((error) => {
+				console.warn("Story prefetch failed", error);
 			});
 		}
 
 		function requestCloseToHome() {
-			const previousPath = location.pathname;
-			history.back();
-
-			window.setTimeout(() => {
-				if (location.pathname === previousPath && isStoryPath(previousPath)) {
-					forceCloseToHome();
-				}
-			}, 150);
+			forceCloseToHome();
 		}
 
 		function forceCloseToHome() {
-			const fallback = modal.dataset.homeFallback || "/";
+			const fallback = modal.dataset.homeFallback || initialHomeUrl || "/";
 			history.replaceState({}, "", fallback);
 
 			delete modal.dataset.homeFallback;
@@ -811,12 +899,17 @@
 					const fallbackParams = new URLSearchParams(url.search);
 					fallbackParams.delete("open");
 					const fallbackQuery = fallbackParams.toString();
-					const fallbackUrl = `${url.pathname}${fallbackQuery ? `?${fallbackQuery}` : ""}`;
+					const fallbackUrl = `${url.pathname}${fallbackQuery ? `?${fallbackQuery}` : ""}${url.hash}`;
 					modal.dataset.homeFallback = fallbackUrl || "/";
 				}
 
-				loadStory(openStoryParam);
-				history.replaceState({}, "", openStoryParam);
+				loadStory(openStoryParam, { pushState: false })
+					.then(() => {
+						history.replaceState({}, "", openStoryParam);
+					})
+					.catch(() => {
+						history.replaceState({}, "", url.pathname);
+					});
 			}
 
 			if (tag) enableTagFilter(tag);
@@ -859,14 +952,52 @@
 				if (!href) return;
 
 				const url = new URL(href, location.origin);
+				// Keep these attributes on each story tile: data-ddg-story-link marks the element for ddg,
+				// data-ddg-story-path stores the absolute path, and data-ddg-story-bound prevents rebinding.
 				link.dataset.ddgStoryLink = "true";
-				link.setAttribute("hx-get", url.pathname);
-				link.setAttribute("hx-select", "#ddg-story-fragment");
-				link.setAttribute("hx-target", "#story-modal-content");
-				link.setAttribute("hx-swap", "innerHTML transition:true");
-				link.setAttribute("hx-push-url", "true");
-				link.setAttribute("hx-trigger", "click, mouseenter[once] delay:150ms");
-				link.setAttribute("hx-indicator", "#story-modal-loading");
+				link.dataset.ddgStoryPath = `${url.pathname}${url.search}`;
+				link.removeAttribute("hx-get");
+				link.removeAttribute("hx-select");
+				link.removeAttribute("hx-target");
+				link.removeAttribute("hx-swap");
+				link.removeAttribute("hx-push-url");
+				link.removeAttribute("hx-trigger");
+				link.removeAttribute("hx-indicator");
+
+				if (link.dataset.ddgStoryBound === "true") return;
+
+				link.addEventListener("click", (event) => {
+					if (
+						event.defaultPrevented ||
+						event.metaKey ||
+						event.ctrlKey ||
+						event.shiftKey ||
+						event.altKey ||
+						event.button !== 0
+					) {
+						return;
+					}
+
+					event.preventDefault();
+					const path = link.dataset.ddgStoryPath;
+					if (!path) return;
+
+					const fallback = buildHomeFallback();
+					if (fallback) modal.dataset.homeFallback = fallback;
+
+					if (!modal.classList.contains("is-open")) openStoryModal();
+					loadStory(path, { pushState: true });
+				});
+
+				link.addEventListener(
+					"mouseenter",
+					() => {
+						prefetchStory(link.dataset.ddgStoryPath);
+					},
+					{ once: true }
+				);
+
+				link.dataset.ddgStoryBound = "true";
 			});
 		}
 
@@ -904,6 +1035,17 @@
 
 		function isStoryPath(pathname) {
 			return /^\/stories\//.test(pathname);
+		}
+
+		function buildHomeFallback() {
+			if (!modal) return null;
+
+			if (!isStoryPath(location.pathname)) {
+				const fallback = `${location.pathname}${location.search}${location.hash}`;
+				return fallback || "/";
+			}
+
+			return modal.dataset.homeFallback || initialHomeUrl || "/";
 		}
 	}
 
