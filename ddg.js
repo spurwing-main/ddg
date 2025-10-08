@@ -1,4 +1,3 @@
-// ddg.js (loaded by your Home inline loader)
 (function () {
 	ddg = window.ddg ??= {};
 	ddg.functions ??= {};
