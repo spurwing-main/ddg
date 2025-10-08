@@ -1,126 +1,87 @@
+// ddg.js — site behaviour hub
 (function () {
+	// namespace and state management
 	ddg = window.ddg ??= {};
-	ddg.functions ??= {};
 	ddg.helperFunctions ??= {};
-	ddg.resources ??= {};
-	ddg._initedStories ??= new Set();
-	ddg._homeBooted ??= false;
+	ddg.features ??= {};
 
-	const filterPanel = document.querySelector(".c-home-filters");
-	let previousBodyOverflow = "";
-	let isScrollLocked = false;
-
-	/** Initialize anything global to Home (once) */
-
-	ddg.initHome = function initHome() {
-		if (ddg._homeBooted) return;
-		ddg._homeBooted = true;
-		gsap.registerPlugin(ScrollTrigger);
-		hideShowNav();
-		pageProgress();
-		// customCursor();
-		ddg.resources.tickerTape = tickerTapeHover();
-		toggleFilters();
-		activityBar();
-		randomSelection();
-		socialShares();
-		formatStoryNumbers();
-		copyClip();
-		duplicateMarqueeContent();
-		moreStories();
-
-		window.FinsweetAttributes ||= [];
-		window.FinsweetAttributes.push([
-			"list",
-			(listInstances) => {
-				console.log("List initialized:", listInstances);
-			},
-		]);
-
-		window.FinsweetAttributes.push([
-			"list",
-			(lists) => {
-				lists.forEach((list) => {
-					list.addHook("filter", (items) => {
-						console.log("Filtering items", items);
-						return items;
-					});
-					list.addHook("afterRender", (items) => {
-						console.log("After render items:", items.length);
-						ddg.resources.tickerTape.refresh();
-						// console.log("List fields data:", list.allFieldsData);
-						// console.log("List items:", list.items);
-						// console.log("List filters:", list.filters);
-						// console.log(list.items.value.length);
-					});
-				});
-			},
-		]);
-	};
-
-	/** Initialize a story fragment, idempotent per slug */
-	ddg.initStory = function initStory(root = document) {
-		const frag = root.querySelector("#ddg-story-fragment");
-		if (!frag) return;
-
-		const slug = frag.dataset.storySlug || location.pathname;
-		if (ddg._initedStories.has(slug)) return; // prevents double-run on back/forward
-		ddg._initedStories.add(slug);
-
-		// --- Story-specific wiring goes here (binds only inside 'frag') ---
-		// e.g.
-		// ddg.functions.bindShareButtons?.(frag);
-		// ddg.functions.initAudio?.(frag);
-		// ddg.functions.initStoryGsap?.(frag);
-		// ------------------------------------------------------------------
-	};
-
-	/** Entry point called by your inline loader after the script loads */
-	ddg.boot = function boot() {
-		// 1) site-wide init
-		ddg.initHome();
-
-		// 2) Direct story visits (standalone story page, no modal)
-		ddg.initStory(document);
-
-		// 3) Drain any fragments that arrived before ddg.js was ready
-		if (Array.isArray(window.__ddgStoryQueue)) {
-			for (const root of window.__ddgStoryQueue) {
-				try {
-					ddg.initStory(root);
-				} catch (e) {
-					console.error(e);
-				}
-			}
-			window.__ddgStoryQueue.length = 0;
-		}
-	};
-
-	function pageProgress() {
-		const progressBar = document.querySelector(".page-progress_bar");
-		if (!progressBar) return;
-		// use GSAP ScrollTrigger
-		gsap.set(progressBar, { scaleX: 0 });
-		gsap.to(progressBar, {
-			scaleX: 1,
-			ease: "none",
-			scrollTrigger: {
-				trigger: document.body,
-				start: "top top",
-				end: "bottom bottom",
-				scrub: 0.75,
-			},
+	const state =
+		(ddg.state ??= {
+			resources: {},
+			storyCache: new Set(),
+			siteBooted: false,
 		});
+
+	const $j = window.$;
+
+	// dom and shared utilities
+	const select = (selector, root = document) => {
+		const $root = root === document ? $j : $j(root);
+		return (root === document ? $j(selector) : $root.find(selector)).get(0) ?? null;
+	};
+
+	const select_all = (selector, root = document) => {
+		const $root = root === document ? $j : $j(root);
+		return (root === document ? $j(selector) : $root.find(selector)).toArray();
+	};
+
+	const debounce = (fn, delay = 200) => {
+		let timer;
+		return (...args) => {
+			clearTimeout(timer);
+			timer = setTimeout(() => fn(...args), delay);
+		};
+	};
+	const create_selector_map = (map, root = document) => {
+		const api = {};
+
+		Object.entries(map).forEach(([key, selector]) => {
+			const getter = () => select(selector, root);
+			getter.all = () => select_all(selector, root);
+			getter.selector = selector;
+			api[key] = getter;
+		});
+
+		return api;
+	};
+	const resolve_story_slug = (fragment, fallback = window.location.pathname) =>
+		fragment?.dataset?.storySlug || fallback;
+	const ensure_resource = (store, key, factory) => (store[key] ??= factory());
+	const register_list_hook = (handler) => {
+		(window.FinsweetAttributes ||= []).push([
+			"list",
+			(lists) => lists.forEach((listInstance) => handler(listInstance)),
+		]);
+	};
+
+	function createLayoutRefresher() {
+		const refresh = debounce(() => {
+			if (typeof ScrollTrigger !== "undefined") {
+				ScrollTrigger.refresh();
+			}
+		}, 100);
+
+		return () => refresh();
 	}
 
-	function hideShowNav() {
-		const nav = document.querySelector(".nav");
+	const refreshLayout = createLayoutRefresher();
+
+	// boots all features in order
+	function initSite() {
+		if (state.siteBooted) return;
+		state.siteBooted = true;
+
+		featureOrder.forEach((feature) => feature());
+	}
+
+	// hides/reveals the header on scroll
+	function initNavigation() {
+		const nav = select(".nav");
 		if (!nav) return;
 
-		const showThreshold = 50; // Always show when within this distance from top
-		const hideThreshold = 100; // Can hide only after passing this
-		const revealBuffer = 50; // Scroll-up distance before revealing
-
+		const showThreshold = 50;
+		const hideThreshold = 100;
+		const revealBuffer = 50;
 		let lastScrollY = window.scrollY;
 		let revealDistance = 0;
 
@@ -136,229 +97,413 @@
 					nav.classList.remove("is-hidden", "is-past-threshold");
 					revealDistance = 0;
 				} else if (delta > 0 && y > hideThreshold) {
-					// scrolling down
 					nav.classList.add("is-hidden", "is-past-threshold");
 					revealDistance = 0;
 				} else if (delta < 0) {
-					// scrolling up
-					revealDistance -= delta; // delta is negative
+					revealDistance -= delta;
 					if (revealDistance >= revealBuffer) {
 						nav.classList.remove("is-hidden");
 						revealDistance = 0;
 					}
 				}
 
-				if (y > hideThreshold) {
-					nav.classList.add("is-past-threshold");
-				} else {
-					nav.classList.remove("is-past-threshold");
-				}
-
+				nav.classList.toggle("is-past-threshold", y > hideThreshold);
 				lastScrollY = y;
 			},
 		});
 	}
 
-	function customCursor() {
-		const cursor = document.querySelector(".c-cursor");
-		const target = document.querySelector(".page-wrap");
-
-		if (!cursor || !target) return;
-
-		// Follow mouse with GSAP
-		window.addEventListener("mousemove", (e) => {
-			gsap.to(cursor, {
-				x: e.clientX,
-				y: e.clientY,
-				duration: 0.2,
-				ease: "power3.out",
-			});
+	// drives the top progress bar
+	function initPageProgress() {
+		const selectors = create_selector_map({
+			bar: ".page-progress_bar",
+			homeList: ".home-list",
+			homeListItem: ".home-list_item",
 		});
 
-		// Show  cursor when hovering target
-		target.addEventListener("mouseenter", () => {
-			document.body.style.cursor = "none";
-			gsap.to(cursor, { autoAlpha: 1, duration: 0.2 });
-		});
+		const progressBar = selectors.bar();
+		if (!progressBar) return;
 
-		target.addEventListener("mouseleave", () => {
-			document.body.style.cursor = "auto";
-			gsap.to(cursor, { autoAlpha: 0, duration: 0.2 });
-		});
-	}
+		gsap.set(progressBar, { scaleX: 0 });
 
-	function tickerTapeHover() {
-		const tapeSpeed = 5000; // pixels per second
-		let splitTextInstances = [];
-		let comingSoonItems = [];
-
-		function handleHoverIn(e) {
-			const item = e.target;
-			const lines = gsap.utils.toArray(item.querySelectorAll(".home-list_split-line"));
-			gsap.killTweensOf(lines);
-			gsap.to(lines, {
-				"--home-list--tape-r": 0,
-				duration: (i, el) => el.offsetWidth / tapeSpeed, // maintain speed across line widths
-				ease: "linear",
-				// stagger: 0.05,
-			});
-		}
-
-		function handleHoverOut(e) {
-			const item = e.target;
-			const lines = gsap.utils.toArray(item.querySelectorAll(".home-list_split-line"));
-			gsap.killTweensOf(lines);
-			gsap.to(lines, {
-				"--home-list--tape-r": "100%",
-				duration: (i, el) => el.offsetWidth / tapeSpeed,
-				ease: "linear",
-				// stagger: 0.05,
-			});
-		}
-
-		function setupSplitLines(item) {
-			return SplitText.create(item, {
-				type: "lines",
-				autoSplit: true,
-				tag: "span",
-				linesClass: "home-list_split-line",
-			});
-		}
-
-		function teardown() {
-			splitTextInstances.forEach((instance) => instance.revert());
-			splitTextInstances = [];
-
-			comingSoonItems.forEach((item) => {
-				item.removeEventListener("mouseenter", handleHoverIn);
-				item.removeEventListener("mouseleave", handleHoverOut);
-			});
-			comingSoonItems = [];
-		}
-
-		function refresh() {
-			console.log("refresh");
-			teardown();
-
-			comingSoonItems = Array.from(
-				document.querySelectorAll(
-					'.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item'
-				)
-			);
-
-			if (!comingSoonItems.length) return;
-
-			comingSoonItems.forEach((item) => {
-				const splitTextInstance = setupSplitLines(item);
-				splitTextInstances.push(splitTextInstance);
-
-				// for coming soon items, need to keep hrefs but disable navigation
-				if (item.tagName === "A") {
-					item.addEventListener("click", (e) => e.preventDefault());
-				}
-
-				item.addEventListener("mouseenter", handleHoverIn);
-				item.addEventListener("mouseleave", handleHoverOut);
-
-				console.log(splitTextInstance);
-			});
-		}
-
-		const debounce = (fn, delay = 200) => {
-			let t;
-			return (...args) => {
-				clearTimeout(t);
-				t = setTimeout(() => fn(...args), delay);
-			};
-		};
-
-		const handleResize = debounce(() => {
-			refresh();
-		});
-
-		window.addEventListener("resize", handleResize);
-		refresh();
-
-		return {
-			refresh,
-			destroy() {
-				window.removeEventListener("resize", handleResize);
-				teardown();
+		gsap.to(progressBar, {
+			scaleX: 1,
+			ease: "none",
+			scrollTrigger: {
+				trigger: document.body,
+				start: "top top",
+				end: "bottom bottom",
+				scrub: 0.75,
 			},
-		};
+		});
+
+		const homeList = selectors.homeList();
+		if (homeList) {
+			const hasListItems = () => selectors.homeListItem.all().length > 0;
+
+			if (!hasListItems()) {
+				const waitObserver = new MutationObserver(() => {
+					if (!hasListItems()) return;
+					waitObserver.disconnect();
+					requestAnimationFrame(refreshLayout);
+				});
+				waitObserver.observe(homeList, { childList: true, subtree: true });
+			} else {
+				refreshLayout();
+			}
+
+			const listObserver = new MutationObserver(() => refreshLayout());
+			listObserver.observe(homeList, { childList: true, subtree: true });
+		}
+
+		register_list_hook((listInstance) => {
+			listInstance.addHook("afterRender", refreshLayout);
+		});
 	}
 
-	const setAriaHidden = (el, isHidden) => {
-		el.setAttribute("aria-hidden", isHidden ? "true" : "false");
-	};
+	// animates “coming soon” list items with a SplitText hover effect
+	function initTicker() {
+		const controller = createTickerController();
+		if (!controller) return;
+		state.resources.tickerTape = controller;
 
-	const lockBodyScroll = () => {
-		if (isScrollLocked) return;
-		previousBodyOverflow = document.body.style.overflow;
-		document.body.style.overflow = "hidden";
-		isScrollLocked = true;
-	};
+		register_list_hook((listInstance) => {
+			listInstance.addHook("afterRender", () => {
+				state.resources.tickerTape?.refresh?.();
+			});
+		});
 
-	const unlockBodyScroll = () => {
-		if (!isScrollLocked) return;
-		if (previousBodyOverflow) {
-			document.body.style.overflow = previousBodyOverflow;
-		} else {
-			document.body.style.removeProperty("overflow");
+		function createTickerController() {
+			const tapeSpeed = 5000;
+			let splitTextInstances = [];
+			let comingSoonItems = [];
+
+			const handleResize = debounce(refresh, 200);
+			$j(window).on("resize.ddgTicker", handleResize);
+			refresh();
+
+			return {
+				refresh,
+				destroy() {
+					$j(window).off("resize.ddgTicker", handleResize);
+					teardown();
+				},
+			};
+
+			function refresh() {
+				teardown();
+				comingSoonItems = selectAll(
+					'.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item'
+				);
+
+				if (!comingSoonItems.length) return;
+
+				comingSoonItems.forEach((item) => {
+					const splitTextInstance = SplitText.create(item, {
+						type: "lines",
+						autoSplit: true,
+						tag: "span",
+						linesClass: "home-list_split-line",
+					});
+					splitTextInstances.push(splitTextInstance);
+
+					const $item = $j(item);
+					$item.on("mouseenter.ddgTicker", handleHoverIn);
+					$item.on("mouseleave.ddgTicker", handleHoverOut);
+					if (item.tagName === "A") $item.on("click.ddgTicker", preventDefault);
+				});
+			}
+
+			function handleHoverIn(event) {
+				animateLines(event.currentTarget, 0);
+			}
+
+			function handleHoverOut(event) {
+				animateLines(event.currentTarget, "100%");
+			}
+
+			function animateLines(item, offset) {
+				const lines = gsap.utils.toArray(item.querySelectorAll(".home-list_split-line"));
+				gsap.killTweensOf(lines);
+				gsap.to(lines, {
+					"--home-list--tape-r": offset,
+					duration: (i, el) => el.offsetWidth / tapeSpeed,
+					ease: "linear",
+				});
+			}
+
+			function preventDefault(event) {
+				event.preventDefault();
+			}
+
+			function teardown() {
+				splitTextInstances.forEach((instance) => instance.revert());
+				splitTextInstances = [];
+
+				comingSoonItems.forEach((item) => {
+					const $item = $j(item);
+					$item.off("mouseenter.ddgTicker", handleHoverIn);
+					$item.off("mouseleave.ddgTicker", handleHoverOut);
+					if (item.tagName === "A") $item.off("click.ddgTicker", preventDefault);
+				});
+				comingSoonItems = [];
+			}
 		}
-		previousBodyOverflow = "";
-		isScrollLocked = false;
-	};
+	}
 
-	const openModal = (el) => {
-		el.classList.add("is-open");
-		el.style.display = "block";
-		setAriaHidden(el, false);
-		lockBodyScroll();
-	};
+	// handles home filters modal and randomiser
+	function initFilters() {
+		const selectors = create_selector_map({
+			panel: ".c-home-filters",
+			searchButtons: ".c-search-btn",
+			closeButtons: ".c-circle-button[data-action='close'], .filters_submit",
+			randomButtons: ".random-filter",
+		});
+		const cloneFilters = (value) => JSON.parse(JSON.stringify(value));
+		const pickRandomValue = (arr) => (arr && arr.length ? arr[Math.floor(Math.random() * arr.length)] : null);
 
-	const closeModal = (el) => {
-		el.classList.remove("is-open");
-		el.style.display = "none";
-		setAriaHidden(el, true);
-		unlockBodyScroll();
-	};
-
-	function toggleFilters() {
-		const searchButtons = document.querySelectorAll(".c-search-btn");
-		const closeButtons = document.querySelectorAll(
-			".c-circle-button[data-action='close'], .filters_submit"
+		const modal = ensure_resource(state.resources, "filterModal", () =>
+			createFilterModalController(selectors.panel.selector)
 		);
+		if (!modal) return;
 
-		if (!filterPanel || !searchButtons.length) return;
+		ensureFilterActionDelegation();
 
-		searchButtons.forEach((button) => {
-			button.addEventListener("click", (event) => {
-				if (button.tagName === "A") {
-					event.preventDefault();
+		bindModalTriggers(modal);
+		attachRandomiser(modal);
+
+		function createFilterModalController(selectorOrElement) {
+			const panel =
+				typeof selectorOrElement === "string"
+					? select(selectorOrElement)
+					: selectorOrElement instanceof Element
+						? selectorOrElement
+						: select(selectorOrElement);
+			if (!panel) return null;
+
+			let previousBodyOverflow = "";
+			let isScrollLocked = false;
+
+			return { open, close, ensureHidden };
+
+			function open() {
+				panel.classList.add("is-open");
+				panel.style.display = "block";
+				setAriaHidden(false);
+				lockBodyScroll();
+			}
+
+			function close() {
+				panel.classList.remove("is-open");
+				panel.style.display = "none";
+				setAriaHidden(true);
+				unlockBodyScroll();
+			}
+
+			function ensureHidden() {
+				if (!panel.classList.contains("is-open")) {
+					panel.style.display = "none";
+					setAriaHidden(true);
 				}
-				openModal(filterPanel);
-			});
-		});
+			}
 
-		closeButtons.forEach((button) => {
-			button.addEventListener("click", (event) => {
-				if (button.tagName === "A" || button.type === "button") {
-					event.preventDefault();
+			function setAriaHidden(isHidden) {
+				panel.setAttribute("aria-hidden", isHidden ? "true" : "false");
+			}
+
+			function lockBodyScroll() {
+				if (isScrollLocked) return;
+				previousBodyOverflow = document.body.style.overflow;
+				document.body.style.overflow = "hidden";
+				isScrollLocked = true;
+			}
+
+			function unlockBodyScroll() {
+				if (!isScrollLocked) return;
+				document.body.style.overflow = previousBodyOverflow || "";
+				previousBodyOverflow = "";
+				isScrollLocked = false;
+			}
+		}
+
+		function ensureFilterActionDelegation() {
+			if (state.resources.__filterActionDelegation) return;
+
+			$j(document.body).on("click.ddgFilters", "[data-filter-action]", (event) => {
+				const $trigger = $j(event.currentTarget);
+				const action = $trigger.data("filterAction");
+				const controller = state.resources.filterModal;
+				if (!controller || !action) return;
+
+				if (action === "open") {
+					if ($trigger.is("a")) event.preventDefault();
+					controller.open();
+				} else if (action === "close") {
+					if ($trigger.is("a") || $trigger.is("button")) {
+						event.preventDefault();
+					}
+					controller.close();
 				}
-				closeModal(filterPanel);
 			});
-		});
 
-		// Ensure panel starts hidden for assistive tech if it isn't open by default
-		if (!filterPanel.classList.contains("is-open")) {
-			setAriaHidden(filterPanel, true);
+			state.resources.__filterActionDelegation = true;
+		}
+
+		function bindModalTriggers({ ensureHidden }) {
+			const searchButtons = selectors.searchButtons.all();
+			const closeButtons = selectors.closeButtons.all();
+
+			if (!searchButtons.length) {
+				ensureHidden();
+				return;
+			}
+
+			searchButtons.forEach((button) => {
+				button.dataset.filterAction = "open";
+			});
+
+			closeButtons.forEach((button) => {
+				button.dataset.filterAction = "close";
+			});
+
+			ensureHidden();
+		}
+
+		function attachRandomiser(filterModal) {
+			const randomButtons = selectors.randomButtons.all();
+			if (!randomButtons.length) return;
+
+			register_list_hook((listInstance) => {
+				const initialFilters = cloneFilters(listInstance.filters.value);
+
+				listInstance.addHook("afterRender", () => {
+					if (!listInstance.__ddgRandomActive) return;
+					filterModal.close();
+					listInstance.__ddgRandomActive = false;
+				});
+
+				$j(randomButtons)
+					.off("click.ddgRandomiser")
+					.on("click.ddgRandomiser", () => runRandom(listInstance, initialFilters));
+			});
+
+			function runRandom(listInstance, initialFilters, minResults = 3, maxTries = 20, delay = 200) {
+				const fieldsData = listInstance.allFieldsData.value;
+				const locationKey = Object.keys(fieldsData).find((key) => key.toLowerCase() === "location");
+				if (!locationKey) {
+					console.warn("⚠️ No 'location' field found in allFieldsData.");
+					return;
+				}
+
+				if (listInstance.__ddgRandomInterval) {
+					clearInterval(listInstance.__ddgRandomInterval);
+					listInstance.__ddgRandomInterval = null;
+				}
+
+				const applySelection = () => {
+					const groups = buildGroups(fieldsData, locationKey);
+					if (!groups.length) return false;
+					applyGroups(listInstance, initialFilters, groups);
+					listInstance.__ddgRandomActive = true;
+					return true;
+				};
+
+				if (!applySelection()) return;
+
+				let attempt = 0;
+				const updateCounter = () => {
+					const counter = select("#resultsCount");
+					if (counter) counter.textContent = listInstance.items.value.length;
+				};
+				const stopInterval = () => {
+					if (listInstance.__ddgRandomInterval) {
+						clearInterval(listInstance.__ddgRandomInterval);
+						listInstance.__ddgRandomInterval = null;
+					}
+					updateCounter();
+				};
+
+				listInstance.__ddgRandomInterval = setInterval(() => {
+					const count = listInstance.items.value.length;
+					if (count >= minResults || attempt >= maxTries) {
+						stopInterval();
+						return;
+					}
+
+					attempt += 1;
+					if (!applySelection()) {
+						stopInterval();
+					}
+				}, delay);
+			}
+
+			function buildGroups(fieldsData, locationKey) {
+				const chosenLocation = pickRandomValue(Array.from(fieldsData[locationKey].rawValues || []));
+				if (!chosenLocation) {
+					console.warn("⚠️ Unable to select a random location.");
+					return [];
+				}
+
+				const groups = [createGroup("rand-location", locationKey, chosenLocation)];
+
+				if (Math.random() < 0.5) {
+					const otherKey = pickRandomValue(Object.keys(fieldsData).filter((key) => key !== locationKey));
+					const otherValue = pickRandomValue(Array.from(fieldsData[otherKey]?.rawValues || []));
+					if (otherKey && otherValue) groups.push(createGroup(`rand-${otherKey}`, otherKey, otherValue));
+				}
+
+				return groups;
+			}
+
+			function createGroup(id, fieldKey, value) {
+				return {
+					id,
+					conditionsMatch: "and",
+					conditions: [
+						{
+							id: `${fieldKey}-cond`,
+							type: "checkbox",
+							fieldKey,
+							value,
+							op: "equal",
+							interacted: true,
+						},
+					],
+				};
+			}
+
+			function applyGroups(listInstance, initialFilters, groups) {
+				listInstance.filters.value = cloneFilters(initialFilters);
+				listInstance.triggerHook("filter");
+
+				selectAll('[fs-cmsfilter-field]').forEach((el) => {
+					if (el.type === "checkbox") el.checked = false;
+				});
+
+				groups.forEach(({ conditions }) => {
+					conditions.forEach(({ fieldKey, value }) => {
+						const input = select(`[fs-list-field="${fieldKey}"][fs-list-value="${value}"]`);
+						if (input) {
+							input.checked = true;
+							input.dispatchEvent(new Event("change", { bubbles: true }));
+						} else {
+							console.warn(`⚠️ Could not find input for ${fieldKey} = ${value}`);
+						}
+					});
+				});
+
+				listInstance.filters.value = {
+					groupsMatch: "and",
+					groups,
+				};
+				listInstance.triggerHook("filter");
+			}
 		}
 	}
 
-	function activityBar() {
-		// set up splide instance on .activity.splide element, looping with autoscroll extension
-		const activityEl = document.querySelector(".activity.splide");
+	// mounts the splide carousel for the activity bar
+	function initActivityBar() {
+		const activityEl = select(".activity.splide");
 		if (!activityEl) return;
 
 		const splide = new Splide(activityEl, {
@@ -380,295 +525,435 @@
 		splide.mount(window.splide.Extensions);
 	}
 
-	function randomSelection() {
-		let randomHasRun = false;
+	// handles delegated sharing buttons
+	function initSocialShares() {
+		if (state.resources.__shareDelegation) return;
 
-		const filterPanel = document.querySelector(".c-home-filters");
+		const shareHandlers = new Map([
+			["facebook messenger", (url) => `fb-messenger://share/?link=${url}`],
+			["whatsapp", (url) => `https://wa.me/?text=${url}`],
+			["snapchat", (url) => `https://www.snapchat.com/scan?attachmentUrl=${url}`],
+		]);
 
-		// Helper: tick the correct checkbox in the DOM and dispatch change
-		function checkFilterInput(fieldKey, value) {
-			const selector = `[fs-list-field="${fieldKey}"][fs-list-value="${value}"]`;
-			const input = document.querySelector(selector);
-			if (input) {
-				input.checked = true;
-				input.dispatchEvent(new Event("change", { bubbles: true }));
-				console.log(`☑️ UI synced: ${fieldKey} = ${value}`);
+		const handleInstagram = () => {
+			if (navigator.share) {
+				navigator
+					.share({ title: document.title, url: window.location.href })
+					.catch((err) => console.warn("Share cancelled or failed", err));
+				return;
+			}
+			alert("Instagram sharing isn’t supported directly. Opening Instagram profile instead.");
+		};
+
+		$j(document.body).on("click.ddgShare", '[data-action="share"][data-custom-share]', (event) => {
+			const $trigger = $j(event.currentTarget);
+
+			event.preventDefault();
+			const platform = $trigger.data("customShare")?.toString().trim().toLowerCase();
+			if (!platform) return;
+
+			if (platform === "instagram") {
+				handleInstagram();
+				return;
+			}
+
+			const handler = shareHandlers.get(platform);
+			if (!handler) {
+				console.warn("Unsupported share target:", platform);
+				return;
+			}
+
+			const shareUrl = handler(encodeURIComponent(window.location.href));
+			if (shareUrl) window.open(shareUrl, "_blank", "noopener,noreferrer");
+		});
+
+		state.resources.__shareDelegation = true;
+	}
+
+	// queues fragment hooks for story content
+	function initStory() {
+		const storyApi = ensure_resource(state.resources, "story", createStoryModule);
+		storyApi.process(document);
+
+		function createStoryModule() {
+			const processed = state.storyCache;
+			const queue = [];
+			let scheduled = false;
+			const resolved = Promise.resolve();
+			const schedule =
+				typeof queueMicrotask === "function" ? queueMicrotask : (cb) => resolved.then(cb);
+
+			return { process };
+
+			function process(root) {
+				if (!root) return;
+				queue.push(root);
+				if (scheduled) return;
+				scheduled = true;
+				schedule(flushQueue);
+			}
+
+			function flushQueue() {
+				scheduled = false;
+				while (queue.length) handleFragment(queue.shift());
+			}
+
+			function handleFragment(root) {
+				const frag = select("#ddg-story-fragment", root);
+				if (!frag) return;
+
+				const slug = resolve_story_slug(frag);
+				if (processed.has(slug)) return;
+				processed.add(slug);
+
+				// story-specific hooks can be initialised here
+			}
+		}
+	}
+
+	// loads and manages the story overlay modal via htmx
+	function initStoryModal() {
+		const doc = document;
+		const selectors = createSelectorMap({
+			modal: "#story-modal",
+			panel: "#story-modal-panel",
+			content: "#story-modal-content",
+			loadingIndicator: "#story-modal-loading",
+			main: "main",
+			filterPanel: ".c-home-filters",
+			storyFragment: "#ddg-story-fragment",
+			storyLinks: '.home-list_item[href^="/stories/"]',
+			storyListRoot: ".home-list",
+			storyClose: "[data-ddg-close]",
+			searchOpen: "[data-search-open]",
+			searchClose: "[data-search-close]",
+			focusTargets: "h1, h2, [tabindex], a, button, input, select, textarea",
+		});
+		const tagSelector = (tag) => `input[fs-list-field="tags"][fs-list-value="${CSS.escape(tag)}"]`;
+
+		const modal = selectors.modal();
+		const panel = selectors.panel();
+		const content = selectors.content();
+		const loadingIndicator = selectors.loadingIndicator();
+		const mainEl = selectors.main();
+		const filterPanel = selectors.filterPanel();
+		const $filterPanel = filterPanel ? $j(filterPanel) : null;
+		const storyList = selectors.storyListRoot();
+		const $modal = modal ? $j(modal) : null;
+		const $content = content ? $j(content) : null;
+		const $body = $j(document.body);
+		const $window = $j(window);
+		const $loading = loadingIndicator ? $j(loadingIndicator) : null;
+
+		if (!modal || !content) return;
+		if (modal.dataset.ddgStoryModalInit === "true") return;
+		modal.dataset.ddgStoryModalInit = "true";
+
+		let lastFocusEl = null;
+		let currentSlug = null;
+
+		window.__ddgStoryQueue ||= [];
+
+		const boot = () => {
+			setupStoryLinks();
+			applyQueryStateOnHome();
+			startStoryLinkObserver();
+		};
+
+		if (doc.readyState === "loading") {
+			doc.addEventListener("DOMContentLoaded", boot, { once: true });
+		} else {
+			boot();
+		}
+
+		$body.on("htmx:afterSwap.ddgStoryModal", (event) => {
+			if (event.target === content) handleFragmentSwap();
+		});
+
+		$body.on("htmx:beforeRequest.ddgStoryModal", (event) => {
+			const trigger = event.detail?.elt;
+			if (trigger && trigger.dataset.ddgStoryLink === "true" && modal) {
+				modal.dataset.homeFallback = `${location.pathname}${location.search}`;
+			}
+		});
+
+		$modal?.on("click.ddgStoryModal", (event) => {
+			if ($j(event.target).closest(selectors.storyClose.selector).length) {
+				event.preventDefault();
+				requestCloseToHome();
+			}
+		});
+
+		$window.on("keydown.ddgStoryModal", (event) => {
+			if (event.key === "Escape" && modal.classList.contains("is-open")) {
+				event.preventDefault();
+				requestCloseToHome();
+			}
+		});
+
+		$window.on("popstate.ddgStoryModal", () => {
+			if (isStoryPath(location.pathname)) {
+				if (!modal.classList.contains("is-open")) openStoryModal();
+				if (currentSlug !== location.pathname) loadStory(location.pathname);
 			} else {
-				console.warn(`⚠️ Could not find input for ${fieldKey} = ${value}`);
+				if (modal.classList.contains("is-open")) closeStoryModal();
+				applyQueryStateOnHome();
+			}
+		});
+
+		function handleFragmentSwap() {
+			const frag = select(selectors.storyFragment.selector, content);
+			if (!frag) {
+				$loading?.attr("hidden", "hidden");
+				return;
+			}
+
+			const slug = resolve_story_slug(frag, new URL(location.href).pathname);
+			currentSlug = slug;
+			content.dataset.currentSlug = slug;
+
+			if (modal && !modal.dataset.homeFallback) {
+				modal.dataset.homeFallback = "/";
+			}
+
+			ensureStoryInit(content);
+			$loading?.attr("hidden", "hidden");
+
+			if (!modal.classList.contains("is-open")) {
+				openStoryModal();
+			}
+
+			const focusTarget =
+				frag.querySelector("[data-modal-focus]") ||
+				select(selectors.focusTargets.selector, content);
+
+			focusTarget?.focus?.({ preventScroll: true });
+			window.ddg?.functions?.trackStoryView?.(slug, { source: "modal" });
+		}
+
+		function ensureStoryInit(root) {
+			if (window.ddg?.initStory) {
+				window.ddg.initStory(root);
+			} else {
+				window.__ddgStoryQueue.push(root);
 			}
 		}
 
-		window.FinsweetAttributes ||= [];
-		window.FinsweetAttributes.push([
-			"list",
-			(lists) => {
-				lists.forEach((listInstance) => {
-					// --- Helpers ---
-					function pickRandom(arr) {
-						if (!arr || arr.length === 0) return null;
-						return arr[Math.floor(Math.random() * arr.length)];
-					}
+		function openStoryModal() {
+			if (modal.classList.contains("is-open")) return;
 
-					// Store the initial FS filter object so we can truly reset
-					const initialFilters = JSON.parse(JSON.stringify(listInstance.filters.value));
-					console.log("Initial filters:", initialFilters);
+			lastFocusEl = doc.activeElement instanceof HTMLElement ? doc.activeElement : null;
+			modal.style.display = "block";
+			modal.setAttribute("aria-hidden", "false");
+			doc.documentElement.classList.add("story-modal-open");
+			modal.classList.add("is-open");
 
-					function resetFilters() {
-						listInstance.filters.value = JSON.parse(JSON.stringify(initialFilters));
-						listInstance.triggerHook("filter");
+			mainEl?.setAttribute("inert", "");
+			requestAnimationFrame(() => panel?.focus?.({ preventScroll: true }));
+		}
 
-						// Also uncheck any checkboxes
-						document.querySelectorAll("[fs-cmsfilter-field]").forEach((el) => {
-							if (el.type === "checkbox") el.checked = false;
-						});
-					}
+		function closeStoryModal({ restoreFocus = true } = {}) {
+			if (!modal.classList.contains("is-open")) return;
 
-					// Global afterRender hook — only closes modal if randomHasRun = true
-					listInstance.addHook("afterRender", () => {
-						if (randomHasRun) {
-							console.log("✅ Randomiser finished, closing modal");
-							if (filterPanel) closeModal(filterPanel);
-							randomHasRun = false; // reset the flag
-						}
-					});
+			modal.classList.remove("is-open");
+			modal.style.display = "none";
 
-					function applyRandomFilters(minResults = 3, maxTries = 20) {
-						const fieldsData = listInstance.allFieldsData.value;
-						const locationKey = Object.keys(fieldsData).find(
-							(key) => key.toLowerCase() === "location"
-						);
-						if (!locationKey) {
-							console.warn("⚠️ No 'location' field found in allFieldsData.");
-							return;
-						}
+			modal.setAttribute("aria-hidden", "true");
+			doc.documentElement.classList.remove("story-modal-open");
+			mainEl?.removeAttribute("inert");
+			$content?.empty();
+			$loading?.attr("hidden", "hidden");
+			delete content.dataset.currentSlug;
+			currentSlug = null;
 
-						let attempt = 0;
+			if (restoreFocus) lastFocusEl?.focus?.();
+		}
 
-						function tryOnce() {
-							attempt++;
+		function loadStory(path) {
+			if (!path || typeof htmx === "undefined") return;
 
-							// --- Always apply a random Location ---
-							const locations = Array.from(fieldsData[locationKey].rawValues || []);
-							const chosenLocation = pickRandom(locations);
+			$loading?.removeAttr("hidden");
+			htmx.ajax("GET", path, {
+				target: "#story-modal-content",
+				select: "#ddg-story-fragment",
+				swap: "innerHTML transition:true",
+			});
+		}
 
-							const groups = [
-								{
-									id: "rand-location",
-									conditionsMatch: "and",
-									conditions: [
-										{
-											id: "location-cond",
-											type: "checkbox",
-											fieldKey: locationKey,
-											value: chosenLocation,
-											op: "equal",
-											interacted: true,
-										},
-									],
-								},
-							];
+		function requestCloseToHome() {
+			const previousPath = location.pathname;
+			history.back();
 
-							console.log(`🎲 Random choice: ${locationKey} = ${chosenLocation}`);
+			window.setTimeout(() => {
+				if (location.pathname === previousPath && isStoryPath(previousPath)) {
+					forceCloseToHome();
+				}
+			}, 150);
+		}
 
-							// --- 50% chance to also add a secondary group ---
-							if (Math.random() < 0.5) {
-								const otherGroups = Object.keys(fieldsData).filter((key) => key !== locationKey);
-								const otherGroup = pickRandom(otherGroups);
-								const otherValues = otherGroup
-									? Array.from(fieldsData[otherGroup].rawValues || [])
-									: [];
-								const chosenOtherValue = pickRandom(otherValues);
+		function forceCloseToHome() {
+			const fallback = modal.dataset.homeFallback || "/";
+			history.replaceState({}, "", fallback);
 
-								if (otherGroup && chosenOtherValue) {
-									groups.push({
-										id: `rand-${otherGroup}`,
-										conditionsMatch: "and",
-										conditions: [
-											{
-												id: `${otherGroup}-cond`,
-												type: "checkbox",
-												fieldKey: otherGroup,
-												value: chosenOtherValue,
-												op: "equal",
-												interacted: true,
-											},
-										],
-									});
-									console.log(`🎲 Random choice: ${otherGroup} = ${chosenOtherValue}`);
-								}
-							}
+			delete modal.dataset.homeFallback;
+			closeStoryModal();
+			applyQueryStateOnHome();
+		}
 
-							// --- Reset, then apply new filters ---
-							resetFilters();
+		function applyQueryStateOnHome() {
+			const url = new URL(location.href);
+			const openStoryParam = url.searchParams.get("open");
+			const tag = url.searchParams.get("tag");
+			const openSearch = url.searchParams.get("search") === "1";
 
-							// Sync UI inputs (so checkboxes reflect chosen filters)
-							groups.forEach((g) => {
-								g.conditions.forEach((c) => {
-									checkFilterInput(c.fieldKey, c.value);
-								});
-							});
-
-							// Apply to FS reactive object
-							listInstance.filters.value = {
-								groupsMatch: "and",
-								groups,
-							};
-							listInstance.triggerHook("filter");
-
-							// Mark that this randomiser run is active
-							randomHasRun = true;
-
-							// --- Delay before count check to allow re-render ---
-							setTimeout(() => {
-								const count = listInstance.items.value.length;
-								if (count < minResults && attempt < maxTries) {
-									console.log(`⚠️ Attempt ${attempt}: ${count} results, retrying…`);
-									tryOnce();
-								} else {
-									console.log(`🎉 Filters applied after ${attempt} attempt(s): ${count} results`);
-									console.log("Applied filters:", listInstance.filters.value);
-
-									const counter = document.querySelector("#resultsCount");
-									if (counter) counter.textContent = count;
-								}
-							}, 200); // 200ms delay
-						}
-
-						tryOnce();
-					}
-
-					// --- Hook up UI buttons ---
-					document.querySelectorAll(".random-filter").forEach((btn) => {
-						btn.addEventListener("click", () => applyRandomFilters(3, 20));
-					});
-
-					// const clearBtn = document.querySelector("[fs-cmsfilter-clear]");
-					// if (clearBtn) {
-					// 	clearBtn.addEventListener("click", () => {
-					// 		console.log("🧹 Manual clear triggered");
-					// 		resetFilters();
-					// 		// ❌ Do not close modal here
-					// 	});
-					// }
-				});
-			},
-		]);
-	}
-
-	function socialShares() {
-		const url = encodeURIComponent(window.location.href);
-		const title = encodeURIComponent(document.title);
-
-		document.querySelectorAll("[data-action='share'][data-custom-share]").forEach((btn) => {
-			btn.addEventListener("click", (e) => {
-				e.preventDefault();
-				const platform = btn.getAttribute("data-custom-share").toLowerCase();
-
-				let shareUrl = "";
-
-				switch (platform) {
-					case "facebook messenger":
-						// Mobile-only (no App ID for desktop)
-						shareUrl = `fb-messenger://share/?link=${url}`;
-						break;
-
-					case "whatsapp":
-						shareUrl = `https://wa.me/?text=${url}`;
-						break;
-
-					case "instagram":
-						// Instagram has no public web-share endpoint.
-						// Use Web Share API if supported, else fallback to profile link.
-						if (navigator.share) {
-							navigator
-								.share({ title: document.title, url: window.location.href })
-								.catch((err) => console.warn("Share cancelled or failed", err));
-							return;
-						} else {
-							alert(
-								"Instagram sharing isn’t supported directly. Opening Instagram profile instead."
-							);
-						}
-						break;
-
-					case "snapchat":
-						shareUrl = `https://www.snapchat.com/scan?attachmentUrl=${url}`;
-						break;
-
-					default:
-						console.warn("Unsupported share target:", platform);
-						return;
+			if (openStoryParam && !isStoryPath(location.pathname)) {
+				if (modal) {
+					const fallbackParams = new URLSearchParams(url.search);
+					fallbackParams.delete("open");
+					const fallbackQuery = fallbackParams.toString();
+					const fallbackUrl = `${url.pathname}${fallbackQuery ? `?${fallbackQuery}` : ""}`;
+					modal.dataset.homeFallback = fallbackUrl || "/";
 				}
 
-				// Open in a new tab/window
-				if (shareUrl) window.open(shareUrl, "_blank", "noopener,noreferrer");
-			});
-		});
-	}
-
-	function formatStoryNumbers() {
-		document.querySelectorAll("[data-story-number]").forEach((el) => {
-			const raw = parseInt(el.getAttribute("data-story-number"), 10);
-			if (!isNaN(raw) && raw > 0) {
-				const formatted = `#${String(raw).padStart(4, "0")}`;
-				el.textContent = formatted;
+				loadStory(openStoryParam);
+				history.replaceState({}, "", openStoryParam);
 			}
-		});
-	}
 
-	function copyClip() {
-		// Get the base URL (no params, no hash)
-		const cleanUrl = window.location.origin + window.location.pathname;
-
-		// Find all Copyclip elements that should copy the current URL
-		document.querySelectorAll("[fs-copyclip-element='click']").forEach((el) => {
-			el.setAttribute("fs-copyclip-text", cleanUrl);
-		});
-	}
-
-	function duplicateMarqueeContent() {
-		document.querySelectorAll(".marquee_content-wrap").forEach((el) => {
-			const clone = el.cloneNode(true); // deep clone
-			el.parentNode.insertBefore(clone, el.nextSibling); // insert after original
-		});
-	}
-
-	function moreStories() {
-		const parent = document.querySelector(".more-stories_all");
-		if (!parent) return;
-
-		const allWraps = Array.from(parent.querySelectorAll(".more-stories_list-wrap"));
-		const searchBtn = parent.querySelector(".c-circle-btn");
-
-		// filter out empties
-		const nonEmpty = allWraps.filter((wrap) => !wrap.querySelector(".w-dyn-empty"));
-
-		// shuffle helper
-		function shuffle(arr) {
-			for (let i = arr.length - 1; i > 0; i--) {
-				const j = Math.floor(Math.random() * (i + 1));
-				[arr[i], arr[j]] = [arr[j], arr[i]];
+			if (tag) enableTagFilter(tag);
+			if (openSearch) {
+				openSearchModal();
+			} else {
+				closeSearchModal();
 			}
-			return arr;
 		}
 
-		// shuffle and pick first 4
-		const chosen = shuffle(nonEmpty).slice(0, 4);
+		function enableTagFilter(tag) {
+			if (!tag) return;
 
-		// hide all groups by default
-		allWraps.forEach((wrap) => {
-			wrap.style.display = "none";
-		});
+			const selector = tagSelector(tag);
+			const input = select(selector, doc);
 
-		// show chosen ones in random order
-		chosen.forEach((wrap) => {
-			wrap.style.display = "";
-			parent.insertBefore(wrap, searchBtn); // insert before the button
-		});
+			if (input && !input.checked) input.click();
+		}
 
-		// ensure button is always last
-		if (searchBtn) parent.appendChild(searchBtn);
+		function openSearchModal() {
+			if (!$filterPanel) return;
 
-		gsap.to(parent, { autoAlpha: 1, duration: 0.5 });
+			if (!$filterPanel.hasClass("is-open")) {
+				const opener = selectors.searchOpen();
+				opener && $j(opener).trigger("click");
+			}
+		}
+
+		function closeSearchModal() {
+			if (!$filterPanel) return;
+
+			if ($filterPanel.hasClass("is-open")) {
+				$j(selectors.searchClose.selector).trigger("click");
+			}
+		}
+
+		function setupStoryLinks() {
+			selectors.storyLinks.all().forEach((link) => {
+				const href = link.getAttribute("href");
+				if (!href) return;
+
+				const url = new URL(href, location.origin);
+				link.dataset.ddgStoryLink = "true";
+				link.setAttribute("hx-get", url.pathname);
+				link.setAttribute("hx-select", "#ddg-story-fragment");
+				link.setAttribute("hx-target", "#story-modal-content");
+				link.setAttribute("hx-swap", "innerHTML transition:true");
+				link.setAttribute("hx-push-url", "true");
+				link.setAttribute("hx-trigger", "click, mouseenter[once] delay:150ms");
+				link.setAttribute("hx-indicator", "#story-modal-loading");
+			});
+		}
+
+		function startStoryLinkObserver() {
+			const observerTargets = [storyList, mainEl, doc.body].filter(Boolean);
+			if (!observerTargets.length) return;
+
+			const observer = new MutationObserver((mutations) => {
+				let needsSetup = false;
+
+				for (const mutation of mutations) {
+					if (mutation.type !== "childList") continue;
+
+					for (const node of mutation.addedNodes) {
+						if (!(node instanceof HTMLElement)) continue;
+						if (
+							node.matches(selectors.storyLinks.selector) ||
+							node.querySelector(selectors.storyLinks.selector)
+						) {
+							needsSetup = true;
+							break;
+						}
+					}
+
+					if (needsSetup) break;
+				}
+
+				if (needsSetup) setupStoryLinks();
+			});
+
+			observerTargets.forEach((target) =>
+				observer.observe(target, { childList: true, subtree: true })
+			);
+		}
+
+		function isStoryPath(pathname) {
+			return /^\/stories\//.test(pathname);
+		}
 	}
+
+	// a smooth custom cursor that follows the mouse
+	function initCustomCursor() {
+		const cursor = select(".c-cursor");
+		const target = select(".page-wrap");
+		if (!cursor || !target) return;
+
+		const $target = $j(target);
+		const $body = $j(document.body);
+		const $win = $j(window);
+
+		const quickConfig = { duration: 0.2, ease: "power3.out" };
+		const moveX =
+			gsap.quickTo?.(cursor, "x", quickConfig) ||
+			((value) => gsap.to(cursor, { x: value, ...quickConfig }));
+		const moveY =
+			gsap.quickTo?.(cursor, "y", quickConfig) ||
+			((value) => gsap.to(cursor, { y: value, ...quickConfig }));
+
+		$win.on("mousemove.ddgCursor", (e) => {
+			moveX(e.clientX);
+			moveY(e.clientY);
+		});
+
+		$target.on("mouseenter.ddgCursor", () => {
+			$body.css("cursor", "none");
+			gsap.to(cursor, { autoAlpha: 1, duration: 0.2 });
+		});
+
+		$target.on("mouseleave.ddgCursor", () => {
+			$body.css("cursor", "auto");
+			gsap.to(cursor, { autoAlpha: 0, duration: 0.2 });
+		});
+	}
+
+	// boot sequence
+	const featureOrder = [
+		initNavigation,
+		initPageProgress,
+		initTicker,
+		initFilters,
+		initActivityBar,
+		initSocialShares,
+		initStory,
+		initStoryModal,
+		initCustomCursor,
+	];
+
+	ddg.helperFunctions.refreshLayout ??= refreshLayout;
+	ddg.boot = initSite;
 })();
