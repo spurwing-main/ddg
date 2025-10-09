@@ -254,6 +254,8 @@
 	// -----------------------------------------------------------------------------
 
 	const initCustomCursor = () => {
+		// Disable custom cursor on mobile devices
+		if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) return;
 		const $cursor = $j('.c-cursor');
 		const cursorEl = $cursor[0];
 		if (!cursorEl) return;
@@ -262,6 +264,40 @@
 		if (!targetEl) return;
 		// Ensure cursor is always visible and has fixed positioning
 		gsap.set(cursorEl, { autoAlpha: 1, position: 'fixed', top: 0, left: 0, pointerEvents: 'none' });
+
+		// --- Hide/reveal on scroll and window leave/enter ---
+		let scrollTimeout;
+		let isHidden = false;
+
+		const fadeOutCursor = () => {
+			if (isHidden) return;
+			gsap.to(cursorEl, { autoAlpha: 0, duration: 0.3 });
+			isHidden = true;
+		};
+
+		const fadeInCursor = () => {
+			if (!isHidden) return;
+			gsap.to(cursorEl, { autoAlpha: 1, duration: 0.3 });
+			isHidden = false;
+		};
+
+		// Improved scroll handler to fix fade glitch
+		let isScrolling = false;
+		$win.on('wheel.ddgCursor', () => {
+			if (!isScrolling) {
+				fadeOutCursor();
+				isScrolling = true;
+			}
+			clearTimeout(scrollTimeout);
+			scrollTimeout = setTimeout(() => {
+				isScrolling = false;
+				setTimeout(fadeInCursor, 1000);
+			}, 250);
+		});
+
+		// Hide when cursor leaves window, show when returns
+		$win.on('mouseleave.ddgCursor', fadeOutCursor);
+		$win.on('mouseenter.ddgCursor', fadeInCursor);
 
 		const quickConfig = { duration: 0.2, ease: 'power3.out' };
 
@@ -275,9 +311,9 @@
 
 		// Align the custom cursor so its tip (top area) matches the pointer tip
 		$win.on('mousemove.ddgCursor', event => {
-			const rect = cursorEl.getBoundingClientRect();
 			moveX(event.pageX);
 			moveY(event.pageY);
+			// No fade in/out on mousemove.
 		});
 	};
 
@@ -693,6 +729,15 @@
 				resetLightboxPosition();
 			}
 		});
+
+		window.addEventListener(
+			'resize',
+			debounce(() => {
+				if ($lightbox.hasClass('is-open')) {
+					syncLightboxPosition(window.scrollY);
+				}
+			}, 100)
+		);
 
 		modalLog('init:complete');
 	};
