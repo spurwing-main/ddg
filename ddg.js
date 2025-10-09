@@ -6,6 +6,26 @@
 		siteBooted: false
 	});
 
+	// Debug helpers
+	const debug = (ddg.debug ??= {});
+
+	const flagAccessor = (flagKey, defaultValue = false) => {
+		if (typeof debug[flagKey] !== 'boolean') {
+			debug[flagKey] = defaultValue;
+		}
+		return () => Boolean(debug[flagKey]);
+	};
+
+	const createLogger = (namespace, flagKey, defaultValue = false) => {
+		const isEnabled = flagAccessor(flagKey, defaultValue);
+		return (...args) => {
+			if (!isEnabled()) return;
+			if (typeof console?.log === 'function') {
+				console.log(`[ddg:${namespace}]`, ...args);
+			}
+		};
+	};
+
 	// -----------------------------------------------------------------------------
 	// Utilities
 	// -----------------------------------------------------------------------------
@@ -34,16 +54,12 @@
 
 		initNavigation();
 		initPageProgress();
-		initTicker();
+		initComingSoon();
 		initActivityBar();
 		initCustomCursor();
 		initShare();
 		initAjaxModal();
 		initFilters();
-		// Cleanup for event handlers and ScrollTriggers
-		window.addEventListener('beforeunload', () => {
-			ScrollTrigger.getAll().forEach(trigger => trigger.kill());
-		});
 	};
 
 	// -----------------------------------------------------------------------------
@@ -51,8 +67,7 @@
 	// -----------------------------------------------------------------------------
 
 	const initNavigation = () => {
-		const $nav = $j('.nav');
-		const navEl = $nav[0];
+		const navEl = $j('.nav')[0];
 		if (!navEl) return;
 
 		const showThreshold = 50;
@@ -111,10 +126,12 @@
 			}
 		});
 
-		const homeListEl = $j('.home-list')[0];
+		const $homeList = $j('.home-list');
+		const homeListEl = $homeList[0];
 		if (!homeListEl) return;
 
-		const hasListItems = () => $j('.home-list_item').length > 0;
+		const homeListItemSelector = '.home-list_item';
+		const hasListItems = () => $j(homeListItemSelector).length > 0;
 
 		const debouncedRefresh = debounce(() => ScrollTrigger.refresh(), 100);
 
@@ -135,89 +152,74 @@
 		}
 	};
 
-	// -----------------------------------------------------------------------------
-	// Ticker: SplitText hover effect on "coming soon" list items
-	// -----------------------------------------------------------------------------
+	function initComingSoon() {
+		const wrapperEl = document.querySelector('.home-list_list');
+		if (!wrapperEl) return;
 
-	const initTicker = () => {
-		const createTickerController = () => {
-			const tapeSpeed = 5000;
-			let splitTextInstances = [];
-			let comingSoonItems = [];
+		const splitLineSel = '.home-list_split-line';
+		const tapeSpeed = 5000;
+		let splits = [];
 
-			const debouncedRefresh = debounce(refresh, 200);
-			$win.on('resize.ddgTicker', debouncedRefresh);
-			refresh();
-
-			return {
-				refresh,
-				destroy: () => {
-					$win.off('resize.ddgTicker', debouncedRefresh);
-					teardown();
-				}
-			};
-
-			function refresh() {
-				teardown();
-				comingSoonItems = $j('.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item').get();
-				if (!comingSoonItems.length) return;
-				comingSoonItems.forEach(itemEl => {
-					const splitTextInstance = SplitText.create(itemEl, {
-						type: 'lines',
-						autoSplit: true,
-						tag: 'span',
-						linesClass: 'home-list_split-line'
-					});
-					splitTextInstances.push(splitTextInstance);
-					const $item = $j(itemEl);
-					$item.on('mouseenter.ddgTicker', function (event) {
-						animateLines(this, 0);
-					});
-					$item.on('mouseleave.ddgTicker', function (event) {
-						animateLines(this, '100%');
-					});
-					if (itemEl.tagName === 'A') {
-						$item.one('click.ddgTicker', function (event) {
-							event.preventDefault();
+		const refresh = () => {
+			// clean up old
+			splits.forEach(s => {
+				try { s.revert(); } catch (e) { }
+			});
+			splits = [];
+			wrapperEl
+				.querySelectorAll('.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item')
+				.forEach(el => {
+					let split;
+					try {
+						split = SplitText.create(el, {
+							type: 'lines',
+							autoSplit: true,
+							tag: 'span',
+							linesClass: 'home-list_split-line'
 						});
+					} catch (e) {
+						console.warn('SplitText error', e);
+						return;
+					}
+					splits.push(split);
+
+					const $el = $j(el);
+					$el
+						.on('mouseenter.ddgComingSoon', () => animate(el, 0))
+						.on('mouseleave.ddgComingSoon', () => animate(el, '100%'));
+					if (el.tagName === 'A') {
+						$el.one('click.ddgComingSoon', e => e.preventDefault());
 					}
 				});
-			}
-			function animateLines(itemEl, offset) {
-				const lines = gsap.utils.toArray(itemEl.querySelectorAll('.home-list_split-line'));
-				gsap.killTweensOf(lines);
-				gsap.to(lines, {
-					'--home-list--tape-r': offset,
-					duration: (_, el) => el.offsetWidth / tapeSpeed,
-					ease: 'linear'
-				});
-			}
-			function teardown() {
-				splitTextInstances.forEach(instance => instance.revert());
-				splitTextInstances = [];
-				comingSoonItems.forEach(itemEl => {
-					const $item = $j(itemEl);
-					$item.off('.ddgTicker');
-				});
-				comingSoonItems = [];
-			}
 		};
-		const controller = createTickerController();
-		if (!controller) return;
-		// No data.resources reference needed.
-		const registerListHook = handler => {
-			window.FinsweetAttributes = window.FinsweetAttributes || [];
-			window.FinsweetAttributes.push([
-				'list',
-				lists => lists.forEach(listInstance => handler(listInstance))
-			]);
-		};
-		registerListHook(listInstance => {
-			listInstance.addHook('afterRender', () => {
-				controller.refresh?.();
+
+		const animate = (el, offset) => {
+			const lines = el.querySelectorAll(splitLineSel);
+			if (!lines.length) return;
+			gsap.killTweensOf(lines);
+			gsap.to(lines, {
+				'--home-list--tape-r': offset,
+				duration: (_, l) => l.offsetWidth / tapeSpeed,
+				ease: 'linear'
 			});
-		});
-	};
+		};
+
+		// initial run
+		refresh();
+
+		const onResize = debounce(refresh, 200);
+		$j(window).on('resize.ddgComingSoon', onResize);
+
+		return {
+			refresh,
+			destroy: () => {
+				splits.forEach(s => {
+					try { s.revert(); } catch (_) { }
+				});
+				$j(window).off('resize.ddgComingSoon', onResize);
+			}
+		};
+	}
 
 	// -----------------------------------------------------------------------------
 	// Activity bar (Splide carousel)
@@ -252,11 +254,14 @@
 	// -----------------------------------------------------------------------------
 
 	const initCustomCursor = () => {
-		const cursorEl = $j('.c-cursor')[0];
-		const targetEl = $j('.page-wrap')[0];
-		if (!cursorEl || !targetEl) return;
-
-		const $body = $j(document.body);
+		const $cursor = $j('.c-cursor');
+		const cursorEl = $cursor[0];
+		if (!cursorEl) return;
+		const $target = $j('.page-wrap');
+		const targetEl = $target[0];
+		if (!targetEl) return;
+		// Ensure cursor is always visible and has fixed positioning
+		gsap.set(cursorEl, { autoAlpha: 1, position: 'fixed', top: 0, left: 0, pointerEvents: 'none' });
 
 		const quickConfig = { duration: 0.2, ease: 'power3.out' };
 
@@ -268,19 +273,11 @@
 			gsap.quickTo?.(cursorEl, 'y', quickConfig) ||
 			(value => gsap.to(cursorEl, { y: value, ...quickConfig }));
 
+		// Align the custom cursor so its tip (top area) matches the pointer tip
 		$win.on('mousemove.ddgCursor', event => {
-			moveX(event.clientX);
-			moveY(event.clientY);
-		});
-
-		$j(targetEl).on('mouseenter.ddgCursor', () => {
-			$body.css('cursor', 'none');
-			gsap.to(cursorEl, { autoAlpha: 1, duration: 0.2 });
-		});
-
-		$j(targetEl).on('mouseleave.ddgCursor', () => {
-			$body.css('cursor', 'auto');
-			gsap.to(cursorEl, { autoAlpha: 0, duration: 0.2 });
+			const rect = cursorEl.getBoundingClientRect();
+			moveX(event.pageX);
+			moveY(event.pageY);
 		});
 	};
 
@@ -289,12 +286,15 @@
 	// -----------------------------------------------------------------------------
 
 	const initShare = () => {
+		const shareItemSelector = '[data-share]';
+		const shareCountdownSelector = '[data-share-countdown]';
+		const $shareItems = $j(shareItemSelector);
+		if (!$shareItems.length) return;
+
 		const shareWebhookUrl =
 			'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
 
 		const dailyShareKey = 'share_done_date';
-		const shareItemSelector = '[data-share]';
-		const shareCountdownSelector = '[data-share-countdown]';
 		const shareOpenTarget = '_blank';
 
 		const $doc = $j(document);
@@ -499,97 +499,224 @@
 	// -----------------------------------------------------------------------------
 
 	const initAjaxModal = () => {
-		const focusableSelector = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-		const lightboxEl = $j("[tr-ajaxmodal-element='lightbox']")[0];
-		if (!lightboxEl) return;
-
-		const $lightbox = $j(lightboxEl);
-		const lightboxCloseEl = $j("[tr-ajaxmodal-element='lightbox-close']").attr('aria-label', 'Close Modal')[0];
-		const $lightboxClose = $j(lightboxCloseEl);
-		const lightboxModalEl = $j("[tr-ajaxmodal-element='lightbox-modal']")[0];
-		const $lightboxModal = $j(lightboxModalEl);
+		const modalLog = createLogger('ajax-modal', 'ajaxModalLogs', true);
+		modalLog('init:start');
+		const lightboxSelector = "[tr-ajaxmodal-element='lightbox']";
+		const $lightbox = $j(lightboxSelector);
+		const lightboxEl = $lightbox[0];
+		if (!lightboxEl) {
+			modalLog('init:abort-no-lightbox', { lightboxSelector });
+			return;
+		}
+		const lightboxModalSelector = "[tr-ajaxmodal-element='lightbox-modal']";
 		const cmsLinkSelector = "[tr-ajaxmodal-element='cms-link']";
 		const cmsPageContentSelector = "[tr-ajaxmodal-element='cms-page-content']";
-		let initialPageTitle = document.title;
-		let initialPageUrl = window.location.href;
-		let $focusedLink;
+		const lightboxCloseSelector = "[tr-ajaxmodal-element='lightbox-close']";
+		modalLog('init:selectors', {
+			lightboxSelector,
+			lightboxModalSelector,
+			cmsLinkSelector,
+			cmsPageContentSelector,
+			lightboxCloseSelector
+		});
 
-		const updatePageInfo = (newTitle, newUrl) => {
-			document.title = newTitle;
-			window.history.replaceState({}, '', newUrl);
+		// --- Scroll restoration manual ---
+		if ('scrollRestoration' in history) {
+			history.scrollRestoration = 'manual';
+			modalLog('history:scrollRestoration', { value: history.scrollRestoration });
+		}
+
+		const $lightboxModal = $j(lightboxModalSelector);
+		const homeTitle = document.title;
+		modalLog('init:elements', {
+			homeTitle,
+			hasModalEl: Boolean($lightboxModal.length)
+		});
+
+		const syncLightboxPosition = scrollY => {
+			const offset = typeof scrollY === 'number' ? scrollY : 0;
+			lightboxEl.style.position = 'absolute';
+			lightboxEl.style.top = `${offset}px`;
+			lightboxEl.style.left = '0';
+			lightboxEl.style.right = '0';
+			lightboxEl.style.width = '100%';
+			lightboxEl.style.height = '100vh';
+			modalLog('modal:sync-position', { offset });
 		};
 
-		const tl = gsap.timeline({
-			paused: true,
-			onReverseComplete: () => {
-				$focusedLink?.focus?.();
-				updatePageInfo(initialPageTitle, initialPageUrl);
-			},
-			onComplete: () => {
-				$lightbox.find("[tr-ajaxmodal-element='lightbox-close']").focus();
+		const resetLightboxPosition = () => {
+			lightboxEl.style.position = '';
+			lightboxEl.style.top = '';
+			lightboxEl.style.left = '';
+			lightboxEl.style.right = '';
+			lightboxEl.style.width = '';
+			lightboxEl.style.height = '';
+		};
+
+		// --- Modal open/close helpers ---
+		const openModal = (newTitle, newUrl) => {
+			const scrollY = window.scrollY;
+			const state = window.history.state || {};
+			window.history.replaceState({ ...state, scrollY }, '', window.location.href);
+
+			$lightbox.addClass('is-open');
+			$lightboxModal.addClass('is-open');
+			syncLightboxPosition(scrollY);
+			modalLog('modal:open', { newTitle, newUrl, scrollY });
+
+			if (newTitle && newUrl) {
+				document.title = newTitle;
+				window.history.pushState({ modal: true, scrollY }, '', newUrl);
+				modalLog('history:pushState', { newTitle, newUrl, scrollY });
 			}
-		});
-		tl.set('body', { overflow: 'hidden' });
-		tl.set($lightbox, { display: 'block', onComplete: () => { if ($lightboxModal && $lightboxModal.length) $lightboxModal.scrollTop(0); } });
-		tl.from($lightbox, { opacity: 0, duration: 0.2 });
-		tl.from($lightboxModal, { y: '5em', duration: 0.2 }, '<');
+		};
+
+		const closeModal = () => {
+			const state = window.history.state || {};
+			const savedScrollY = state.scrollY || 0;
+
+			$lightbox.removeClass('is-open');
+			$lightboxModal.removeClass('is-open');
+			resetLightboxPosition();
+			document.title = homeTitle;
+			window.history.pushState({ modal: false, scrollY: savedScrollY }, '', '/');
+			modalLog('modal:close', { savedScrollY });
+
+			setTimeout(() => window.scrollTo(0, savedScrollY), 50);
+		};
+
+		const animateOpen = () =>
+			gsap.fromTo($lightboxModal, { y: '5em', opacity: 0 }, { y: 0, opacity: 1, duration: 0.25, onStart: () => modalLog('modal:animateOpen:start'), onComplete: () => modalLog('modal:animateOpen:complete') });
+		const animateClose = () =>
+			gsap.to($lightboxModal, { y: '5em', opacity: 0, duration: 0.25, onStart: () => modalLog('modal:animateClose:start'), onComplete: () => modalLog('modal:animateClose:complete') });
+
+		// --- open-on-load logic ---
+		const isLightboxOpen = $lightbox.hasClass('is-open');
+		if (isLightboxOpen) {
+			const state = window.history.state || {};
+			const scrollY = typeof state.scrollY === 'number' ? state.scrollY : 0;
+			if (scrollY > 0) window.scrollTo(0, scrollY);
+			syncLightboxPosition(scrollY);
+			openModal();
+			modalLog('init:reopen-from-state', { scrollY });
+		}
 
 		$j(document).on('click', cmsLinkSelector, event => {
-			$focusedLink = $j(event.currentTarget);
-			initialPageUrl = window.location.href;
+			const $focusedLink = $j(event.currentTarget);
 			event.preventDefault();
 			const linkUrl = $focusedLink.attr('href');
+			modalLog('link:click', { href: linkUrl });
 			$j.ajax({
 				url: linkUrl,
 				success: response => {
 					const $cmsContent = $j(response).find(cmsPageContentSelector);
 					const cmsTitle = $j(response).filter('title').text();
 					const cmsUrl = new URL(linkUrl, window.location.origin).href;
-					$lightboxModal?.empty().append($cmsContent);
-					updatePageInfo(cmsTitle, cmsUrl);
-					tl.play();
+					$lightboxModal.empty().append($cmsContent);
+					openModal(cmsTitle, cmsUrl);
+					animateOpen();
+					modalLog('ajax:success', {
+						href: linkUrl,
+						cmsTitle,
+						cmsUrl,
+						contentFound: Boolean($cmsContent.length)
+					});
 				},
-				error: (jqXHR, textStatus, errorThrown) => {
-					if ($lightboxModal && $lightboxModal.length) {
-						$lightboxModal.empty().append(
-							`<div class='modal-error'>Failed to load content. Please try again later.</div>`
-						);
-					}
-					// eslint-disable-next-line no-console
-					console.error('[ddg] AJAX modal load error:', textStatus, errorThrown);
+				error: () => {
+					modalLog('ajax:error', { href: linkUrl });
+					$lightboxModal.empty().append("<div class='modal-error'>Failed to load content. Please try again later.</div>");
 				}
 			});
 		});
 
-		$lightbox.on('click', "[tr-ajaxmodal-element='lightbox-close']", e => {
+		$lightbox.on('click', lightboxCloseSelector, e => {
 			e.preventDefault();
 			e.stopImmediatePropagation();
-			tl.reverse();
+			animateClose();
+			setTimeout(closeModal, 250);
+			modalLog('lightbox:close-click');
 		});
-		$j(document).on('keydown', event => {
-			if (event.key === 'Escape') tl.reverse();
+
+		$j(document).on('keydown', e => {
+			if (e.key === 'Escape' && $lightbox.hasClass('is-open')) {
+				animateClose();
+				setTimeout(closeModal, 250);
+				modalLog('keydown:escape');
+			}
 		});
-		$lightbox.on('click', event => {
-			if (event.target === $lightbox[0]) tl.reverse();
+
+		$lightbox.on('click', e => {
+			if (e.target === $lightbox[0]) {
+				animateClose();
+				setTimeout(closeModal, 250);
+				modalLog('lightbox:background-click');
+			}
 		});
+		// --- popstate and open-on-load logic ---
+		window.addEventListener('popstate', e => {
+			const state = e.state || {};
+			const scrollY = typeof state.scrollY === 'number' ? state.scrollY : 0;
+			if (state.modal) {
+				syncLightboxPosition(scrollY);
+				$lightbox.addClass('is-open');
+				$lightboxModal.addClass('is-open');
+				modalLog('popstate:open', { state });
+			} else {
+				resetLightboxPosition();
+				$lightbox.removeClass('is-open');
+				$lightboxModal.removeClass('is-open');
+				modalLog('popstate:close', { state });
+			}
+			if (typeof state.scrollY === 'number') {
+				setTimeout(() => window.scrollTo(0, state.scrollY), 0);
+				modalLog('popstate:scroll-restore', { scrollY: state.scrollY });
+			}
+		});
+
+		if (window.location.pathname.startsWith('/story/')) {
+			$lightbox.addClass('is-open');
+			$lightboxModal.addClass('is-open');
+			syncLightboxPosition(window.scrollY);
+			window.history.replaceState({ modal: true, scrollY: window.scrollY }, '', window.location.href);
+			modalLog('init:story-path', { path: window.location.pathname });
+		}
+
+		// On load, always restore scroll position from history.state, even if modal is open or replaced
+		window.addEventListener('load', () => {
+			const state = window.history.state || {};
+			const scrollY = typeof state.scrollY === 'number' ? state.scrollY : 0;
+			if (scrollY > 0) {
+				requestAnimationFrame(() => window.scrollTo(0, scrollY));
+				requestAnimationFrame(() => syncLightboxPosition(scrollY));
+				modalLog('load:scroll-restore', { scrollY });
+			} else {
+				resetLightboxPosition();
+			}
+		});
+
+		modalLog('init:complete');
 	};
 
 	// -----------------------------------------------------------------------------
 	// Home filters (Finsweet attributes + random filter + Modal)
 	// -----------------------------------------------------------------------------
 	const initFilters = () => {
-		// Selectors
-		const $filterPanel = $j('.c-home-filters');
-		const $openButtons = $j('.c-search-btn');
-		const $closeButtons = $j('.c-circle-button[data-action="close"], .filters_submit');
-		const $randomButton = $j('.random-filter');
+		const filterPanelSelector = '.c-home-filters';
+		const openButtonSelector = '.c-search-btn';
+		const closeButtonSelector = '.c-circle-button[data-action="close"], .filters_submit';
+		const randomButtonSelector = '.random-filter';
+		const listFieldSelector = '[fs-list-field]';
+		const $filterPanel = $j(filterPanelSelector);
+		if (!$filterPanel.length) return;
+		const $openButtons = $j(openButtonSelector);
+		const $closeButtons = $j(closeButtonSelector);
+		const $randomButton = $j(randomButtonSelector);
 
 		const toggleFilters = isOpen => {
 			$filterPanel
 				.toggleClass('is-open', isOpen)
 				.css('display', isOpen ? 'block' : 'none')
 				.attr('aria-hidden', !isOpen);
-			$j('body').css('overflow', isOpen ? 'hidden' : '');
 		};
 
 		$openButtons.on('click', e => { e.preventDefault(); toggleFilters(true); });
@@ -620,7 +747,7 @@
 					);
 					if (!$input.length) return;
 
-					$j('[fs-list-field]').each((_, el) => {
+					$j(listFieldSelector).each((_, el) => {
 						if (el.type === 'checkbox' || el.type === 'radio') el.checked = false;
 					});
 
