@@ -1,4 +1,5 @@
 (function () {
+
 	// Namespace & data
 	const ddg = (window.ddg ??= {});
 	const data = (ddg.data ??= {
@@ -15,9 +16,10 @@
 
 	const debounce = (fn, wait) => {
 		let timeoutId;
-		return (...args) => {
+		return function (...args) {
+			const context = this;
 			clearTimeout(timeoutId);
-			timeoutId = setTimeout(() => fn(...args), wait);
+			timeoutId = setTimeout(() => fn.apply(context, args), wait);
 		};
 	};
 
@@ -38,6 +40,10 @@
 		initShare();
 		initAjaxModal();
 		initFilters();
+		// Cleanup for event handlers and ScrollTriggers
+		window.addEventListener('beforeunload', () => {
+			ScrollTrigger.getAll().forEach(trigger => trigger.kill());
+		});
 	};
 
 	// -----------------------------------------------------------------------------
@@ -381,7 +387,7 @@
 		};
 
 		// basic "human intent" heuristics
-		const shareStartTimestamp = performance.now();
+		const shareStartTimestamp = Date.now();
 		let pointerTravel = 0;
 		let lastPointerPosition = null;
 
@@ -401,7 +407,7 @@
 		});
 
 		const heuristicsSatisfied = () =>
-			performance.now() - shareStartTimestamp > 1500 &&
+			Date.now() - shareStartTimestamp > 1500 &&
 			pointerTravel > 120 &&
 			document.hasFocus();
 
@@ -493,6 +499,7 @@
 	// -----------------------------------------------------------------------------
 
 	const initAjaxModal = () => {
+		const focusableSelector = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 		const lightboxEl = $j("[tr-ajaxmodal-element='lightbox']")[0];
 		if (!lightboxEl) return;
 
@@ -515,34 +522,17 @@
 		const tl = gsap.timeline({
 			paused: true,
 			onReverseComplete: () => {
-				if ($focusedLink && $focusedLink.length && typeof $focusedLink.focus === 'function') {
-					$focusedLink.focus();
-				}
+				$focusedLink?.focus?.();
 				updatePageInfo(initialPageTitle, initialPageUrl);
 			},
 			onComplete: () => {
-				if ($lightboxClose && $lightboxClose.length && typeof $lightboxClose.focus === 'function') {
-					$lightboxClose.focus();
-				}
+				$lightbox.find("[tr-ajaxmodal-element='lightbox-close']").focus();
 			}
 		});
 		tl.set('body', { overflow: 'hidden' });
 		tl.set($lightbox, { display: 'block', onComplete: () => { if ($lightboxModal && $lightboxModal.length) $lightboxModal.scrollTop(0); } });
 		tl.from($lightbox, { opacity: 0, duration: 0.2 });
 		tl.from($lightboxModal, { y: '5em', duration: 0.2 }, '<');
-
-		const keepFocusWithinLightbox = () => {
-			const $lastFocusableChild = $lightbox
-				.find('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
-				.not(':disabled')
-				.not('[aria-hidden=true]')
-				.last();
-			$lastFocusableChild.on('focusout', () => {
-				if ($lightboxClose && $lightboxClose.length && typeof $lightboxClose.focus === 'function') {
-					$lightboxClose.focus();
-				}
-			});
-		};
 
 		$j(document).on('click', cmsLinkSelector, event => {
 			$focusedLink = $j(event.currentTarget);
@@ -554,14 +544,10 @@
 				success: response => {
 					const $cmsContent = $j(response).find(cmsPageContentSelector);
 					const cmsTitle = $j(response).filter('title').text();
-					const cmsUrl = window.location.origin + linkUrl;
-					if ($lightboxModal && $lightboxModal.length) {
-						$lightboxModal.empty();
-						$lightboxModal.append($cmsContent);
-					}
+					const cmsUrl = new URL(linkUrl, window.location.origin).href;
+					$lightboxModal?.empty().append($cmsContent);
 					updatePageInfo(cmsTitle, cmsUrl);
 					tl.play();
-					keepFocusWithinLightbox();
 				},
 				error: (jqXHR, textStatus, errorThrown) => {
 					if ($lightboxModal && $lightboxModal.length) {
@@ -575,16 +561,16 @@
 			});
 		});
 
-		if ($lightboxClose && $lightboxClose.length) {
-			$lightboxClose.on('click', () => {
-				tl.reverse();
-			});
-		}
+		$lightbox.on('click', "[tr-ajaxmodal-element='lightbox-close']", e => {
+			e.preventDefault();
+			e.stopImmediatePropagation();
+			tl.reverse();
+		});
 		$j(document).on('keydown', event => {
 			if (event.key === 'Escape') tl.reverse();
 		});
-		$j(document).on('click', $lightbox, event => {
-			if (!$j(event.target).is($lightbox.find('*'))) tl.reverse();
+		$lightbox.on('click', event => {
+			if (event.target === $lightbox[0]) tl.reverse();
 		});
 	};
 
@@ -598,26 +584,16 @@
 		const $closeButtons = $j('.c-circle-button[data-action="close"], .filters_submit');
 		const $randomButton = $j('.random-filter');
 
-		// Modal open/close
-		const openFilters = () => {
-			$filterPanel.addClass('is-open').css('display', 'block').attr('aria-hidden', 'false');
-			$j('body').css('overflow', 'hidden');
+		const toggleFilters = isOpen => {
+			$filterPanel
+				.toggleClass('is-open', isOpen)
+				.css('display', isOpen ? 'block' : 'none')
+				.attr('aria-hidden', !isOpen);
+			$j('body').css('overflow', isOpen ? 'hidden' : '');
 		};
 
-		const closeFilters = () => {
-			$filterPanel.removeClass('is-open').css('display', 'none').attr('aria-hidden', 'true');
-			$j('body').css('overflow', '');
-		};
-
-		$openButtons.on('click', e => {
-			e.preventDefault();
-			openFilters();
-		});
-
-		$closeButtons.on('click', e => {
-			e.preventDefault();
-			closeFilters();
-		});
+		$openButtons.on('click', e => { e.preventDefault(); toggleFilters(true); });
+		$closeButtons.on('click', e => { e.preventDefault(); toggleFilters(false); });
 
 		// Random filter logic
 		const pickRandom = arr => arr[Math.floor(Math.random() * arr.length)];
@@ -652,7 +628,7 @@
 					$input.trigger('change');
 
 					const closeOnce = () => {
-						closeFilters();
+						toggleFilters(false);
 						list.removeHook('render', closeOnce);
 					};
 					list.addHook('render', closeOnce);
