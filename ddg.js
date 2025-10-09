@@ -545,12 +545,14 @@
 			return;
 		}
 		const lightboxModalSelector = "[tr-ajaxmodal-element='lightbox-modal']";
+		const lightboxBgSelector = "[tr-ajaxmodal-element='lightbox-bg']";
 		const cmsLinkSelector = "[tr-ajaxmodal-element='cms-link']";
 		const cmsPageContentSelector = "[tr-ajaxmodal-element='cms-page-content']";
 		const lightboxCloseSelector = "[tr-ajaxmodal-element='lightbox-close']";
 		modalLog('init:selectors', {
 			lightboxSelector,
 			lightboxModalSelector,
+			lightboxBgSelector,
 			cmsLinkSelector,
 			cmsPageContentSelector,
 			lightboxCloseSelector
@@ -563,10 +565,12 @@
 		}
 
 		const $lightboxModal = $j(lightboxModalSelector);
+		const $lightboxBg = $j(lightboxBgSelector);
 		const homeTitle = document.title;
 		modalLog('init:elements', {
 			homeTitle,
-			hasModalEl: Boolean($lightboxModal.length)
+			hasModalEl: Boolean($lightboxModal.length),
+			hasLightboxBg: Boolean($lightboxBg.length)
 		});
 
 		const syncLightboxPosition = scrollY => {
@@ -589,12 +593,19 @@
 			lightboxEl.style.height = '';
 		};
 
+		const toggleLightboxBg = isOpen => {
+			if ($lightboxBg.length) {
+				$lightboxBg.toggleClass('is-open', isOpen);
+			}
+		};
+
 		// --- Modal open/close helpers ---
 		const openModal = (newTitle, newUrl) => {
 			const scrollY = window.scrollY;
 			const state = window.history.state || {};
 			window.history.replaceState({ ...state, scrollY }, '', window.location.href);
 
+			toggleLightboxBg(true);
 			$lightbox.addClass('is-open');
 			$lightboxModal.addClass('is-open');
 			syncLightboxPosition(scrollY);
@@ -623,8 +634,19 @@
 
 		const animateOpen = () =>
 			gsap.fromTo($lightboxModal, { y: '5em', opacity: 0 }, { y: 0, opacity: 1, duration: 0.25, onStart: () => modalLog('modal:animateOpen:start'), onComplete: () => modalLog('modal:animateOpen:complete') });
-		const animateClose = () =>
-			gsap.to($lightboxModal, { y: '5em', opacity: 0, duration: 0.25, onStart: () => modalLog('modal:animateClose:start'), onComplete: () => modalLog('modal:animateClose:complete') });
+		const animateClose = () => {
+			toggleLightboxBg(false);
+			return gsap.to($lightboxModal, {
+				y: '5em',
+				opacity: 0,
+				duration: 0.25,
+				onStart: () => modalLog('modal:animateClose:start'),
+				onComplete: () => {
+					modalLog('modal:animateClose:complete');
+					closeModal();
+				}
+			});
+		};
 
 		// --- open-on-load logic ---
 		const isLightboxOpen = $lightbox.hasClass('is-open');
@@ -669,14 +691,12 @@
 			e.preventDefault();
 			e.stopImmediatePropagation();
 			animateClose();
-			setTimeout(closeModal, 250);
 			modalLog('lightbox:close-click');
 		});
 
 		$j(document).on('keydown', e => {
 			if (e.key === 'Escape' && $lightbox.hasClass('is-open')) {
 				animateClose();
-				setTimeout(closeModal, 250);
 				modalLog('keydown:escape');
 			}
 		});
@@ -684,7 +704,6 @@
 		$lightbox.on('click', e => {
 			if (e.target === $lightbox[0]) {
 				animateClose();
-				setTimeout(closeModal, 250);
 				modalLog('lightbox:background-click');
 			}
 		});
@@ -696,11 +715,13 @@
 				syncLightboxPosition(scrollY);
 				$lightbox.addClass('is-open');
 				$lightboxModal.addClass('is-open');
+				toggleLightboxBg(true);
 				modalLog('popstate:open', { state });
 			} else {
 				resetLightboxPosition();
 				$lightbox.removeClass('is-open');
 				$lightboxModal.removeClass('is-open');
+				toggleLightboxBg(false);
 				modalLog('popstate:close', { state });
 			}
 			if (typeof state.scrollY === 'number') {
@@ -712,6 +733,7 @@
 		if (window.location.pathname.startsWith('/story/')) {
 			$lightbox.addClass('is-open');
 			$lightboxModal.addClass('is-open');
+			toggleLightboxBg(true);
 			syncLightboxPosition(window.scrollY);
 			window.history.replaceState({ modal: true, scrollY: window.scrollY }, '', window.location.href);
 			modalLog('init:story-path', { path: window.location.pathname });
