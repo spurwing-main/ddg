@@ -1,1101 +1,669 @@
-// ddg.js — site behaviour hub
 (function () {
-	// namespace and state management
-	ddg = window.ddg ??= {};
-	ddg.helperFunctions ??= {};
-	ddg.features ??= {};
+	// Namespace & data
+	const ddg = (window.ddg ??= {});
+	const data = (ddg.data ??= {
+		siteBooted: false
+	});
 
-	const state =
-		(ddg.state ??= {
-			resources: {},
-			storyCache: new Set(),
-			siteBooted: false,
-		});
+	// -----------------------------------------------------------------------------
+	// Utilities
+	// -----------------------------------------------------------------------------
 
+	// jQuery handle
 	const $j = window.$;
+	const $win = $j(window);
 
-	// dom and shared utilities
-	const select = (selector, root = document) => {
-		const $root = root === document ? $j : $j(root);
-		return (root === document ? $j(selector) : $root.find(selector)).get(0) ?? null;
-	};
-
-	const select_all = (selector, root = document) => {
-		const $root = root === document ? $j : $j(root);
-		return (root === document ? $j(selector) : $root.find(selector)).toArray();
-	};
-
-	const debounce = (fn, delay = 200) => {
-		let timer;
+	const debounce = (fn, wait) => {
+		let timeoutId;
 		return (...args) => {
-			clearTimeout(timer);
-			timer = setTimeout(() => fn(...args), delay);
+			clearTimeout(timeoutId);
+			timeoutId = setTimeout(() => fn(...args), wait);
 		};
 	};
-	const create_selector_map = (map, root = document) => {
-		const api = {};
 
-		Object.entries(map).forEach(([key, selector]) => {
-			const getter = () => select(selector, root);
-			getter.all = () => select_all(selector, root);
-			getter.selector = selector;
-			api[key] = getter;
-		});
 
-		return api;
+	// -----------------------------------------------------------------------------
+	// Boot
+	// -----------------------------------------------------------------------------
+
+	const initSite = () => {
+		if (data.siteBooted) return;
+		data.siteBooted = true;
+
+		initNavigation();
+		initPageProgress();
+		initTicker();
+		initActivityBar();
+		initCustomCursor();
+		initShare();
+		initAjaxModal();
+		initFilters();
 	};
 
-	const resolve_story_slug = (fragment, fallback = window.location.pathname) =>
-		fragment?.dataset?.storySlug || fallback;
-	const ensure_resource = (store, key, factory) => (store[key] ??= factory());
-	const register_list_hook = (handler) => {
-		(window.FinsweetAttributes ||= []).push([
-			"list",
-			(lists) => lists.forEach((listInstance) => handler(listInstance)),
-		]);
-	};
+	// -----------------------------------------------------------------------------
+	// Navigation: hide/reveal header on scroll
+	// -----------------------------------------------------------------------------
 
-	function createLayoutRefresher() {
-		const refresh = debounce(() => {
-			if (typeof ScrollTrigger !== "undefined") {
-				ScrollTrigger.refresh();
-			}
-		}, 100);
-
-		return () => refresh();
-	}
-
-	const refreshLayout = createLayoutRefresher();
-
-	// boots all features in order
-	function initSite() {
-		if (state.siteBooted) return;
-		state.siteBooted = true;
-
-		featureOrder.forEach((feature) => feature());
-	}
-
-	// hides/reveals the header on scroll
-	function initNavigation() {
-		const nav = select(".nav");
-		if (!nav) return;
+	const initNavigation = () => {
+		const $nav = $j('.nav');
+		const navEl = $nav[0];
+		if (!navEl) return;
 
 		const showThreshold = 50;
 		const hideThreshold = 100;
 		const revealBuffer = 50;
+
 		let lastScrollY = window.scrollY;
 		let revealDistance = 0;
 
 		ScrollTrigger.create({
 			trigger: document.body,
-			start: "top top",
-			end: "bottom bottom",
-			onUpdate() {
+			start: 'top top',
+			end: 'bottom bottom',
+			onUpdate: () => {
 				const y = window.scrollY;
 				const delta = y - lastScrollY;
 
 				if (y <= showThreshold) {
-					nav.classList.remove("is-hidden", "is-past-threshold");
+					navEl.classList.remove('is-hidden', 'is-past-threshold');
 					revealDistance = 0;
 				} else if (delta > 0 && y > hideThreshold) {
-					nav.classList.add("is-hidden", "is-past-threshold");
+					navEl.classList.add('is-hidden', 'is-past-threshold');
 					revealDistance = 0;
 				} else if (delta < 0) {
 					revealDistance -= delta;
 					if (revealDistance >= revealBuffer) {
-						nav.classList.remove("is-hidden");
+						navEl.classList.remove('is-hidden');
 						revealDistance = 0;
 					}
 				}
 
-				nav.classList.toggle("is-past-threshold", y > hideThreshold);
+				navEl.classList.toggle('is-past-threshold', y > hideThreshold);
 				lastScrollY = y;
-			},
+			}
 		});
-	}
+	};
 
-	// drives the top progress bar
-	function initPageProgress() {
-		const selectors = create_selector_map({
-			bar: ".page-progress_bar",
-			homeList: ".home-list",
-			homeListItem: ".home-list_item",
-		});
+	// -----------------------------------------------------------------------------
+	// Page progress bar (top)
+	// -----------------------------------------------------------------------------
 
-		const progressBar = selectors.bar();
-		if (!progressBar) return;
+	const initPageProgress = () => {
+		const progressBarEl = $j('.page-progress_bar')[0];
+		if (!progressBarEl) return;
 
-		gsap.set(progressBar, { scaleX: 0 });
+		gsap.set(progressBarEl, { scaleX: 0 });
 
-		gsap.to(progressBar, {
+		gsap.to(progressBarEl, {
 			scaleX: 1,
-			ease: "none",
+			ease: 'none',
 			scrollTrigger: {
 				trigger: document.body,
-				start: "top top",
-				end: "bottom bottom",
-				scrub: 0.75,
-			},
-		});
-
-		const homeList = selectors.homeList();
-		if (homeList) {
-			const hasListItems = () => selectors.homeListItem.all().length > 0;
-
-			if (!hasListItems()) {
-				const waitObserver = new MutationObserver(() => {
-					if (!hasListItems()) return;
-					waitObserver.disconnect();
-					requestAnimationFrame(refreshLayout);
-				});
-				waitObserver.observe(homeList, { childList: true, subtree: true });
-			} else {
-				refreshLayout();
+				start: 'top top',
+				end: 'bottom bottom',
+				scrub: 0.75
 			}
-
-			const listObserver = new MutationObserver(() => refreshLayout());
-			listObserver.observe(homeList, { childList: true, subtree: true });
-		}
-
-		register_list_hook((listInstance) => {
-			listInstance.addHook("afterRender", refreshLayout);
 		});
-	}
 
-	// animates “coming soon” list items with a SplitText hover effect
-	function initTicker() {
-		const controller = createTickerController();
-		if (!controller) return;
-		state.resources.tickerTape = controller;
+		const homeListEl = $j('.home-list')[0];
+		if (!homeListEl) return;
 
-		register_list_hook((listInstance) => {
-			listInstance.addHook("afterRender", () => {
-				state.resources.tickerTape?.refresh?.();
+		const hasListItems = () => $j('.home-list_item').length > 0;
+
+		const debouncedRefresh = debounce(() => ScrollTrigger.refresh(), 100);
+
+		const observer = new MutationObserver(() => {
+			debouncedRefresh();
+		});
+		observer.observe(homeListEl, { childList: true, subtree: true });
+
+		if (!hasListItems()) {
+			const waitObserver = new MutationObserver(() => {
+				if (!hasListItems()) return;
+				waitObserver.disconnect();
+				requestAnimationFrame(debouncedRefresh);
 			});
-		});
+			waitObserver.observe(homeListEl, { childList: true, subtree: true });
+		} else {
+			debouncedRefresh();
+		}
+	};
 
-		function createTickerController() {
+	// -----------------------------------------------------------------------------
+	// Ticker: SplitText hover effect on "coming soon" list items
+	// -----------------------------------------------------------------------------
+
+	const initTicker = () => {
+		const createTickerController = () => {
 			const tapeSpeed = 5000;
 			let splitTextInstances = [];
 			let comingSoonItems = [];
 
-			const handleResize = debounce(refresh, 200);
-			$j(window).on("resize.ddgTicker", handleResize);
+			const debouncedRefresh = debounce(refresh, 200);
+			$win.on('resize.ddgTicker', debouncedRefresh);
 			refresh();
 
 			return {
 				refresh,
-				destroy() {
-					$j(window).off("resize.ddgTicker", handleResize);
+				destroy: () => {
+					$win.off('resize.ddgTicker', debouncedRefresh);
 					teardown();
-				},
+				}
 			};
 
 			function refresh() {
 				teardown();
-				comingSoonItems = select_all(
-					'.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item'
-				);
-
+				comingSoonItems = $j('.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item').get();
 				if (!comingSoonItems.length) return;
-
-				comingSoonItems.forEach((item) => {
-					const splitTextInstance = SplitText.create(item, {
-						type: "lines",
+				comingSoonItems.forEach(itemEl => {
+					const splitTextInstance = SplitText.create(itemEl, {
+						type: 'lines',
 						autoSplit: true,
-						tag: "span",
-						linesClass: "home-list_split-line",
+						tag: 'span',
+						linesClass: 'home-list_split-line'
 					});
 					splitTextInstances.push(splitTextInstance);
-
-					const $item = $j(item);
-					$item.on("mouseenter.ddgTicker", handleHoverIn);
-					$item.on("mouseleave.ddgTicker", handleHoverOut);
-					if (item.tagName === "A") $item.on("click.ddgTicker", preventDefault);
+					const $item = $j(itemEl);
+					$item.on('mouseenter.ddgTicker', function (event) {
+						animateLines(this, 0);
+					});
+					$item.on('mouseleave.ddgTicker', function (event) {
+						animateLines(this, '100%');
+					});
+					if (itemEl.tagName === 'A') {
+						$item.one('click.ddgTicker', function (event) {
+							event.preventDefault();
+						});
+					}
 				});
 			}
-
-			function handleHoverIn(event) {
-				animateLines(event.currentTarget, 0);
-			}
-
-			function handleHoverOut(event) {
-				animateLines(event.currentTarget, "100%");
-			}
-
-			function animateLines(item, offset) {
-				const lines = gsap.utils.toArray(item.querySelectorAll(".home-list_split-line"));
+			function animateLines(itemEl, offset) {
+				const lines = gsap.utils.toArray(itemEl.querySelectorAll('.home-list_split-line'));
 				gsap.killTweensOf(lines);
 				gsap.to(lines, {
-					"--home-list--tape-r": offset,
-					duration: (i, el) => el.offsetWidth / tapeSpeed,
-					ease: "linear",
+					'--home-list--tape-r': offset,
+					duration: (_, el) => el.offsetWidth / tapeSpeed,
+					ease: 'linear'
 				});
 			}
-
-			function preventDefault(event) {
-				event.preventDefault();
-			}
-
 			function teardown() {
-				splitTextInstances.forEach((instance) => instance.revert());
+				splitTextInstances.forEach(instance => instance.revert());
 				splitTextInstances = [];
-
-				comingSoonItems.forEach((item) => {
-					const $item = $j(item);
-					$item.off("mouseenter.ddgTicker", handleHoverIn);
-					$item.off("mouseleave.ddgTicker", handleHoverOut);
-					if (item.tagName === "A") $item.off("click.ddgTicker", preventDefault);
+				comingSoonItems.forEach(itemEl => {
+					const $item = $j(itemEl);
+					$item.off('.ddgTicker');
 				});
 				comingSoonItems = [];
 			}
-		}
-	}
-
-	// handles home filters modal and randomiser
-	function initFilters() {
-		const selectors = create_selector_map({
-			panel: ".c-home-filters",
-			searchButtons: ".c-search-btn",
-			closeButtons: ".c-circle-button[data-action='close'], .filters_submit",
-			randomButtons: ".random-filter",
+		};
+		const controller = createTickerController();
+		if (!controller) return;
+		// No data.resources reference needed.
+		const registerListHook = handler => {
+			window.FinsweetAttributes = window.FinsweetAttributes || [];
+			window.FinsweetAttributes.push([
+				'list',
+				lists => lists.forEach(listInstance => handler(listInstance))
+			]);
+		};
+		registerListHook(listInstance => {
+			listInstance.addHook('afterRender', () => {
+				controller.refresh?.();
+			});
 		});
-		const cloneFilters = (value) => JSON.parse(JSON.stringify(value));
-		const pickRandomValue = (arr) => (arr && arr.length ? arr[Math.floor(Math.random() * arr.length)] : null);
+	};
 
-		const modal = ensure_resource(state.resources, "filterModal", () =>
-			createFilterModalController(selectors.panel.selector)
-		);
-		if (!modal) return;
+	// -----------------------------------------------------------------------------
+	// Activity bar (Splide carousel)
+	// -----------------------------------------------------------------------------
 
-		ensureFilterActionDelegation();
-
-		bindModalTriggers(modal);
-		attachRandomiser(modal);
-
-		function createFilterModalController(selectorOrElement) {
-			const panel =
-				typeof selectorOrElement === "string"
-					? select(selectorOrElement)
-					: selectorOrElement instanceof Element
-						? selectorOrElement
-						: select(selectorOrElement);
-			if (!panel) return null;
-
-			let previousBodyOverflow = "";
-			let isScrollLocked = false;
-
-			return { open, close, ensureHidden };
-
-			function open() {
-				panel.classList.add("is-open");
-				panel.style.display = "block";
-				setAriaHidden(false);
-				lockBodyScroll();
-			}
-
-			function close() {
-				panel.classList.remove("is-open");
-				panel.style.display = "none";
-				setAriaHidden(true);
-				unlockBodyScroll();
-			}
-
-			function ensureHidden() {
-				if (!panel.classList.contains("is-open")) {
-					panel.style.display = "none";
-					setAriaHidden(true);
-				}
-			}
-
-			function setAriaHidden(isHidden) {
-				panel.setAttribute("aria-hidden", isHidden ? "true" : "false");
-			}
-
-			function lockBodyScroll() {
-				if (isScrollLocked) return;
-				previousBodyOverflow = document.body.style.overflow;
-				document.body.style.overflow = "hidden";
-				isScrollLocked = true;
-			}
-
-			function unlockBodyScroll() {
-				if (!isScrollLocked) return;
-				document.body.style.overflow = previousBodyOverflow || "";
-				previousBodyOverflow = "";
-				isScrollLocked = false;
-			}
-		}
-
-		function ensureFilterActionDelegation() {
-			if (state.resources.__filterActionDelegation) return;
-
-			$j(document.body).on("click.ddgFilters", "[data-filter-action]", (event) => {
-				const $trigger = $j(event.currentTarget);
-				const action = $trigger.data("filterAction");
-				const controller = state.resources.filterModal;
-				if (!controller || !action) return;
-
-				if (action === "open") {
-					if ($trigger.is("a")) event.preventDefault();
-					controller.open();
-				} else if (action === "close") {
-					if ($trigger.is("a") || $trigger.is("button")) {
-						event.preventDefault();
-					}
-					controller.close();
-				}
-			});
-
-			state.resources.__filterActionDelegation = true;
-		}
-
-		function bindModalTriggers({ ensureHidden }) {
-			const searchButtons = selectors.searchButtons.all();
-			const closeButtons = selectors.closeButtons.all();
-
-			if (!searchButtons.length) {
-				ensureHidden();
-				return;
-			}
-
-			searchButtons.forEach((button) => {
-				button.dataset.filterAction = "open";
-			});
-
-			closeButtons.forEach((button) => {
-				button.dataset.filterAction = "close";
-			});
-
-			ensureHidden();
-		}
-
-		function attachRandomiser(filterModal) {
-			const randomButtons = selectors.randomButtons.all();
-			if (!randomButtons.length) return;
-
-			register_list_hook((listInstance) => {
-				const initialFilters = cloneFilters(listInstance.filters.value);
-
-				listInstance.addHook("afterRender", () => {
-					if (!listInstance.__ddgRandomActive) return;
-					filterModal.close();
-					listInstance.__ddgRandomActive = false;
-				});
-
-				$j(randomButtons)
-					.off("click.ddgRandomiser")
-					.on("click.ddgRandomiser", () => runRandom(listInstance, initialFilters));
-			});
-
-			function runRandom(listInstance, initialFilters, minResults = 3, maxTries = 20, delay = 200) {
-				const fieldsData = listInstance.allFieldsData.value;
-				const locationKey = Object.keys(fieldsData).find((key) => key.toLowerCase() === "location");
-				if (!locationKey) {
-					console.warn("⚠️ No 'location' field found in allFieldsData.");
-					return;
-				}
-
-				if (listInstance.__ddgRandomInterval) {
-					clearInterval(listInstance.__ddgRandomInterval);
-					listInstance.__ddgRandomInterval = null;
-				}
-
-				const applySelection = () => {
-					const groups = buildGroups(fieldsData, locationKey);
-					if (!groups.length) return false;
-					applyGroups(listInstance, initialFilters, groups);
-					listInstance.__ddgRandomActive = true;
-					return true;
-				};
-
-				if (!applySelection()) return;
-
-				let attempt = 0;
-				const updateCounter = () => {
-					const counter = select("#resultsCount");
-					if (counter) counter.textContent = listInstance.items.value.length;
-				};
-				const stopInterval = () => {
-					if (listInstance.__ddgRandomInterval) {
-						clearInterval(listInstance.__ddgRandomInterval);
-						listInstance.__ddgRandomInterval = null;
-					}
-					updateCounter();
-				};
-
-				listInstance.__ddgRandomInterval = setInterval(() => {
-					const count = listInstance.items.value.length;
-					if (count >= minResults || attempt >= maxTries) {
-						stopInterval();
-						return;
-					}
-
-					attempt += 1;
-					if (!applySelection()) {
-						stopInterval();
-					}
-				}, delay);
-			}
-
-			function buildGroups(fieldsData, locationKey) {
-				const chosenLocation = pickRandomValue(Array.from(fieldsData[locationKey].rawValues || []));
-				if (!chosenLocation) {
-					console.warn("⚠️ Unable to select a random location.");
-					return [];
-				}
-
-				const groups = [createGroup("rand-location", locationKey, chosenLocation)];
-
-				if (Math.random() < 0.5) {
-					const otherKey = pickRandomValue(Object.keys(fieldsData).filter((key) => key !== locationKey));
-					const otherValue = pickRandomValue(Array.from(fieldsData[otherKey]?.rawValues || []));
-					if (otherKey && otherValue) groups.push(createGroup(`rand-${otherKey}`, otherKey, otherValue));
-				}
-
-				return groups;
-			}
-
-			function createGroup(id, fieldKey, value) {
-				return {
-					id,
-					conditionsMatch: "and",
-					conditions: [
-						{
-							id: `${fieldKey}-cond`,
-							type: "checkbox",
-							fieldKey,
-							value,
-							op: "equal",
-							interacted: true,
-						},
-					],
-				};
-			}
-
-			function applyGroups(listInstance, initialFilters, groups) {
-				listInstance.filters.value = cloneFilters(initialFilters);
-				listInstance.triggerHook("filter");
-
-				select_all('[fs-cmsfilter-field]').forEach((el) => {
-					if (el.type === "checkbox") el.checked = false;
-				});
-
-				groups.forEach(({ conditions }) => {
-					conditions.forEach(({ fieldKey, value }) => {
-						const input = select(`[fs-list-field="${fieldKey}"][fs-list-value="${value}"]`);
-						if (input) {
-							input.checked = true;
-							input.dispatchEvent(new Event("change", { bubbles: true }));
-						} else {
-							console.warn(`⚠️ Could not find input for ${fieldKey} = ${value}`);
-						}
-					});
-				});
-
-				listInstance.filters.value = {
-					groupsMatch: "and",
-					groups,
-				};
-				listInstance.triggerHook("filter");
-			}
-		}
-	}
-
-	// mounts the splide carousel for the activity bar
-	function initActivityBar() {
-		const activityEl = select(".activity.splide");
+	const initActivityBar = () => {
+		const $activity = $j('.activity.splide');
+		const activityEl = $activity[0];
 		if (!activityEl) return;
 
 		const splide = new Splide(activityEl, {
-			type: "loop",
-			perPage: "auto",
+			type: 'loop',
+			perPage: 'auto',
 			perMove: 1,
-			gap: "0",
+			gap: '0',
 			autoplay: false,
 			autoScroll: {
 				speed: 1,
-				pauseOnHover: true,
+				pauseOnHover: true
 			},
 			arrows: false,
 			pagination: false,
 			drag: true,
-			clones: 5,
+			clones: 5
 		});
 
 		splide.mount(window.splide.Extensions);
-	}
+	};
 
-	// handles delegated sharing buttons
-	function initSocialShares() {
-		if (state.resources.__shareDelegation) return;
+	// -----------------------------------------------------------------------------
+	// Custom cursor that follows the mouse
+	// -----------------------------------------------------------------------------
 
-		const shareHandlers = new Map([
-			["facebook messenger", (url) => `fb-messenger://share/?link=${url}`],
-			["whatsapp", (url) => `https://wa.me/?text=${url}`],
-			["snapchat", (url) => `https://www.snapchat.com/scan?attachmentUrl=${url}`],
-		]);
+	const initCustomCursor = () => {
+		const cursorEl = $j('.c-cursor')[0];
+		const targetEl = $j('.page-wrap')[0];
+		if (!cursorEl || !targetEl) return;
 
-		const handleInstagram = () => {
-			if (navigator.share) {
-				navigator
-					.share({ title: document.title, url: window.location.href })
-					.catch((err) => console.warn("Share cancelled or failed", err));
-				return;
-			}
-			alert("Instagram sharing isn’t supported directly. Opening Instagram profile instead.");
-		};
-
-		$j(document.body).on("click.ddgShare", '[data-action="share"][data-custom-share]', (event) => {
-			const $trigger = $j(event.currentTarget);
-
-			event.preventDefault();
-			const platform = $trigger.data("customShare")?.toString().trim().toLowerCase();
-			if (!platform) return;
-
-			if (platform === "instagram") {
-				handleInstagram();
-				return;
-			}
-
-			const handler = shareHandlers.get(platform);
-			if (!handler) {
-				console.warn("Unsupported share target:", platform);
-				return;
-			}
-
-			const shareUrl = handler(encodeURIComponent(window.location.href));
-			if (shareUrl) window.open(shareUrl, "_blank", "noopener,noreferrer");
-		});
-
-		state.resources.__shareDelegation = true;
-	}
-
-	// queues fragment hooks for story content
-	function initStory() {
-		const storyApi = ensure_resource(state.resources, "story", createStoryModule);
-		storyApi.process(document);
-
-		function createStoryModule() {
-			const processed = state.storyCache;
-			const queue = [];
-			let scheduled = false;
-			const resolved = Promise.resolve();
-			const schedule =
-				typeof queueMicrotask === "function" ? queueMicrotask : (cb) => resolved.then(cb);
-
-			return { process };
-
-			function process(root) {
-				if (!root) return;
-				queue.push(root);
-				if (scheduled) return;
-				scheduled = true;
-				schedule(flushQueue);
-			}
-
-			function flushQueue() {
-				scheduled = false;
-				while (queue.length) handleFragment(queue.shift());
-			}
-
-			function handleFragment(root) {
-				const frag = select("#ddg-story-fragment", root);
-				if (!frag) return;
-
-				const slug = resolve_story_slug(frag);
-				if (processed.has(slug)) return;
-				processed.add(slug);
-
-				// story-specific hooks can be initialised here
-			}
-		}
-	}
-
-	// loads and manages the story overlay modal via htmx
-	function initStoryModal() {
-		const doc = document;
-		const selectors = create_selector_map({
-			modal: "#story-modal",
-			panel: "#story-modal-panel",
-			content: "#story-modal-content",
-			loadingIndicator: "#story-modal-loading",
-			main: "main",
-			filterPanel: ".c-home-filters",
-			storyFragment: "#ddg-story-fragment",
-			storyLinks: '.home-list_item[href^="/stories/"]',
-			storyListRoot: ".home-list",
-			storyClose: "[data-ddg-close]",
-			searchOpen: "[data-search-open]",
-			searchClose: "[data-search-close]",
-			focusTargets: "h1, h2, [tabindex], a, button, input, select, textarea",
-		});
-		const tagSelector = (tag) => `input[fs-list-field="tags"][fs-list-value="${CSS.escape(tag)}"]`;
-
-		const modal = selectors.modal();
-		const panel = selectors.panel();
-		const content = selectors.content();
-		const loadingIndicator = selectors.loadingIndicator();
-		const mainEl = selectors.main();
-		const filterPanel = selectors.filterPanel();
-		const $filterPanel = filterPanel ? $j(filterPanel) : null;
-		const storyList = selectors.storyListRoot();
-		const $modal = modal ? $j(modal) : null;
-		const $content = content ? $j(content) : null;
 		const $body = $j(document.body);
-		const $window = $j(window);
-		const $loading = loadingIndicator ? $j(loadingIndicator) : null;
 
-		if (!modal || !content) return;
-		if (modal.dataset.ddgStoryModalInit === "true") return;
-		modal.dataset.ddgStoryModalInit = "true";
-		const fragmentsCache = ensure_resource(state.resources, "storyFragments", () => new Map());
-		let activeRequest = null;
+		const quickConfig = { duration: 0.2, ease: 'power3.out' };
 
-		let lastFocusEl = null;
-		let currentSlug = null;
-		const initialHomeUrl = isStoryPath(location.pathname)
-			? "/"
-			: `${location.pathname}${location.search}${location.hash}` || "/";
+		const moveX =
+			gsap.quickTo?.(cursorEl, 'x', quickConfig) ||
+			(value => gsap.to(cursorEl, { x: value, ...quickConfig }));
 
-		window.__ddgStoryQueue ||= [];
+		const moveY =
+			gsap.quickTo?.(cursorEl, 'y', quickConfig) ||
+			(value => gsap.to(cursorEl, { y: value, ...quickConfig }));
 
-		const boot = () => {
-			setupStoryLinks();
-			applyQueryStateOnHome();
-			startStoryLinkObserver();
+		$win.on('mousemove.ddgCursor', event => {
+			moveX(event.clientX);
+			moveY(event.clientY);
+		});
+
+		$j(targetEl).on('mouseenter.ddgCursor', () => {
+			$body.css('cursor', 'none');
+			gsap.to(cursorEl, { autoAlpha: 1, duration: 0.2 });
+		});
+
+		$j(targetEl).on('mouseleave.ddgCursor', () => {
+			$body.css('cursor', 'auto');
+			gsap.to(cursorEl, { autoAlpha: 0, duration: 0.2 });
+		});
+	};
+
+	// -----------------------------------------------------------------------------
+	// Share: social sharing with daily limits & basic heuristics
+	// -----------------------------------------------------------------------------
+
+	const initShare = () => {
+		const shareWebhookUrl =
+			'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
+
+		const dailyShareKey = 'share_done_date';
+		const shareItemSelector = '[data-share]';
+		const shareCountdownSelector = '[data-share-countdown]';
+		const shareOpenTarget = '_blank';
+
+		const $doc = $j(document);
+		const eventNamespace = '.ddgShare';
+
+		// date helpers
+		const todayString = () => new Date().toISOString().slice(0, 10);
+		const nextMidnight = () => {
+			const date = new Date();
+			date.setHours(24, 0, 0, 0);
+			return date;
 		};
 
-		if (doc.readyState === "loading") {
-			doc.addEventListener("DOMContentLoaded", boot, { once: true });
-		} else {
-			boot();
-		}
+		// cookie helpers
+		const setCookieValue = (name, value, expiresAt) => {
+			document.cookie = `${name}=${value}; expires=${expiresAt.toUTCString()}; path=/; SameSite=Lax`;
+		};
 
-		$modal?.on("click.ddgStoryModal", (event) => {
-			if ($j(event.target).closest(selectors.storyClose.selector).length) {
-				event.preventDefault();
-				requestCloseToHome();
-			}
-		});
+		const getCookieValue = name => {
+			const cookiePair =
+				document.cookie.split('; ').find(row => row.startsWith(name + '=')) ||
+				'';
+			return cookiePair.split('=')[1] || null;
+		};
 
-		$window.on("keydown.ddgStoryModal", (event) => {
-			if (event.key === "Escape" && modal.classList.contains("is-open")) {
-				event.preventDefault();
-				requestCloseToHome();
-			}
-		});
+		// data helpers
+		const markShareComplete = () => {
+			const todayValue = todayString();
+			const expiresAt = nextMidnight();
+			localStorage.setItem(dailyShareKey, todayValue);
+			sessionStorage.setItem(dailyShareKey, todayValue);
+			setCookieValue(dailyShareKey, todayValue, expiresAt);
+		};
 
-		$window.on("popstate.ddgStoryModal", () => {
-			if (isStoryPath(location.pathname)) {
-				if (!modal.classList.contains("is-open")) openStoryModal();
-				if (currentSlug !== location.pathname) loadStory(location.pathname, { pushState: false });
-			} else {
-				if (modal.classList.contains("is-open")) closeStoryModal();
-				applyQueryStateOnHome();
-			}
-		});
+		const alreadySharedToday = () => {
+			const todayValue = todayString();
+			return [
+				localStorage.getItem(dailyShareKey),
+				sessionStorage.getItem(dailyShareKey),
+				getCookieValue(dailyShareKey)
+			].includes(todayValue);
+		};
 
-		function ensureStoryInit(root) {
-			if (window.ddg?.initStory) {
-				window.ddg.initStory(root);
-			} else {
-				window.__ddgStoryQueue.push(root);
-			}
-		}
+		const shareUrlMap = {
+			x: ({ url, text }) =>
+				`https://twitter.com/intent/tweet?text=${encodeURIComponent(
+					text
+				)}&url=${encodeURIComponent(url)}`,
+			facebook: ({ url }) =>
+				`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}`,
+			linkedin: ({ url }) =>
+				`https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(
+					url
+				)}`,
+			whatsapp: ({ url, text }) =>
+				`https://wa.me/?text=${encodeURIComponent(`${text} ${url}`)}`,
+			messenger: ({ url }) =>
+				`https://www.messenger.com/t/?link=${encodeURIComponent(url)}`,
+			snapchat: ({ url }) =>
+				`https://www.snapchat.com/scan?attachmentUrl=${encodeURIComponent(url)}`,
+			instagram: () => 'https://www.instagram.com/',
+			telegram: ({ url, text }) =>
+				`https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(
+					text
+				)}`
+		};
 
-		function openStoryModal() {
-			if (modal.classList.contains("is-open")) return;
+		const platformAlias = { twitter: 'x' };
 
-			lastFocusEl = doc.activeElement instanceof HTMLElement ? doc.activeElement : null;
-			modal.style.display = "block";
-			modal.setAttribute("aria-hidden", "false");
-			doc.documentElement.classList.add("story-modal-open");
-			modal.classList.add("is-open");
-
-			mainEl?.setAttribute("inert", "");
-			requestAnimationFrame(() => panel?.focus?.({ preventScroll: true }));
-		}
-
-		function closeStoryModal({ restoreFocus = true } = {}) {
-			if (!modal.classList.contains("is-open")) return;
-
-			modal.classList.remove("is-open");
-			modal.style.display = "none";
-
-			modal.setAttribute("aria-hidden", "true");
-			doc.documentElement.classList.remove("story-modal-open");
-			mainEl?.removeAttribute("inert");
-			$content?.empty();
-			$loading?.attr("hidden", "hidden");
-			delete content.dataset.currentSlug;
-			currentSlug = null;
-
-			if (restoreFocus) lastFocusEl?.focus?.();
-		}
-
-		function loadStory(path, { pushState = true } = {}) {
-			if (!path) return Promise.resolve();
-
-			const url = new URL(path, location.origin);
-			const requestKey = `${url.pathname}${url.search}`;
-			if (pushState) history.pushState({}, "", requestKey);
-
-			return ensureStoryFragment(requestKey, { prefetch: false }).then((html) => {
-				renderStoryContent(html, url.pathname);
-				return html;
-			});
-		}
-
-		function ensureStoryFragment(path, { prefetch } = {}) {
-			const url = new URL(path, location.origin);
-			const key = `${url.pathname}${url.search}`;
-
-			if (fragmentsCache.has(key)) {
-				return Promise.resolve(fragmentsCache.get(key));
-			}
-
-			if (!prefetch && activeRequest?.abort) {
-				activeRequest.abort();
-			}
-
-			if (!prefetch) {
-				$loading?.removeAttr("hidden");
-			}
-
-			const requestUrl = new URL(url.href, location.origin);
-			if (!requestUrl.searchParams.has("partial")) {
-				requestUrl.searchParams.set("partial", "1");
-			}
-
-			const xhr = $j.ajax({
-				url: requestUrl.toString(),
-				method: "GET",
-				dataType: "html",
-				cache: false,
-			});
-
-			if (!prefetch) activeRequest = xhr;
-
-			return new Promise((resolve, reject) => {
-				xhr
-					.done((response) => {
-						try {
-							const fragmentHtml = extractStoryFragment(response, key);
-							fragmentsCache.set(key, fragmentHtml);
-							resolve(fragmentHtml);
-						} catch (error) {
-							if (!prefetch) handleStoryError(error);
-							reject(error);
-						}
-					})
-					.fail((jqXHR, textStatus) => {
-						const error = new Error(`Unable to load story: ${textStatus || jqXHR.status}`);
-						if (!prefetch) handleStoryError(error);
-						reject(error);
-					})
-					.always(() => {
-						if (!prefetch && activeRequest === xhr) {
-							activeRequest = null;
-						}
-					});
-			});
-		}
-
-		function renderStoryContent(fragmentHtml, slugHint) {
-			if (!$content) return;
-
-			$content.html(fragmentHtml);
-
-			const frag = select(selectors.storyFragment.selector, content);
-			if (!frag) {
-				const error = new Error("Story fragment missing from response.");
-				handleStoryError(error);
-				throw error;
-			}
-
-			const slug = resolve_story_slug(frag, slugHint);
-			currentSlug = slug;
-			content.dataset.currentSlug = slug;
-
-			if (modal && !modal.dataset.homeFallback) {
-				modal.dataset.homeFallback = "/";
-			}
-
-			ensureStoryInit(content);
-			$loading?.attr("hidden", "hidden");
-
-			if (!modal.classList.contains("is-open")) {
-				openStoryModal();
-			}
-
-			const focusTarget =
-				frag.querySelector("[data-modal-focus]") ||
-				select(selectors.focusTargets.selector, content);
-
-			focusTarget?.focus?.({ preventScroll: true });
-			window.ddg?.functions?.trackStoryView?.(slug, { source: "modal" });
-		}
-
-		function extractStoryFragment(response, key) {
-			if (typeof response !== "string") {
-				response = response?.toString?.() ?? "";
-			}
-
-			if (!response.trim()) {
-				throw new Error(`Empty story response for ${key}`);
-			}
-
-			const parser = new DOMParser();
-			const doc = parser.parseFromString(response, "text/html");
-			const fragment = doc.querySelector("#ddg-story-fragment");
-
-			if (!fragment) {
-				throw new Error(`Story fragment missing for ${key}`);
-			}
-
-			return fragment.outerHTML;
-		}
-
-		function handleStoryError(error) {
-			console.error(error);
-			$loading?.attr("hidden", "hidden");
-			if ($content) {
-				$content.html(
-					'<div class="story-modal_error">Sorry, we could not load that story. Please try again.</div>'
+		// countdown decrement utility
+		const decrementCountdown = () => {
+			const $countdownElements = $j(shareCountdownSelector);
+			$countdownElements.each((_, element) => {
+				const $element = $j(element);
+				let remaining = parseInt(
+					element.getAttribute('data-share-countdown') ||
+					$element.text() ||
+					$element.val(),
+					10
 				);
-			}
-			if (!modal.classList.contains("is-open")) openStoryModal();
-		}
-
-		function prefetchStory(path) {
-			if (!path) return;
-			ensureStoryFragment(path, { prefetch: true }).catch((error) => {
-				console.warn("Story prefetch failed", error);
-			});
-		}
-
-		function requestCloseToHome() {
-			forceCloseToHome();
-		}
-
-		function forceCloseToHome() {
-			const fallback = modal.dataset.homeFallback || initialHomeUrl || "/";
-			history.replaceState({}, "", fallback);
-
-			delete modal.dataset.homeFallback;
-			closeStoryModal();
-			applyQueryStateOnHome();
-		}
-
-		function applyQueryStateOnHome() {
-			const url = new URL(location.href);
-			const openStoryParam = url.searchParams.get("open");
-			const tag = url.searchParams.get("tag");
-			const openSearch = url.searchParams.get("search") === "1";
-
-			if (openStoryParam && !isStoryPath(location.pathname)) {
-				if (modal) {
-					const fallbackParams = new URLSearchParams(url.search);
-					fallbackParams.delete("open");
-					const fallbackQuery = fallbackParams.toString();
-					const fallbackUrl = `${url.pathname}${fallbackQuery ? `?${fallbackQuery}` : ""}${url.hash}`;
-					modal.dataset.homeFallback = fallbackUrl || "/";
+				if (!Number.isFinite(remaining)) remaining = 0;
+				const nextValue = Math.max(0, remaining - 1);
+				$element.attr('data-share-countdown', nextValue);
+				if ($element.is('input, textarea')) {
+					$element.val(nextValue);
+				} else {
+					$element.text(nextValue);
 				}
+			});
+		};
 
-				loadStory(openStoryParam, { pushState: false })
-					.then(() => {
-						history.replaceState({}, "", openStoryParam);
-					})
-					.catch(() => {
-						history.replaceState({}, "", url.pathname);
-					});
+		// basic "human intent" heuristics
+		const shareStartTimestamp = performance.now();
+		let pointerTravel = 0;
+		let lastPointerPosition = null;
+
+		$doc.on(`pointermove${eventNamespace}`, event => {
+			const { clientX, clientY } = event;
+
+			if (!lastPointerPosition) {
+				lastPointerPosition = [clientX, clientY];
+				return;
 			}
 
-			if (tag) enableTagFilter(tag);
-			if (openSearch) {
-				openSearchModal();
-			} else {
-				closeSearchModal();
-			}
-		}
+			pointerTravel += Math.hypot(
+				clientX - lastPointerPosition[0],
+				clientY - lastPointerPosition[1]
+			);
+			lastPointerPosition = [clientX, clientY];
+		});
 
-		function enableTagFilter(tag) {
-			if (!tag) return;
+		const heuristicsSatisfied = () =>
+			performance.now() - shareStartTimestamp > 1500 &&
+			pointerTravel > 120 &&
+			document.hasFocus();
 
-			const selector = tagSelector(tag);
-			const input = select(selector, doc);
+		// webhook (via hidden form + iframe to avoid CORS headaches)
+		const sendShareWebhook = platform =>
+			new Promise(resolve => {
+				const form = document.createElement('form');
+				const iframe = document.createElement('iframe');
+				const frameName = 'wf_' + Math.random().toString(36).slice(2);
 
-			if (input && !input.checked) input.click();
-		}
+				iframe.name = frameName;
+				iframe.style.display = 'none';
 
-		function openSearchModal() {
-			if (!$filterPanel) return;
+				form.target = frameName;
+				form.method = 'POST';
+				form.action = shareWebhookUrl;
+				form.style.display = 'none';
 
-			if (!$filterPanel.hasClass("is-open")) {
-				const opener = selectors.searchOpen();
-				opener && $j(opener).trigger("click");
-			}
-		}
-
-		function closeSearchModal() {
-			if (!$filterPanel) return;
-
-			if ($filterPanel.hasClass("is-open")) {
-				$j(selectors.searchClose.selector).trigger("click");
-			}
-		}
-
-		function setupStoryLinks() {
-			selectors.storyLinks.all().forEach((link) => {
-				const href = link.getAttribute("href");
-				if (!href) return;
-
-				const url = new URL(href, location.origin);
-				// Keep these attributes on each story tile: data-ddg-story-link marks the element for ddg,
-				// data-ddg-story-path stores the absolute path, and data-ddg-story-bound prevents rebinding.
-				link.dataset.ddgStoryLink = "true";
-				link.dataset.ddgStoryPath = `${url.pathname}${url.search}`;
-				link.removeAttribute("hx-get");
-				link.removeAttribute("hx-select");
-				link.removeAttribute("hx-target");
-				link.removeAttribute("hx-swap");
-				link.removeAttribute("hx-push-url");
-				link.removeAttribute("hx-trigger");
-				link.removeAttribute("hx-indicator");
-
-				if (link.dataset.ddgStoryBound === "true") return;
-
-				link.addEventListener("click", (event) => {
-					if (
-						event.defaultPrevented ||
-						event.metaKey ||
-						event.ctrlKey ||
-						event.shiftKey ||
-						event.altKey ||
-						event.button !== 0
-					) {
-						return;
-					}
-
-					event.preventDefault();
-					const path = link.dataset.ddgStoryPath;
-					if (!path) return;
-
-					const fallback = buildHomeFallback();
-					if (fallback) modal.dataset.homeFallback = fallback;
-
-					if (!modal.classList.contains("is-open")) openStoryModal();
-					loadStory(path, { pushState: true });
+				[
+					['platform', platform],
+					['date', todayString()]
+				].forEach(([name, value]) => {
+					const input = document.createElement('input');
+					input.type = 'hidden';
+					input.name = name;
+					input.value = value;
+					form.appendChild(input);
 				});
 
-				link.addEventListener(
-					"mouseenter",
-					() => {
-						prefetchStory(link.dataset.ddgStoryPath);
-					},
-					{ once: true }
-				);
+				document.body.append(iframe, form);
+				form.submit();
 
-				link.dataset.ddgStoryBound = "true";
-			});
-		}
-
-		function startStoryLinkObserver() {
-			const observerTargets = [storyList, mainEl, doc.body].filter(Boolean);
-			if (!observerTargets.length) return;
-
-			const observer = new MutationObserver((mutations) => {
-				let needsSetup = false;
-
-				for (const mutation of mutations) {
-					if (mutation.type !== "childList") continue;
-
-					for (const node of mutation.addedNodes) {
-						if (!(node instanceof HTMLElement)) continue;
-						if (
-							node.matches(selectors.storyLinks.selector) ||
-							node.querySelector(selectors.storyLinks.selector)
-						) {
-							needsSetup = true;
-							break;
-						}
-					}
-
-					if (needsSetup) break;
-				}
-
-				if (needsSetup) setupStoryLinks();
+				setTimeout(() => {
+					form.remove();
+					iframe.remove();
+					resolve(true);
+				}, 1000);
 			});
 
-			observerTargets.forEach((target) =>
-				observer.observe(target, { childList: true, subtree: true })
-			);
-		}
+		// click handler
+		$doc.on(`click${eventNamespace}`, shareItemSelector, event => {
+			const $target = $j(event.currentTarget);
+			event.preventDefault();
 
-		function isStoryPath(pathname) {
-			return /^\/stories\//.test(pathname);
-		}
+			const platformKey = ($target.data('share') || '').toString().toLowerCase();
+			const normalizedPlatform = (platformAlias[platformKey] || platformKey).toLowerCase();
 
-		function buildHomeFallback() {
-			if (!modal) return null;
+			const shareUrl = $target.data('share-url') || window.location.href;
+			const shareText = $target.data('share-text') || document.title;
 
-			if (!isStoryPath(location.pathname)) {
-				const fallback = `${location.pathname}${location.search}${location.hash}`;
-				return fallback || "/";
+			const resolver = shareUrlMap[normalizedPlatform];
+			const destination = resolver
+				? resolver({ url: shareUrl, text: shareText })
+				: shareUrl;
+
+			const shareWindow = window.open('about:blank', shareOpenTarget);
+
+			if (!heuristicsSatisfied()) {
+				shareWindow?.close();
+				// eslint-disable-next-line no-console
+				console.warn('[share] blocked');
+				return;
 			}
 
-			return modal.dataset.homeFallback || initialHomeUrl || "/";
+			decrementCountdown();
+
+			if (!alreadySharedToday()) {
+				sendShareWebhook(normalizedPlatform).then(() =>
+					// eslint-disable-next-line no-console
+					console.log('[share] webhook sent')
+				);
+				markShareComplete();
+			} else {
+				// eslint-disable-next-line no-console
+				console.log('[share] daily cap hit');
+			}
+
+			if (shareWindow) {
+				shareWindow.opener = null;
+				shareWindow.location.href = destination;
+			} else {
+				window.location.href = destination;
+			}
+		});
+	};
+
+	// -----------------------------------------------------------------------------
+	// AJAX modal
+	// -----------------------------------------------------------------------------
+
+	const initAjaxModal = () => {
+		const lightboxEl = $j("[tr-ajaxmodal-element='lightbox']")[0];
+		if (!lightboxEl) return;
+
+		const $lightbox = $j(lightboxEl);
+		const lightboxCloseEl = $j("[tr-ajaxmodal-element='lightbox-close']").attr('aria-label', 'Close Modal')[0];
+		const $lightboxClose = $j(lightboxCloseEl);
+		const lightboxModalEl = $j("[tr-ajaxmodal-element='lightbox-modal']")[0];
+		const $lightboxModal = $j(lightboxModalEl);
+		const cmsLinkSelector = "[tr-ajaxmodal-element='cms-link']";
+		const cmsPageContentSelector = "[tr-ajaxmodal-element='cms-page-content']";
+		let initialPageTitle = document.title;
+		let initialPageUrl = window.location.href;
+		let $focusedLink;
+
+		const updatePageInfo = (newTitle, newUrl) => {
+			document.title = newTitle;
+			window.history.replaceState({}, '', newUrl);
+		};
+
+		const tl = gsap.timeline({
+			paused: true,
+			onReverseComplete: () => {
+				if ($focusedLink && $focusedLink.length && typeof $focusedLink.focus === 'function') {
+					$focusedLink.focus();
+				}
+				updatePageInfo(initialPageTitle, initialPageUrl);
+			},
+			onComplete: () => {
+				if ($lightboxClose && $lightboxClose.length && typeof $lightboxClose.focus === 'function') {
+					$lightboxClose.focus();
+				}
+			}
+		});
+		tl.set('body', { overflow: 'hidden' });
+		tl.set($lightbox, { display: 'block', onComplete: () => { if ($lightboxModal && $lightboxModal.length) $lightboxModal.scrollTop(0); } });
+		tl.from($lightbox, { opacity: 0, duration: 0.2 });
+		tl.from($lightboxModal, { y: '5em', duration: 0.2 }, '<');
+
+		const keepFocusWithinLightbox = () => {
+			const $lastFocusableChild = $lightbox
+				.find('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+				.not(':disabled')
+				.not('[aria-hidden=true]')
+				.last();
+			$lastFocusableChild.on('focusout', () => {
+				if ($lightboxClose && $lightboxClose.length && typeof $lightboxClose.focus === 'function') {
+					$lightboxClose.focus();
+				}
+			});
+		};
+
+		$j(document).on('click', cmsLinkSelector, event => {
+			$focusedLink = $j(event.currentTarget);
+			initialPageUrl = window.location.href;
+			event.preventDefault();
+			const linkUrl = $focusedLink.attr('href');
+			$j.ajax({
+				url: linkUrl,
+				success: response => {
+					const $cmsContent = $j(response).find(cmsPageContentSelector);
+					const cmsTitle = $j(response).filter('title').text();
+					const cmsUrl = window.location.origin + linkUrl;
+					if ($lightboxModal && $lightboxModal.length) {
+						$lightboxModal.empty();
+						$lightboxModal.append($cmsContent);
+					}
+					updatePageInfo(cmsTitle, cmsUrl);
+					tl.play();
+					keepFocusWithinLightbox();
+				},
+				error: (jqXHR, textStatus, errorThrown) => {
+					if ($lightboxModal && $lightboxModal.length) {
+						$lightboxModal.empty().append(
+							`<div class='modal-error'>Failed to load content. Please try again later.</div>`
+						);
+					}
+					// eslint-disable-next-line no-console
+					console.error('[ddg] AJAX modal load error:', textStatus, errorThrown);
+				}
+			});
+		});
+
+		if ($lightboxClose && $lightboxClose.length) {
+			$lightboxClose.on('click', () => {
+				tl.reverse();
+			});
 		}
-	}
+		$j(document).on('keydown', event => {
+			if (event.key === 'Escape') tl.reverse();
+		});
+		$j(document).on('click', $lightbox, event => {
+			if (!$j(event.target).is($lightbox.find('*'))) tl.reverse();
+		});
+	};
 
-	// a smooth custom cursor that follows the mouse
-	function initCustomCursor() {
-		const cursor = select(".c-cursor");
-		const target = select(".page-wrap");
-		if (!cursor || !target) return;
+	// -----------------------------------------------------------------------------
+	// Home filters (Finsweet attributes + random filter + Modal)
+	// -----------------------------------------------------------------------------
+	const initFilters = () => {
+		// Selectors
+		const $filterPanel = $j('.c-home-filters');
+		const $openButtons = $j('.c-search-btn');
+		const $closeButtons = $j('.c-circle-button[data-action="close"], .filters_submit');
+		const $randomButton = $j('.random-filter');
 
-		const $target = $j(target);
-		const $body = $j(document.body);
-		const $win = $j(window);
+		// Modal open/close
+		const openFilters = () => {
+			$filterPanel.addClass('is-open').css('display', 'block').attr('aria-hidden', 'false');
+			$j('body').css('overflow', 'hidden');
+		};
 
-		const quickConfig = { duration: 0.2, ease: "power3.out" };
-		const moveX =
-			gsap.quickTo?.(cursor, "x", quickConfig) ||
-			((value) => gsap.to(cursor, { x: value, ...quickConfig }));
-		const moveY =
-			gsap.quickTo?.(cursor, "y", quickConfig) ||
-			((value) => gsap.to(cursor, { y: value, ...quickConfig }));
+		const closeFilters = () => {
+			$filterPanel.removeClass('is-open').css('display', 'none').attr('aria-hidden', 'true');
+			$j('body').css('overflow', '');
+		};
 
-		$win.on("mousemove.ddgCursor", (e) => {
-			moveX(e.clientX);
-			moveY(e.clientY);
+		$openButtons.on('click', e => {
+			e.preventDefault();
+			openFilters();
 		});
 
-		$target.on("mouseenter.ddgCursor", () => {
-			$body.css("cursor", "none");
-			gsap.to(cursor, { autoAlpha: 1, duration: 0.2 });
+		$closeButtons.on('click', e => {
+			e.preventDefault();
+			closeFilters();
 		});
 
-		$target.on("mouseleave.ddgCursor", () => {
-			$body.css("cursor", "auto");
-			gsap.to(cursor, { autoAlpha: 0, duration: 0.2 });
-		});
-	}
+		// Random filter logic
+		const pickRandom = arr => arr[Math.floor(Math.random() * arr.length)];
 
-	// boot sequence
-	const featureOrder = [
-		initNavigation,
-		initPageProgress,
-		initTicker,
-		initFilters,
-		initActivityBar,
-		initSocialShares,
-		initStory,
-		initStoryModal,
-		initCustomCursor,
-	];
+		window.FinsweetAttributes = window.FinsweetAttributes || [];
+		window.FinsweetAttributes.push([
+			'list',
+			lists => {
+				const list = lists[0];
+				$randomButton.on('click', () => {
+					const items = list.items.value;
+					if (!items.length) return;
 
-	ddg.helperFunctions.refreshLayout ??= refreshLayout;
+					const randomItem = pickRandom(items);
+					const fieldEntries = Object.entries(randomItem.fields)
+						.flatMap(([key, val]) =>
+							Array.isArray(val) ? val.map(v => [key, v]) : [[key, val]]
+						)
+						.filter(([_, v]) => v && String(v).trim() !== '');
+
+					const [field, value] = pickRandom(fieldEntries);
+					const $input = $j(
+						`[fs-list-field="${field}"][fs-list-value="${CSS.escape(String(value))}"]`
+					);
+					if (!$input.length) return;
+
+					$j('[fs-list-field]').each((_, el) => {
+						if (el.type === 'checkbox' || el.type === 'radio') el.checked = false;
+					});
+
+					$input.prop('checked', true);
+					$input.trigger('change');
+
+					const closeOnce = () => {
+						closeFilters();
+						list.removeHook('render', closeOnce);
+					};
+					list.addHook('render', closeOnce);
+				});
+			}
+		]);
+	};
+
+	// -----------------------------------------------------------------------------
+	// Feature order & public API
+	// -----------------------------------------------------------------------------
+
 	ddg.boot = initSite;
 })();
