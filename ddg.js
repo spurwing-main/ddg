@@ -26,11 +26,7 @@
 		};
 	};
 
-	// -----------------------------------------------------------------------------
 	// Utilities
-	// -----------------------------------------------------------------------------
-
-	// jQuery handle
 	const $j = window.$;
 	const $win = $j(window);
 
@@ -44,10 +40,7 @@
 	};
 
 
-	// -----------------------------------------------------------------------------
 	// Boot
-	// -----------------------------------------------------------------------------
-
 	const initSite = () => {
 		if (data.siteBooted) return;
 		data.siteBooted = true;
@@ -58,14 +51,11 @@
 		initActivityBar();
 		initCustomCursor();
 		initShare();
+		initModals();
 		initAjaxModal();
-		initFilters();
 	};
 
-	// -----------------------------------------------------------------------------
 	// Navigation: hide/reveal header on scroll
-	// -----------------------------------------------------------------------------
-
 	const initNavigation = () => {
 		const navEl = $j('.nav')[0];
 		if (!navEl) return;
@@ -105,10 +95,7 @@
 		});
 	};
 
-	// -----------------------------------------------------------------------------
-	// Page progress bar (top)
-	// -----------------------------------------------------------------------------
-
+	// Page progress bar
 	const initPageProgress = () => {
 		const progressBarEl = $j('.page-progress_bar')[0];
 		if (!progressBarEl) return;
@@ -152,6 +139,7 @@
 		}
 	};
 
+	// Coming soon Hover Animation
 	function initComingSoon() {
 		const wrapperEl = document.querySelector('.home-list_list');
 		if (!wrapperEl) return;
@@ -221,10 +209,7 @@
 		};
 	}
 
-	// -----------------------------------------------------------------------------
-	// Activity bar (Splide carousel)
-	// -----------------------------------------------------------------------------
-
+	// Activity bar
 	const initActivityBar = () => {
 		const $activity = $j('.activity.splide');
 		const activityEl = $activity[0];
@@ -249,19 +234,14 @@
 		splide.mount(window.splide.Extensions);
 	};
 
-	// -----------------------------------------------------------------------------
-	// Custom cursor that follows the mouse
-	// -----------------------------------------------------------------------------
-
+	// Custom cursor
 	const initCustomCursor = () => {
 		// Disable custom cursor on mobile devices
 		if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) return;
 		const $cursor = $j('.c-cursor');
 		const cursorEl = $cursor[0];
 		if (!cursorEl) return;
-		const $target = $j('.page-wrap');
-		const targetEl = $target[0];
-		if (!targetEl) return;
+		
 		// Ensure cursor is always visible and has fixed positioning
 		gsap.set(cursorEl, { autoAlpha: 1, position: 'fixed', top: 0, left: 0, pointerEvents: 'none' });
 
@@ -309,18 +289,14 @@
 			gsap.quickTo?.(cursorEl, 'y', quickConfig) ||
 			(value => gsap.to(cursorEl, { y: value, ...quickConfig }));
 
-		// Align the custom cursor so its tip (top area) matches the pointer tip
+		// Use clientX/Y instead of pageX/Y for accurate tracking regardless of scroll
 		$win.on('mousemove.ddgCursor', event => {
-			moveX(event.pageX);
-			moveY(event.pageY);
-			// No fade in/out on mousemove.
+			moveX(event.clientX);
+			moveY(event.clientY);
 		});
 	};
 
-	// -----------------------------------------------------------------------------
-	// Share: social sharing with daily limits & basic heuristics
-	// -----------------------------------------------------------------------------
-
+	// Share Buttons. Sends to webhook and opens share URL
 	const initShare = () => {
 		const shareItemSelector = '[data-share]';
 		const shareCountdownSelector = '[data-share-countdown]';
@@ -530,310 +506,359 @@
 		});
 	};
 
-	// -----------------------------------------------------------------------------
-	// AJAX modal
-	// -----------------------------------------------------------------------------
+	// Modals
+	const initModals = () => {
+		const modalLog = createLogger('modals', 'logModals', false);
 
+		// Store modal instances in namespace
+		ddg.modals = ddg.modals || {};
+
+		// Find all unique modal IDs from triggers and elements
+		const modalIds = new Set();
+		$j('[data-modal-trigger], [data-modal-el]').each((_, el) => {
+			const id = $j(el).attr('data-modal-trigger') || $j(el).attr('data-modal-el');
+			if (id) modalIds.add(id);
+		});
+
+		// Initialize each modal
+		modalIds.forEach(modalId => {
+			const $triggers = $j(`[data-modal-trigger="${modalId}"]`);
+			const $el = $j(`[data-modal-el="${modalId}"]`);
+			const $bg = $j(`[data-modal-bg="${modalId}"]`);
+			const $inner = $el.find('[data-modal-inner]').first();
+			const $closeButtons = $j(`[data-modal-close="${modalId}"]`);
+
+			if (!$el.length) {
+				modalLog('warn:no-modal-el', { modalId });
+				return;
+			}
+
+			const elNode = $el[0];
+			const $animTarget = $inner.length ? $inner : $el;
+
+			// Get all descendants for is-open class
+			const getAllElements = () => $el.find('*').addBack();
+
+			// Position management (removed - no positioning needed)
+			// Animation functions...
+
+			// Open animation
+			const open = (options = {}) => {
+				const { skipAnimation = false, beforeOpen = null, afterOpen = null } = options;
+
+				// Close other modals first
+				Object.keys(ddg.modals).forEach(otherId => {
+					if (otherId !== modalId && ddg.modals[otherId]?.isOpen?.()) {
+						ddg.modals[otherId].close({ skipAnimation: true });
+					}
+				});
+
+				// Callback before opening
+				if (beforeOpen && typeof beforeOpen === 'function') {
+					beforeOpen();
+				}
+
+				// Add is-open to ALL elements (bg, el, descendants) BEFORE animation
+				if ($bg.length) $bg.addClass('is-open');
+				getAllElements().addClass('is-open');
+
+				modalLog('open:start', { modalId, skipAnimation });
+
+				// Kill any existing animations
+				gsap.killTweensOf($animTarget[0]);
+
+				if (skipAnimation) {
+					gsap.set($animTarget[0], { opacity: 1, y: 0 });
+					modalLog('open:complete-no-animation', { modalId });
+					if (afterOpen && typeof afterOpen === 'function') {
+						afterOpen();
+					}
+					return;
+				}
+
+				// Animate
+				gsap.fromTo($animTarget[0],
+					{ y: 60, opacity: 0 },
+					{
+						y: 0,
+						opacity: 1,
+						duration: 0.6,
+						ease: 'power2.out',
+						onComplete: () => {
+							modalLog('open:complete', { modalId });
+							if (afterOpen && typeof afterOpen === 'function') {
+								afterOpen();
+							}
+						}
+					}
+				);
+			};
+
+			// Close animation
+			const close = (options = {}) => {
+				const { skipAnimation = false, beforeClose = null, afterClose = null } = options;
+
+				// Callback before closing
+				if (beforeClose && typeof beforeClose === 'function') {
+					beforeClose();
+				}
+
+				// Remove is-open from bg FIRST
+				if ($bg.length) $bg.removeClass('is-open');
+
+				modalLog('close:start', { modalId, skipAnimation });
+
+				// Kill any existing animations
+				gsap.killTweensOf($animTarget[0]);
+
+				const cleanup = () => {
+					// Remove is-open from el and descendants AFTER animation
+					getAllElements().removeClass('is-open');
+					modalLog('close:complete', { modalId });
+					if (afterClose && typeof afterClose === 'function') {
+						afterClose();
+					}
+				};
+
+				if (skipAnimation) {
+					gsap.set($animTarget[0], { opacity: 0, y: 60 });
+					cleanup();
+					return;
+				}
+
+				// Animate then cleanup
+				gsap.to($animTarget[0], {
+					y: 60,
+					opacity: 0,
+					duration: 0.6,
+					ease: 'power2.out',
+					onComplete: cleanup
+				});
+			};
+
+			// Check if open
+			const isOpen = () => $el.hasClass('is-open');
+
+			// Store instance API
+			ddg.modals[modalId] = {
+				open,
+				close,
+				isOpen,
+				$el,
+				$bg,
+				$triggers
+			};
+
+			// Event handlers - only for non-ajax modals
+			const isAjaxModal = $triggers.first().is('[data-ajax-modal="link"]');
+
+			if (!isAjaxModal) {
+				$triggers.on('click', e => {
+					e.preventDefault();
+					open();
+					modalLog('trigger:click', { modalId });
+				});
+			}
+
+			// Close button
+			$closeButtons.on('click.modal', e => {
+				e.preventDefault();
+				e.stopImmediatePropagation();
+				close();
+				modalLog('close-button:click', { modalId });
+			});
+
+			// Background click to close - handle both sibling and child backgrounds
+			if ($bg.length) {
+				$bg.on('click.modal', e => {
+					if (e.target === $bg[0]) {
+						close();
+						modalLog('background:click', { modalId });
+					}
+				});
+			}
+
+			// Modal element click to close (if click is directly on modal container, not its children)
+			$el.on('click.modal', e => {
+				if (e.target === elNode) {
+					close();
+					modalLog('modal-container:click', { modalId });
+				}
+			});
+
+			modalLog('init:complete', { modalId, isAjaxModal });
+		});
+
+		// Single escape key handler for ALL modals
+		$j(document).on('keydown.modals', e => {
+			if (e.key === 'Escape') {
+				// Find which modal is open and close it
+				Object.keys(ddg.modals).forEach(modalId => {
+					if (ddg.modals[modalId].isOpen()) {
+						ddg.modals[modalId].close();
+						modalLog('escape:press', { modalId });
+					}
+				});
+			}
+		});
+
+		modalLog('init:all-complete', { count: modalIds.size });
+	};
+
+	// Ajax Modal: load content via AJAX into a modal with history management
 	const initAjaxModal = () => {
 		const modalLog = createLogger('ajax-modal', 'ajaxModalLogs', true);
 		modalLog('init:start');
-		const lightboxSelector = "[tr-ajaxmodal-element='lightbox']";
-		const $lightbox = $j(lightboxSelector);
-		const lightboxEl = $lightbox[0];
-		if (!lightboxEl) {
-			modalLog('init:abort-no-lightbox', { lightboxSelector });
+
+		const modalId = 'story'; // The modal ID for ajax modal
+		const $links = $j('[data-ajax-modal="link"]');
+		const $embed = $j('[data-ajax-modal="embed"]');
+		const contentSelector = '[data-ajax-modal="content"]';
+
+		// Wait for generic modal to initialize
+		if (!ddg.modals || !ddg.modals[modalId]) {
+			modalLog('error:modal-not-initialized', { modalId });
 			return;
 		}
-		const lightboxModalSelector = "[tr-ajaxmodal-element='lightbox-modal']";
-		const lightboxBgSelector = "[tr-ajaxmodal-element='lightbox-bg']";
-		const cmsLinkSelector = "[tr-ajaxmodal-element='cms-link']";
-		const cmsPageContentSelector = "[tr-ajaxmodal-element='cms-page-content']";
-		const lightboxCloseSelector = "[tr-ajaxmodal-element='lightbox-close']";
-		modalLog('init:selectors', {
-			lightboxSelector,
-			lightboxModalSelector,
-			lightboxBgSelector,
-			cmsLinkSelector,
-			cmsPageContentSelector,
-			lightboxCloseSelector
-		});
 
-		// --- Scroll restoration manual ---
-		if ('scrollRestoration' in history) {
-			history.scrollRestoration = 'manual';
-			modalLog('history:scrollRestoration', { value: history.scrollRestoration });
-		}
-
-		const $lightboxModal = $j(lightboxModalSelector);
-		const $lightboxBg = $j(lightboxBgSelector);
+		const modal = ddg.modals[modalId];
 		const homeTitle = document.title;
-		modalLog('init:elements', {
-			homeTitle,
-			hasModalEl: Boolean($lightboxModal.length),
-			hasLightboxBg: Boolean($lightboxBg.length)
-		});
 
-		const syncLightboxPosition = scrollY => {
-			const offset = typeof scrollY === 'number' ? scrollY : 0;
-			lightboxEl.style.position = 'absolute';
-			lightboxEl.style.top = `${offset}px`;
-			lightboxEl.style.left = '0';
-			lightboxEl.style.right = '0';
-			lightboxEl.style.width = '100%';
-			lightboxEl.style.height = '100vh';
-			modalLog('modal:sync-position', { offset });
-		};
-
-		const resetLightboxPosition = () => {
-			lightboxEl.style.position = '';
-			lightboxEl.style.top = '';
-			lightboxEl.style.left = '';
-			lightboxEl.style.right = '';
-			lightboxEl.style.width = '';
-			lightboxEl.style.height = '';
-		};
-
-		const toggleLightboxBg = isOpen => {
-			if ($lightboxBg.length) {
-				$lightboxBg.toggleClass('is-open', isOpen);
-			}
-		};
-
-		// --- Modal open/close helpers ---
-		const openModal = (newTitle, newUrl) => {
-			const scrollY = window.scrollY;
-			const state = window.history.state || {};
-			window.history.replaceState({ ...state, scrollY }, '', window.location.href);
-
-			toggleLightboxBg(true);
-			$lightbox.addClass('is-open');
-			$lightboxModal.addClass('is-open');
-			syncLightboxPosition(scrollY);
-			modalLog('modal:open', { newTitle, newUrl, scrollY });
-
-			if (newTitle && newUrl) {
-				document.title = newTitle;
-				window.history.pushState({ modal: true, scrollY }, '', newUrl);
-				modalLog('history:pushState', { newTitle, newUrl, scrollY });
-			}
-		};
-
-		const closeModal = () => {
-			const state = window.history.state || {};
-			const savedScrollY = state.scrollY || 0;
-
-			$lightbox.removeClass('is-open');
-			$lightboxModal.removeClass('is-open');
-			resetLightboxPosition();
-			document.title = homeTitle;
-			window.history.pushState({ modal: false, scrollY: savedScrollY }, '', '/');
-			modalLog('modal:close', { savedScrollY });
-
-			setTimeout(() => window.scrollTo(0, savedScrollY), 50);
-		};
-
-		const animateOpen = () =>
-			gsap.fromTo($lightboxModal, { y: '5em', opacity: 0 }, { y: 0, opacity: 1, duration: 0.25, onStart: () => modalLog('modal:animateOpen:start'), onComplete: () => modalLog('modal:animateOpen:complete') });
-		const animateClose = () => {
-			toggleLightboxBg(false);
-			return gsap.to($lightboxModal, {
-				y: '5em',
-				opacity: 0,
-				duration: 0.25,
-				onStart: () => modalLog('modal:animateClose:start'),
-				onComplete: () => {
-					modalLog('modal:animateClose:complete');
-					closeModal();
+		// Open with history management
+		const openWithHistory = (title, url) => {
+			// Open the modal (generic system handles animation)
+			modal.open({
+				afterOpen: () => {
+					// Update history and title after animation
+					if (title && url) {
+						document.title = title;
+						window.history.pushState({ modal: true }, '', url);
+						modalLog('history:push', { title, url });
+					}
 				}
 			});
 		};
 
-		// --- open-on-load logic ---
-		const isLightboxOpen = $lightbox.hasClass('is-open');
-		if (isLightboxOpen) {
-			const state = window.history.state || {};
-			const scrollY = typeof state.scrollY === 'number' ? state.scrollY : 0;
-			if (scrollY > 0) window.scrollTo(0, scrollY);
-			syncLightboxPosition(scrollY);
-			openModal();
-			modalLog('init:reopen-from-state', { scrollY });
-		}
+		// Close with history management
+		const closeWithHistory = () => {
+			// Close the modal (generic system handles animation)
+			modal.close({
+				beforeClose: () => {
+					// Reset title and URL
+					document.title = homeTitle;
+					window.history.pushState({ modal: false }, '', '/');
+					modalLog('history:push-home');
+				}
+			});
+		};
 
-		$j(document).on('click', cmsLinkSelector, event => {
-			const $focusedLink = $j(event.currentTarget);
-			event.preventDefault();
-			const linkUrl = $focusedLink.attr('href');
+		// AJAX link click handler
+		$links.on('click', e => {
+			e.preventDefault();
+			const $link = $j(e.currentTarget);
+			const linkUrl = $link.attr('href');
+
 			modalLog('link:click', { href: linkUrl });
+
 			$j.ajax({
 				url: linkUrl,
-				success: response => {
-					const $cmsContent = $j(response).find(cmsPageContentSelector);
-					const cmsTitle = $j(response).filter('title').text();
-					const cmsUrl = new URL(linkUrl, window.location.origin).href;
-					$lightboxModal.empty().append($cmsContent);
-					openModal(cmsTitle, cmsUrl);
-					animateOpen();
+				success: (response) => {
+					const $content = $j(response).find(contentSelector);
+					const title = $j(response).filter('title').text();
+					const url = new URL(linkUrl, window.location.origin).href;
+
+					// Inject content
+					$embed.empty().append($content);
+
+					// Open modal with history
+					openWithHistory(title, url);
+
 					modalLog('ajax:success', {
 						href: linkUrl,
-						cmsTitle,
-						cmsUrl,
-						contentFound: Boolean($cmsContent.length)
+						title,
+						url,
+						contentFound: Boolean($content.length)
 					});
 				},
 				error: () => {
 					modalLog('ajax:error', { href: linkUrl });
-					$lightboxModal.empty().append("<div class='modal-error'>Failed to load content. Please try again later.</div>");
+					$embed.empty().append("<div class='modal-error'>Failed to load content.</div>");
+					modal.open();
 				}
 			});
 		});
 
-		$lightbox.on('click', lightboxCloseSelector, e => {
+		// Override close button behavior to use history
+		const $closeButtons = modal.$el.find(`[data-modal-close="${modalId}"]`);
+		$closeButtons.off('click.modal').on('click.ajax', e => {
 			e.preventDefault();
 			e.stopImmediatePropagation();
-			animateClose();
-			modalLog('lightbox:close-click');
+			closeWithHistory();
+			modalLog('close-button:click-override');
 		});
 
-		$j(document).on('keydown', e => {
-			if (e.key === 'Escape' && $lightbox.hasClass('is-open')) {
-				animateClose();
-				modalLog('keydown:escape');
-			}
-		});
-
-		$lightbox.on('click', e => {
-			if (e.target === $lightbox[0]) {
-				animateClose();
-				modalLog('lightbox:background-click');
-			}
-		});
-		// --- popstate and open-on-load logic ---
-		window.addEventListener('popstate', e => {
-			const state = e.state || {};
-			const scrollY = typeof state.scrollY === 'number' ? state.scrollY : 0;
-			if (state.modal) {
-				syncLightboxPosition(scrollY);
-				$lightbox.addClass('is-open');
-				$lightboxModal.addClass('is-open');
-				toggleLightboxBg(true);
-				modalLog('popstate:open', { state });
-			} else {
-				resetLightboxPosition();
-				$lightbox.removeClass('is-open');
-				$lightboxModal.removeClass('is-open');
-				toggleLightboxBg(false);
-				modalLog('popstate:close', { state });
-			}
-			if (typeof state.scrollY === 'number') {
-				setTimeout(() => window.scrollTo(0, state.scrollY), 0);
-				modalLog('popstate:scroll-restore', { scrollY: state.scrollY });
-			}
-		});
-
-		if (window.location.pathname.startsWith('/story/')) {
-			$lightbox.addClass('is-open');
-			$lightboxModal.addClass('is-open');
-			toggleLightboxBg(true);
-			syncLightboxPosition(window.scrollY);
-			window.history.replaceState({ modal: true, scrollY: window.scrollY }, '', window.location.href);
-			modalLog('init:story-path', { path: window.location.pathname });
+		// Override background click to use history
+		if (modal.$bg.length) {
+			modal.$bg.off('click.modal').on('click.ajax', e => {
+				if (e.target === modal.$bg[0]) {
+					closeWithHistory();
+					modalLog('background:click-override');
+				}
+			});
 		}
 
-		// On load, always restore scroll position from history.state, even if modal is open or replaced
-		window.addEventListener('load', () => {
-			const state = window.history.state || {};
-			const scrollY = typeof state.scrollY === 'number' ? state.scrollY : 0;
-			if (scrollY > 0) {
-				requestAnimationFrame(() => window.scrollTo(0, scrollY));
-				requestAnimationFrame(() => syncLightboxPosition(scrollY));
-				modalLog('load:scroll-restore', { scrollY });
-			} else {
-				resetLightboxPosition();
+		// Override escape key for this modal
+		$j(document).off('keydown.modals').on('keydown.modals', e => {
+			if (e.key === 'Escape') {
+				Object.keys(ddg.modals).forEach(id => {
+					if (ddg.modals[id].isOpen()) {
+						if (id === modalId) {
+							closeWithHistory();
+						} else {
+							ddg.modals[id].close();
+						}
+						modalLog('escape:press-override', { id });
+					}
+				});
 			}
 		});
 
-		window.addEventListener(
-			'resize',
-			debounce(() => {
-				if ($lightbox.hasClass('is-open')) {
-					syncLightboxPosition(window.scrollY);
+		// Override modal container click to use history
+		if (modal.$el.length) {
+			modal.$el.off('click.modal').on('click.ajax', e => {
+				if (e.target === modal.$el[0]) {
+					closeWithHistory();
+					modalLog('modal-container:click-override');
 				}
-			}, 100)
-		);
+			});
+		}
+
+		// Popstate handler - browser back/forward
+		window.addEventListener('popstate', e => {
+			const state = e.state || {};
+
+			if (state.modal) {
+				// Opening via popstate - skip animation
+				modal.open({ skipAnimation: true });
+				modalLog('popstate:open', { state });
+			} else {
+				// Closing via popstate - skip animation
+				modal.close({ skipAnimation: true });
+				modalLog('popstate:close', { state });
+			}
+		});
+
+		// Direct URL detection on load - /story/ paths
+		if (window.location.pathname.startsWith('/story/')) {
+			modal.open({ skipAnimation: true });
+			window.history.replaceState({ modal: true }, '', window.location.href);
+			modalLog('init:story-path', { path: window.location.pathname });
+		}
 
 		modalLog('init:complete');
 	};
 
-	// -----------------------------------------------------------------------------
-	// Home filters (Finsweet attributes + random filter + Modal)
-	// -----------------------------------------------------------------------------
-	const initFilters = () => {
-		const filterPanelSelector = '.c-home-filters';
-		const openButtonSelector = '.c-search-btn';
-		const closeButtonSelector = '.c-circle-button[data-action="close"], .filters_submit';
-		const randomButtonSelector = '.random-filter';
-		const listFieldSelector = '[fs-list-field]';
-		const $filterPanel = $j(filterPanelSelector);
-		if (!$filterPanel.length) return;
-		const $openButtons = $j(openButtonSelector);
-		const $closeButtons = $j(closeButtonSelector);
-		const $randomButton = $j(randomButtonSelector);
-
-		const toggleFilters = isOpen => {
-			$filterPanel
-				.toggleClass('is-open', isOpen)
-				.css('display', isOpen ? 'block' : 'none')
-				.attr('aria-hidden', !isOpen);
-		};
-
-		$openButtons.on('click', e => { e.preventDefault(); toggleFilters(true); });
-		$closeButtons.on('click', e => { e.preventDefault(); toggleFilters(false); });
-
-		// Random filter logic
-		const pickRandom = arr => arr[Math.floor(Math.random() * arr.length)];
-
-		window.FinsweetAttributes = window.FinsweetAttributes || [];
-		window.FinsweetAttributes.push([
-			'list',
-			lists => {
-				const list = lists[0];
-				$randomButton.on('click', () => {
-					const items = list.items.value;
-					if (!items.length) return;
-
-					const randomItem = pickRandom(items);
-					const fieldEntries = Object.entries(randomItem.fields)
-						.flatMap(([key, val]) =>
-							Array.isArray(val) ? val.map(v => [key, v]) : [[key, val]]
-						)
-						.filter(([_, v]) => v && String(v).trim() !== '');
-
-					const [field, value] = pickRandom(fieldEntries);
-					const $input = $j(
-						`[fs-list-field="${field}"][fs-list-value="${CSS.escape(String(value))}"]`
-					);
-					if (!$input.length) return;
-
-					$j(listFieldSelector).each((_, el) => {
-						if (el.type === 'checkbox' || el.type === 'radio') el.checked = false;
-					});
-
-					$input.prop('checked', true);
-					$input.trigger('change');
-
-					const closeOnce = () => {
-						toggleFilters(false);
-						list.removeHook('render', closeOnce);
-					};
-					list.addHook('render', closeOnce);
-				});
-			}
-		]);
-	};
-
-	// -----------------------------------------------------------------------------
-	// Feature order & public API
-	// -----------------------------------------------------------------------------
-
+	// Boot 🚀
 	ddg.boot = initSite;
+	
 })();
