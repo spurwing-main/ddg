@@ -3,7 +3,9 @@
 	// Namespace & data
 	const ddg = (window.ddg ??= {});
 	const data = (ddg.data ??= {
-		siteBooted: false
+		siteBooted: false,
+		truePath: window.location.pathname,
+		ajaxHomeLoaded: false
 	});
 
 	// Debug helpers
@@ -39,14 +41,37 @@
 		if (data.siteBooted) return;
 		data.siteBooted = true;
 
+		initAjaxHome();
+
+		// Ensure Finsweet List loads deterministically after page + Ajax
+		setupFinsweetListLoader();
+
 		initNavigation();
 		initPageProgress();
 		initComingSoon();
 		initActivityBar();
 		initCustomCursor();
 		initShare();
+		initRandomiseFilters();
+
 		initModals();
 		initAjaxModal();
+	};
+
+	// Finsweet List: simple programmatic load
+	const setupFinsweetListLoader = () => {
+		window.FinsweetAttributes = window.FinsweetAttributes || [];
+
+		// On story index pages, List is loaded inside Ajax Home before embed.
+		if (data.truePath.startsWith('/stories/')) return;
+
+		const loadAll = () => {
+			window.FinsweetAttributes.load('list');
+			window.FinsweetAttributes.load('copyclip');
+		};
+
+		if (document.readyState === 'complete') loadAll();
+		else window.addEventListener('load', loadAll, { once: true });
 	};
 
 	// Navigation: hide/reveal header on scroll
@@ -506,6 +531,7 @@
 
 		// Store modal instances in namespace
 		ddg.modals = ddg.modals || {};
+		ddg._modalsKeydownBound = Boolean(ddg._modalsKeydownBound);
 
 		// Find all unique modal IDs from triggers and elements
 		const modalIds = new Set();
@@ -514,8 +540,12 @@
 			if (id) modalIds.add(id);
 		});
 
-		// Initialize each modal
+		// Initialize each modal (idempotent: skip ones we already have)
 		modalIds.forEach(modalId => {
+			if (ddg.modals[modalId]) {
+				modalLog('skip:already-initialized', { modalId });
+				return;
+			}
 			const $triggers = $(`[data-modal-trigger="${modalId}"]`);
 			const $el = $(`[data-modal-el="${modalId}"]`);
 			const $bg = $(`[data-modal-bg="${modalId}"]`);
@@ -530,8 +560,19 @@
 			const elNode = $el[0];
 			const $animTarget = $inner.length ? $inner : $el;
 
-			// Get all descendants for is-open class
-			const getAllElements = () => $el.find('*').addBack();
+				// Get all descendants for is-open class
+				const getAllElements = () => $el.find('*').addBack();
+
+				// Initial state sync: if modal starts open, ensure every
+				// descendant (and background) has `is-open`. If closed, strip any
+				// stray `is-open` classes from descendants and bg to avoid stale state.
+				if ($el.hasClass('is-open')) {
+					if ($bg.length) $bg.addClass('is-open');
+					getAllElements().addClass('is-open');
+				} else {
+					if ($bg.length) $bg.removeClass('is-open');
+					getAllElements().removeClass('is-open');
+				}
 
 			// Position management (removed - no positioning needed)
 			// Animation functions...
@@ -643,11 +684,11 @@
 				$triggers
 			};
 
-			// Event handlers - only for non-ajax modals
+			// Event handlers - use delegation for dynamically added triggers
 			const isAjaxModal = $triggers.first().is('[data-ajax-modal="link"]');
 
 			if (!isAjaxModal) {
-				$triggers.on('click', e => {
+				$(document).on('click', `[data-modal-trigger="${modalId}"]`, e => {
 					e.preventDefault();
 					open();
 					modalLog('trigger:click', { modalId });
@@ -683,8 +724,10 @@
 			modalLog('init:complete', { modalId, isAjaxModal });
 		});
 
-		// Single escape key handler for ALL modals
-		$(document).on('keydown.modals', e => {
+		// Single escape key handler for ALL modals (bind once)
+		if (!ddg._modalsKeydownBound) {
+			ddg._modalsKeydownBound = true;
+			$(document).on('keydown.modals', e => {
 			if (e.key === 'Escape') {
 				// Find which modal is open and close it
 				Object.keys(ddg.modals).forEach(modalId => {
@@ -694,18 +737,18 @@
 					}
 				});
 			}
-		});
+			});
+		}
 
 		modalLog('init:all-complete', { count: modalIds.size });
 	};
 
-	// Ajax Modal: load content via AJAX into a modal with history management
+	// Ajax Modal
 	const initAjaxModal = () => {
 		const modalLog = createLogger('ajax-modal', 'ajaxModalLogs', true);
 		modalLog('init:start');
 
 		const modalId = 'story'; // The modal ID for ajax modal
-		const $links = $('[data-ajax-modal="link"]');
 		const $embed = $('[data-ajax-modal="embed"]');
 		const contentSelector = '[data-ajax-modal="content"]';
 
@@ -727,6 +770,7 @@
 					if (title && url) {
 						document.title = title;
 						window.history.pushState({ modal: true }, '', url);
+						// Note: truePath stays as '/' because this is a modal overlay
 						modalLog('history:push', { title, url });
 					}
 				}
@@ -746,8 +790,8 @@
 			});
 		};
 
-		// AJAX link click handler
-		$links.on('click', e => {
+		// AJAX link click handler - use delegation to work with dynamically injected content
+		$(document).on('click', '[data-ajax-modal="link"]', e => {
 			e.preventDefault();
 			const $link = $(e.currentTarget);
 			const linkUrl = $link.attr('href');
@@ -844,15 +888,291 @@
 
 		// Direct URL detection on load - /story/ paths
 		if (window.location.pathname.startsWith('/story/')) {
+			// This is a true story page load (not a modal)
+			// truePath is already set correctly in data initialization
 			modal.open({ skipAnimation: true });
 			window.history.replaceState({ modal: true }, '', window.location.href);
-			modalLog('init:story-path', { path: window.location.pathname });
+			modalLog('init:story-path', { path: window.location.pathname, truePath: data.truePath });
 		}
 
 		modalLog('init:complete');
 	};
 
+	// Ajax Home
+	const initAjaxHome = () => {
+		console.log('[ajaxHome] init', { truePath: data.truePath, ajaxHomeLoaded: data.ajaxHomeLoaded });
+		
+		// Only run once
+		if (data.ajaxHomeLoaded) {
+			console.log('[ajaxHome] skip - already loaded');
+			return;
+		}
+		
+		// Only run on true story pages (not modal overlays)
+		if (!data.truePath.startsWith('/stories/')) {
+			console.log('[ajaxHome] skip - not story path');
+			return;
+		}
+
+		const $target = $('[data-ajax-home="target"]');
+		console.log('[ajaxHome] target found:', $target.length);
+		
+		if (!$target.length) {
+			// Nothing to inject, but signal completion so dependents can continue
+			document.dispatchEvent(new CustomEvent('homeAjax:done'));
+			return;
+		}
+
+		console.log('[ajaxHome] fetching home page');
+		
+		$.ajax({
+			url: '/',
+			success: (response) => {
+				console.log('[ajaxHome] response received');
+				const $html = $('<div>').append($.parseHTML(response));
+				const $source = $html.find('[data-ajax-home="source"]');
+				
+				console.log('[ajaxHome] source found:', $source.length);
+				
+				if ($source.length) {
+					const content = $source.html();
+					console.log('[ajaxHome] preparing to inject, length:', content.length);
+
+					// Wait for Attributes runtime to be ready, then load List, then inject
+					const waitFor = (test, { interval = 50, max = 200 } = {}) => new Promise((resolve, reject) => {
+						let tries = 0;
+						const id = setInterval(() => {
+							tries += 1;
+							if (test()) { clearInterval(id); resolve(true); }
+							else if (tries >= max) { clearInterval(id); reject(new Error('timeout')); }
+						}, interval);
+					});
+
+					waitFor(() => window.FinsweetAttributes && typeof window.FinsweetAttributes.load === 'function')
+						.then(() => { window.FinsweetAttributes.load('list'); window.FinsweetAttributes.load('modal'); })
+						.then(() => waitFor(() => {
+							const m = window.FinsweetAttributes.modules || {};
+							return m.list && typeof m.list.restart === 'function' && m.modal && typeof m.modal.restart === 'function';
+						}))
+						.then(() => {
+							$target.empty().append(content);
+							data.ajaxHomeLoaded = true;
+							console.log('[ajaxHome] injection complete');
+
+							// Rebind Finsweet modules to injected DOM
+							window.FinsweetAttributes.modules.list.restart();
+							window.FinsweetAttributes.modules.modal.restart();
+							// Initialize site modals for newly injected elements
+							initModals();
+
+							// Signal sitewide that Ajax Home is done
+							document.dispatchEvent(new CustomEvent('homeAjax:done'));
+
+							// Re-initialize features that depend on the injected content
+							initComingSoon();
+							initPageProgress();
+
+							// Refresh ScrollTrigger after content injection
+							requestAnimationFrame(() => {
+								ScrollTrigger.refresh();
+								console.log('[ajaxHome] ScrollTrigger refreshed');
+							});
+						})
+						.catch(() => {
+							// If Attributes is somehow not ready, still inject to avoid blank UI
+							$target.empty().append(content);
+							data.ajaxHomeLoaded = true;
+							console.warn('[ajaxHome] injected without Finsweet List restart');
+							// Initialize site modals even if Attributes not ready
+							initModals();
+							document.dispatchEvent(new CustomEvent('homeAjax:done'));
+						});
+				} else {
+					console.log('[ajaxHome] no source element found on home page');
+					// Treat as complete to avoid blocking dependents
+					document.dispatchEvent(new CustomEvent('homeAjax:done'));
+				}
+			},
+			error: (xhr, status, error) => {
+				console.error('[ajaxHome] fetch failed:', status, error);
+				// Still signal completion so downstream can proceed
+				document.dispatchEvent(new CustomEvent('homeAjax:done'));
+			}
+		});
+		};
+
+	// Randomise Filters
+	function initRandomiseFilters() {
+		// Require a trigger element to exist on the page
+		const triggerExists = !!document.querySelector('[data-randomfilters]');
+		if (!triggerExists) return;
+		// Utilities
+		const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+		const shuffle = (arr) => arr.sort(() => Math.random() - 0.5);
+
+		// Build an index of the Filters UI so we can set inputs programmatically
+		const indexFiltersUI = () => {
+			const forms = Array.from(document.querySelectorAll('[fs-list-element="filters"]'));
+			const index = new Map();
+
+			forms.forEach((form) => {
+				const els = form.querySelectorAll('[fs-list-field]');
+				els.forEach((el) => {
+					const raw = el.getAttribute('fs-list-field') || '';
+					const fieldKeys = raw.split(',').map(s => s.trim()).filter(Boolean);
+					const tag = el.tagName.toLowerCase();
+					const type = (el.getAttribute('type') || '').toLowerCase();
+
+					fieldKeys.forEach((key) => {
+						if (!key || key === '*') return; // skip catch‑all search
+
+						const entry = index.get(key) || {
+							checkboxes: [], radios: [], select: null, text: [], valuesMap: new Map(), selectValues: new Set(), forms: new Set()
+						};
+						entry.forms.add(form);
+
+						if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
+							const val = el.getAttribute('fs-list-value') ?? el.value ?? '';
+							if (val) entry.valuesMap.set(val, el);
+							if (type === 'checkbox') entry.checkboxes.push(el);
+							if (type === 'radio') entry.radios.push(el);
+						} else if (tag === 'select') {
+							entry.select = el;
+							Array.from(el.options).forEach(opt => entry.selectValues.add(opt.value));
+						} else if (tag === 'input') {
+							entry.text.push(el);
+						}
+
+						index.set(key, entry);
+					});
+				});
+			});
+
+			return index;
+		};
+
+		// Access list items safely across potential versions
+		const getItemsArray = (listInstance) => {
+			if (!listInstance) return [];
+			if (Array.isArray(listInstance.items)) return listInstance.items;
+			if (Array.isArray(listInstance.items?.value)) return listInstance.items.value;
+			return [];
+		};
+
+		// Read an item's field map; fall back to DOM when needed
+		const getItemFields = (item) => {
+			if (item?.fields) return item.fields; // expected shape: { [key]: { value } }
+
+			const map = {};
+			const root = item?.element;
+			if (!root) return map;
+
+			root.querySelectorAll('[fs-list-field]').forEach((el) => {
+				const key = el.getAttribute('fs-list-field');
+				if (!key || key === '*') return;
+				const vAttr = el.getAttribute('fs-list-value');
+				const txt = (el.textContent || '').trim();
+				const raw = vAttr ?? txt;
+				const values = raw.split(',').map(s => s.trim()).filter(Boolean);
+				map[key] = { value: values.length > 1 ? values : (values[0] ?? '') };
+			});
+
+			return map;
+		};
+
+		// Clear filters: prefer native Clear element, else reset forms
+		const clearFilters = (uiIndex) => {
+			const clearBtn = document.querySelector('[fs-list-element="clear"]');
+			if (clearBtn) { clearBtn.click(); return; }
+
+			const forms = new Set();
+			for (const [, entry] of uiIndex) entry.forms.forEach(f => forms.add(f));
+
+			forms.forEach((form) => {
+				form.reset();
+				form.querySelectorAll('[fs-list-field]').forEach((el) => {
+					el.dispatchEvent(new Event('input', { bubbles: true }));
+					el.dispatchEvent(new Event('change', { bubbles: true }));
+				});
+			});
+		};
+
+		// Apply one field/value to the UI
+		const applyOne = (uiEntry, value, formsToSubmit) => {
+			if (!uiEntry) return false;
+			// Checkbox/Radio mapped by fs-list-value
+			if (uiEntry.valuesMap.has(value)) {
+				const input = uiEntry.valuesMap.get(value);
+				if (input.type === 'checkbox' || input.type === 'radio') {
+					input.checked = true;
+					input.dispatchEvent(new Event('input', { bubbles: true }));
+					input.dispatchEvent(new Event('change', { bubbles: true }));
+					const form = input.closest('form');
+					if (form && form.getAttribute('fs-list-filteron') === 'submit') formsToSubmit.add(form);
+					return true;
+				}
+			}
+			// Select
+			if (uiEntry.select && uiEntry.selectValues.has(value)) {
+				uiEntry.select.value = value;
+				uiEntry.select.dispatchEvent(new Event('change', { bubbles: true }));
+				const form = uiEntry.select.closest('form');
+				if (form && form.getAttribute('fs-list-filteron') === 'submit') formsToSubmit.add(form);
+				return true;
+			}
+			return false;
+		};
+
+		// When Finsweet List is ready, perform the randomisation
+		const run = (listInstances) => {
+			const [listInstance] = listInstances || [];
+			if (!listInstance) return;
+
+			const uiIndex = indexFiltersUI();
+			const items = getItemsArray(listInstance);
+			if (!items.length) return;
+
+			const randomItem = items[randInt(0, items.length - 1)];
+			const fieldsMap = getItemFields(randomItem);
+
+			// Build candidate field/value pairs that actually exist in the UI
+			const candidates = [];
+			for (const [key, uiEntry] of uiIndex) {
+				const data = fieldsMap[key];
+				if (!data) continue;
+
+				let values = Array.isArray(data.value) ? data.value : [data.value];
+				values = values.flatMap(v => String(v).split(',')).map(s => s.trim()).filter(Boolean);
+
+				const allowed = values.filter(v => uiEntry.valuesMap.has(v) || (uiEntry.select && uiEntry.selectValues.has(v)));
+				if (!allowed.length) continue;
+
+				const chosen = allowed[randInt(0, allowed.length - 1)];
+				candidates.push({ key, value: chosen, uiEntry });
+			}
+
+			if (!candidates.length) return;
+
+			shuffle(candidates);
+			const howMany = randInt(2, Math.min(5, candidates.length));
+			const chosenPairs = candidates.slice(0, howMany);
+
+			clearFilters(uiIndex);
+
+			const formsToSubmit = new Set();
+			chosenPairs.forEach(({ value, uiEntry }) => applyOne(uiEntry, value, formsToSubmit));
+
+			formsToSubmit.forEach((form) => {
+				if (form.requestSubmit) form.requestSubmit();
+				else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+			});
+		};
+
+		// Queue via Finsweet Attributes API so it runs when List is loaded
+		window.FinsweetAttributes = window.FinsweetAttributes || [];
+		window.FinsweetAttributes.push(['list', run]);
+	}
+
 	// Boot 🚀
 	ddg.boot = initSite;
-
 })();
