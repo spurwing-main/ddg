@@ -21,6 +21,7 @@
 		}
 	} catch (_) { }
 
+	ddg.scheduleFsRestart = (moduleName) => {
 		ddg.__fsRestartScheduled = ddg.__fsRestartScheduled || {};
 		if (ddg.__fsRestartScheduled[moduleName]) return;
 		ddg.__fsRestartScheduled[moduleName] = true;
