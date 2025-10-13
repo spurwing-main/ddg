@@ -8,6 +8,51 @@
 		ajaxHomeLoaded: false
 	});
 
+	// Finsweet helpers (centralized)
+	const fsState = (ddg.fsState ??= {
+		loadRequested: new Set(),
+		activeList: null
+	});
+
+	// Page progress refresh utility
+	ddg.refreshPageProgress = () => {
+		try { if (window.ScrollTrigger?.refresh) requestAnimationFrame(() => ScrollTrigger.refresh()); } catch (_) {}
+	};
+
+	ddg.ensurePageProgressRefreshHook = (listInstance) => {
+		if (!listInstance || typeof listInstance.addHook !== 'function') return;
+		if (listInstance.__ddgProgressHookAdded) return;
+		try {
+			listInstance.addHook('afterRender', (items) => {
+				ddg.refreshPageProgress();
+				// Also refresh ticker tape after render
+				if (ddg.tickerTape?.refresh) {
+					requestAnimationFrame(() => ddg.tickerTape.refresh());
+				}
+				return items;
+			});
+			listInstance.__ddgProgressHookAdded = true;
+		} catch (_) {}
+	};
+
+	ddg.requestFsLoad = (...modules) => {
+		if (!window.FinsweetAttributes) window.FinsweetAttributes = [];
+		modules.forEach((m) => {
+			if (fsState.loadRequested.has(m)) return;
+			try { window.FinsweetAttributes.load && window.FinsweetAttributes.load(m); } catch (_) {}
+			fsState.loadRequested.add(m);
+		});
+	};
+
+	ddg.setActiveList = (instances) => {
+		if (Array.isArray(instances) && instances.length) {
+			fsState.activeList = instances[0];
+			ddg.ensurePageProgressRefreshHook(fsState.activeList);
+		}
+	};
+
+	ddg.getActiveList = () => fsState.activeList || null;
+
 
 	// Boot
 	const initSite = () => {
@@ -39,8 +84,7 @@
 		if (data.truePath.startsWith('/stories/')) return;
 
 		const loadAll = () => {
-			window.FinsweetAttributes.load('list');
-			window.FinsweetAttributes.load('copyclip');
+			ddg.requestFsLoad('list', 'copyclip');
 		};
 
 		if (document.readyState === 'complete') loadAll();
@@ -133,31 +177,34 @@
 				try { s.revert(); } catch (e) { }
 			});
 			splits = [];
-			wrapperEl
-				.querySelectorAll('.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item')
-				.forEach(el => {
-					let split;
-					try {
-						split = SplitText.create(el, {
-							type: 'lines',
-							autoSplit: true,
-							tag: 'span',
-							linesClass: 'home-list_split-line'
-						});
-					} catch (e) {
-						console.warn('SplitText error', e);
-						return;
-					}
-					splits.push(split);
+			// Use requestAnimationFrame to ensure DOM has settled
+			requestAnimationFrame(() => {
+				wrapperEl
+					.querySelectorAll('.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item')
+					.forEach(el => {
+						let split;
+						try {
+							split = SplitText.create(el, {
+								type: 'lines',
+								autoSplit: true,
+								tag: 'span',
+								linesClass: 'home-list_split-line'
+							});
+						} catch (e) {
+							console.warn('SplitText error', e);
+							return;
+						}
+						splits.push(split);
 
-					const $el = $(el);
-					$el
-						.on('mouseenter.ddgComingSoon', () => animate(el, 0))
-						.on('mouseleave.ddgComingSoon', () => animate(el, '100%'));
-					if (el.tagName === 'A') {
-						$el.one('click.ddgComingSoon', e => e.preventDefault());
-					}
-				});
+						const $el = $(el);
+						$el
+							.on('mouseenter.ddgComingSoon', () => animate(el, 0))
+							.on('mouseleave.ddgComingSoon', () => animate(el, '100%'));
+						if (el.tagName === 'A') {
+							$el.one('click.ddgComingSoon', e => e.preventDefault());
+						}
+					});
+			});
 		};
 
 		const animate = (el, offset) => {
@@ -178,6 +225,10 @@
 			clearTimeout(resizeTimer);
 			resizeTimer = setTimeout(refresh, 200);
 		});
+
+		// Expose refresh globally
+		ddg.tickerTape = ddg.tickerTape || {};
+		ddg.tickerTape.refresh = refresh;
 	}
 
 	// Activity bar
@@ -722,25 +773,37 @@
 								$target.empty().append(content);
 								data.ajaxHomeLoaded = true;
 
-								window.FinsweetAttributes.modules.list.restart();
-								window.FinsweetAttributes.modules.copyclip?.restart?.();
-								initModals();
-								initComingSoon();
-								initPageProgress();
+									window.FinsweetAttributes.modules.list.restart();
+									window.FinsweetAttributes.modules.copyclip?.restart?.();
+									initModals();
+									initComingSoon();
+									initPageProgress();
 
-								requestAnimationFrame(() => ScrollTrigger.refresh());
+								requestAnimationFrame(() => {
+									ScrollTrigger.refresh();
+									// Refresh ticker tape after Ajax load
+									if (ddg.tickerTape?.refresh) {
+										setTimeout(() => ddg.tickerTape.refresh(), 100);
+									}
+								});
 							} else if (attempt2 < 100) {
 								setTimeout(() => checkModulesReady(attempt2 + 1), 50);
 							} else {
-								// Fallback: inject anyway
-								$target.empty().append(content);
-								data.ajaxHomeLoaded = true;
-								initModals();
-							}
-						};
-						checkModulesReady();
-					} else if (attempt < 100) {
-						setTimeout(() => checkFinsweetReady(attempt + 1), 50);
+									// Fallback: inject anyway
+									$target.empty().append(content);
+									data.ajaxHomeLoaded = true;
+									// Ensure Attributes processes the new content
+									try {
+										ddg.requestFsLoad('list', 'copyclip');
+										window.FinsweetAttributes.modules?.list?.restart?.();
+										window.FinsweetAttributes.modules?.copyclip?.restart?.();
+									} catch (_) {}
+									initModals();
+								}
+							};
+							checkModulesReady();
+						} else if (attempt < 100) {
+							setTimeout(() => checkFinsweetReady(attempt + 1), 50);
 					} else {
 						// Fallback: inject anyway
 						$target.empty().append(content);
@@ -765,22 +828,13 @@
             return String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
         };
 
-        let lastInstance = null; // updated via API callback; also try modules.list.instances at runtime
-
-        const getActiveListInstance = () => {
-            const mod = window.FinsweetAttributes?.modules?.list;
-            if (mod) {
-                const arr = Array.isArray(mod.instances) ? mod.instances : (Array.isArray(mod.instances?.value) ? mod.instances.value : null);
-                if (arr && arr.length) return arr[0];
-            }
-            return lastInstance;
-        };
+        let lastInstance = null; // kept for compatibility; primary source is ddg.getActiveList
 
         const randomise = () => {
-            const listInstance = getActiveListInstance();
+            const listInstance = ddg.getActiveList() || lastInstance;
             if (!listInstance) {
                 log('No list instance. Loading and retrying…');
-                try { if (window.FinsweetAttributes?.load) window.FinsweetAttributes.load('list'); } catch (_) {}
+                ddg.requestFsLoad('list');
                 setTimeout(() => randomise(), 100);
                 return false;
             }
@@ -861,6 +915,9 @@
                 });
             }
 
+            // Ensure page progress refreshes after any render
+            ddg.ensurePageProgressRefreshHook(listInstance);
+
             // Apply via API (reactive filters) to guarantee match to selected item
             const apiFilters = listInstance.filters?.value;
             if (!apiFilters) { log('List filters ref not available.'); return false; }
@@ -893,6 +950,8 @@
                 if (lab) lab.classList.add('is-list-active');
             });
             log('Applied via API and synced UI for', chosen.length, 'conditions.');
+            // Also refresh ScrollTrigger immediately in case hooks are bypassed
+            ddg.refreshPageProgress();
             return true;
         };
 
@@ -915,6 +974,7 @@
         window.FinsweetAttributes.push([
             'list',
             (instances) => {
+                ddg.setActiveList(instances);
                 if (Array.isArray(instances) && instances.length) lastInstance = instances[0];
             },
         ]);
