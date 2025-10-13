@@ -20,22 +20,16 @@
 		const isEnabled = flagAccessor(flagKey, defaultValue);
 		return (...args) => {
 			if (!isEnabled()) return;
-			if (typeof console?.log === 'function') {
-				console.log(`[ddg:${namespace}]`, ...args);
-			}
+			console.log(`[ddg:${namespace}]`, ...args);
 		};
 	};
 
 	// Utilities
-	const $j = window.$;
-	const $win = $j(window);
-
 	const debounce = (fn, wait) => {
 		let timeoutId;
-		return function (...args) {
-			const context = this;
+		return (...args) => {
 			clearTimeout(timeoutId);
-			timeoutId = setTimeout(() => fn.apply(context, args), wait);
+			timeoutId = setTimeout(() => fn(...args), wait);
 		};
 	};
 
@@ -57,7 +51,7 @@
 
 	// Navigation: hide/reveal header on scroll
 	const initNavigation = () => {
-		const navEl = $j('.nav')[0];
+		const navEl = $('.nav')[0];
 		if (!navEl) return;
 
 		const showThreshold = 50;
@@ -97,7 +91,7 @@
 
 	// Page progress bar
 	const initPageProgress = () => {
-		const progressBarEl = $j('.page-progress_bar')[0];
+		const progressBarEl = $('.page-progress_bar')[0];
 		if (!progressBarEl) return;
 
 		gsap.set(progressBarEl, { scaleX: 0 });
@@ -113,12 +107,12 @@
 			}
 		});
 
-		const $homeList = $j('.home-list');
+		const $homeList = $('.home-list');
 		const homeListEl = $homeList[0];
 		if (!homeListEl) return;
 
 		const homeListItemSelector = '.home-list_item';
-		const hasListItems = () => $j(homeListItemSelector).length > 0;
+		const hasListItems = () => $(homeListItemSelector).length > 0;
 
 		const debouncedRefresh = debounce(() => ScrollTrigger.refresh(), 100);
 
@@ -171,7 +165,7 @@
 					}
 					splits.push(split);
 
-					const $el = $j(el);
+					const $el = $(el);
 					$el
 						.on('mouseenter.ddgComingSoon', () => animate(el, 0))
 						.on('mouseleave.ddgComingSoon', () => animate(el, '100%'));
@@ -196,7 +190,7 @@
 		refresh();
 
 		const onResize = debounce(refresh, 200);
-		$j(window).on('resize.ddgComingSoon', onResize);
+		$(window).on('resize.ddgComingSoon', onResize);
 
 		return {
 			refresh,
@@ -204,14 +198,14 @@
 				splits.forEach(s => {
 					try { s.revert(); } catch (_) { }
 				});
-				$j(window).off('resize.ddgComingSoon', onResize);
+				$(window).off('resize.ddgComingSoon', onResize);
 			}
 		};
 	}
 
 	// Activity bar
 	const initActivityBar = () => {
-		const $activity = $j('.activity.splide');
+		const $activity = $('.activity.splide');
 		const activityEl = $activity[0];
 		if (!activityEl) return;
 
@@ -238,10 +232,10 @@
 	const initCustomCursor = () => {
 		// Disable custom cursor on mobile devices
 		if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) return;
-		const $cursor = $j('.c-cursor');
+		const $cursor = $('.c-cursor');
 		const cursorEl = $cursor[0];
 		if (!cursorEl) return;
-		
+
 		// Ensure cursor is always visible and has fixed positioning
 		gsap.set(cursorEl, { autoAlpha: 1, position: 'fixed', top: 0, left: 0, pointerEvents: 'none' });
 
@@ -263,7 +257,7 @@
 
 		// Improved scroll handler to fix fade glitch
 		let isScrolling = false;
-		$win.on('wheel.ddgCursor', () => {
+		$(window).on('wheel.ddgCursor', () => {
 			if (!isScrolling) {
 				fadeOutCursor();
 				isScrolling = true;
@@ -276,8 +270,8 @@
 		});
 
 		// Hide when cursor leaves window, show when returns
-		$win.on('mouseleave.ddgCursor', fadeOutCursor);
-		$win.on('mouseenter.ddgCursor', fadeInCursor);
+		$(window).on('mouseleave.ddgCursor', fadeOutCursor);
+		$(window).on('mouseenter.ddgCursor', fadeInCursor);
 
 		const quickConfig = { duration: 0.2, ease: 'power3.out' };
 
@@ -290,7 +284,7 @@
 			(value => gsap.to(cursorEl, { y: value, ...quickConfig }));
 
 		// Use clientX/Y instead of pageX/Y for accurate tracking regardless of scroll
-		$win.on('mousemove.ddgCursor', event => {
+		$(window).on('mousemove.ddgCursor', event => {
 			moveX(event.clientX);
 			moveY(event.clientY);
 		});
@@ -300,7 +294,7 @@
 	const initShare = () => {
 		const shareItemSelector = '[data-share]';
 		const shareCountdownSelector = '[data-share-countdown]';
-		const $shareItems = $j(shareItemSelector);
+		const $shareItems = $(shareItemSelector);
 		if (!$shareItems.length) return;
 
 		const shareWebhookUrl =
@@ -309,7 +303,7 @@
 		const dailyShareKey = 'share_done_date';
 		const shareOpenTarget = '_blank';
 
-		const $doc = $j(document);
+		const $doc = $(document);
 		const eventNamespace = '.ddgShare';
 
 		// date helpers
@@ -378,9 +372,9 @@
 
 		// countdown decrement utility
 		const decrementCountdown = () => {
-			const $countdownElements = $j(shareCountdownSelector);
+			const $countdownElements = $(shareCountdownSelector);
 			$countdownElements.each((_, element) => {
-				const $element = $j(element);
+				const $element = $(element);
 				let remaining = parseInt(
 					element.getAttribute('data-share-countdown') ||
 					$element.text() ||
@@ -461,7 +455,7 @@
 
 		// click handler
 		$doc.on(`click${eventNamespace}`, shareItemSelector, event => {
-			const $target = $j(event.currentTarget);
+			const $target = $(event.currentTarget);
 			event.preventDefault();
 
 			const platformKey = ($target.data('share') || '').toString().toLowerCase();
@@ -475,10 +469,10 @@
 				? resolver({ url: shareUrl, text: shareText })
 				: shareUrl;
 
-			const shareWindow = window.open('about:blank', shareOpenTarget);
+			const sharewindow = window.open('about:blank', shareOpenTarget);
 
 			if (!heuristicsSatisfied()) {
-				shareWindow?.close();
+				sharewindow?.close();
 				// eslint-disable-next-line no-console
 				console.warn('[share] blocked');
 				return;
@@ -497,9 +491,9 @@
 				console.log('[share] daily cap hit');
 			}
 
-			if (shareWindow) {
-				shareWindow.opener = null;
-				shareWindow.location.href = destination;
+			if (sharewindow) {
+				sharewindow.opener = null;
+				sharewindow.location.href = destination;
 			} else {
 				window.location.href = destination;
 			}
@@ -515,18 +509,18 @@
 
 		// Find all unique modal IDs from triggers and elements
 		const modalIds = new Set();
-		$j('[data-modal-trigger], [data-modal-el]').each((_, el) => {
-			const id = $j(el).attr('data-modal-trigger') || $j(el).attr('data-modal-el');
+		$('[data-modal-trigger], [data-modal-el]').each((_, el) => {
+			const id = $(el).attr('data-modal-trigger') || $(el).attr('data-modal-el');
 			if (id) modalIds.add(id);
 		});
 
 		// Initialize each modal
 		modalIds.forEach(modalId => {
-			const $triggers = $j(`[data-modal-trigger="${modalId}"]`);
-			const $el = $j(`[data-modal-el="${modalId}"]`);
-			const $bg = $j(`[data-modal-bg="${modalId}"]`);
+			const $triggers = $(`[data-modal-trigger="${modalId}"]`);
+			const $el = $(`[data-modal-el="${modalId}"]`);
+			const $bg = $(`[data-modal-bg="${modalId}"]`);
 			const $inner = $el.find('[data-modal-inner]').first();
-			const $closeButtons = $j(`[data-modal-close="${modalId}"]`);
+			const $closeButtons = $(`[data-modal-close="${modalId}"]`);
 
 			if (!$el.length) {
 				modalLog('warn:no-modal-el', { modalId });
@@ -690,7 +684,7 @@
 		});
 
 		// Single escape key handler for ALL modals
-		$j(document).on('keydown.modals', e => {
+		$(document).on('keydown.modals', e => {
 			if (e.key === 'Escape') {
 				// Find which modal is open and close it
 				Object.keys(ddg.modals).forEach(modalId => {
@@ -711,8 +705,8 @@
 		modalLog('init:start');
 
 		const modalId = 'story'; // The modal ID for ajax modal
-		const $links = $j('[data-ajax-modal="link"]');
-		const $embed = $j('[data-ajax-modal="embed"]');
+		const $links = $('[data-ajax-modal="link"]');
+		const $embed = $('[data-ajax-modal="embed"]');
 		const contentSelector = '[data-ajax-modal="content"]';
 
 		// Wait for generic modal to initialize
@@ -755,16 +749,16 @@
 		// AJAX link click handler
 		$links.on('click', e => {
 			e.preventDefault();
-			const $link = $j(e.currentTarget);
+			const $link = $(e.currentTarget);
 			const linkUrl = $link.attr('href');
 
 			modalLog('link:click', { href: linkUrl });
 
-			$j.ajax({
+			$.ajax({
 				url: linkUrl,
 				success: (response) => {
-					const $content = $j(response).find(contentSelector);
-					const title = $j(response).filter('title').text();
+					const $content = $(response).find(contentSelector);
+					const title = $(response).filter('title').text();
 					const url = new URL(linkUrl, window.location.origin).href;
 
 					// Inject content
@@ -808,7 +802,7 @@
 		}
 
 		// Override escape key for this modal
-		$j(document).off('keydown.modals').on('keydown.modals', e => {
+		$(document).off('keydown.modals').on('keydown.modals', e => {
 			if (e.key === 'Escape') {
 				Object.keys(ddg.modals).forEach(id => {
 					if (ddg.modals[id].isOpen()) {
@@ -860,5 +854,5 @@
 
 	// Boot 🚀
 	ddg.boot = initSite;
-	
+
 })();
