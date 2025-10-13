@@ -685,7 +685,8 @@
 			};
 
 			// Event handlers - use delegation for dynamically added triggers
-			const isAjaxModal = $triggers.first().is('[data-ajax-modal="link"]');
+			// Treat 'story' as ajax-driven modal; don't bind generic trigger handler
+			const isAjaxModal = (modalId === 'story') || $triggers.first().is('[data-ajax-modal="link"]');
 
 			if (!isAjaxModal) {
 				$(document).on('click', `[data-modal-trigger="${modalId}"]`, e => {
@@ -746,6 +747,8 @@
 	// Ajax Modal
 	const initAjaxModal = () => {
 		const modalLog = createLogger('ajax-modal', 'ajaxModalLogs', true);
+		if (ddg._ajaxModalInitialized) { modalLog('skip:already-initialized'); return; }
+		ddg._ajaxModalInitialized = true;
 		modalLog('init:start');
 
 		const modalId = 'story'; // The modal ID for ajax modal
@@ -790,9 +793,13 @@
 			});
 		};
 
-		// AJAX link click handler - use delegation to work with dynamically injected content
+		// AJAX link click handler - use delegation and a simple reentry lock
+		ddg._ajaxModalLock = false;
 		$(document).on('click', '[data-ajax-modal="link"]', e => {
 			e.preventDefault();
+			if (ddg._ajaxModalLock) { modalLog('link:skip-locked'); return; }
+			if (modal.isOpen()) { modalLog('link:skip-open'); return; }
+			ddg._ajaxModalLock = true;
 			const $link = $(e.currentTarget);
 			const linkUrl = $link.attr('href');
 
@@ -822,7 +829,8 @@
 					modalLog('ajax:error', { href: linkUrl });
 					$embed.empty().append("<div class='modal-error'>Failed to load content.</div>");
 					modal.open();
-				}
+				},
+				complete: () => { ddg._ajaxModalLock = false; }
 			});
 		});
 
@@ -938,7 +946,7 @@
 					const content = $source.html();
 					console.log('[ajaxHome] preparing to inject, length:', content.length);
 
-					// Wait for Attributes runtime to be ready, then load List, then inject
+					// Minimal wait for Attributes runtime, then load required modules
 					const waitFor = (test, { interval = 50, max = 200 } = {}) => new Promise((resolve, reject) => {
 						let tries = 0;
 						const id = setInterval(() => {
@@ -949,20 +957,16 @@
 					});
 
 					waitFor(() => window.FinsweetAttributes && typeof window.FinsweetAttributes.load === 'function')
-						.then(() => { window.FinsweetAttributes.load('list'); window.FinsweetAttributes.load('modal'); })
-						.then(() => waitFor(() => {
-							const m = window.FinsweetAttributes.modules || {};
-							return m.list && typeof m.list.restart === 'function' && m.modal && typeof m.modal.restart === 'function';
-						}))
+						.then(() => { window.FinsweetAttributes.load('list'); window.FinsweetAttributes.load('copyclip'); })
+						.then(() => waitFor(() => window.FinsweetAttributes.modules && window.FinsweetAttributes.modules.list && typeof window.FinsweetAttributes.modules.list.restart === 'function'))
 						.then(() => {
 							$target.empty().append(content);
 							data.ajaxHomeLoaded = true;
 							console.log('[ajaxHome] injection complete');
 
-							// Rebind Finsweet modules to injected DOM
+							// Rebind Finsweet and local modules to injected DOM
 							window.FinsweetAttributes.modules.list.restart();
-							window.FinsweetAttributes.modules.modal.restart();
-							// Initialize site modals for newly injected elements
+							window.FinsweetAttributes.modules.copyclip?.restart?.();
 							initModals();
 
 							// Signal sitewide that Ajax Home is done
@@ -979,11 +983,10 @@
 							});
 						})
 						.catch(() => {
-							// If Attributes is somehow not ready, still inject to avoid blank UI
+							// If Attributes not ready in time, still inject to avoid blank UI
 							$target.empty().append(content);
 							data.ajaxHomeLoaded = true;
-							console.warn('[ajaxHome] injected without Finsweet List restart');
-							// Initialize site modals even if Attributes not ready
+							console.warn('[ajaxHome] injected without Finsweet restart');
 							initModals();
 							document.dispatchEvent(new CustomEvent('homeAjax:done'));
 						});
