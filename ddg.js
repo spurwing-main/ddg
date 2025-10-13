@@ -16,7 +16,7 @@
 
 	// Page progress refresh utility
 	ddg.refreshPageProgress = () => {
-		try { if (window.ScrollTrigger?.refresh) requestAnimationFrame(() => ScrollTrigger.refresh()); } catch (_) {}
+		try { if (window.ScrollTrigger?.refresh) requestAnimationFrame(() => ScrollTrigger.refresh()); } catch (_) { }
 	};
 
 	ddg.ensurePageProgressRefreshHook = (listInstance) => {
@@ -29,24 +29,32 @@
 				if (ddg.tickerTape?.refresh) {
 					requestAnimationFrame(() => ddg.tickerTape.refresh());
 				}
+				// Re-apply Coming Soon affordances after list mutations
+				try { initComingSoon(); } catch (_) { }
 				return items;
 			});
 			listInstance.__ddgProgressHookAdded = true;
-		} catch (_) {}
+		} catch (_) { }
 	};
 
 	ddg.requestFsLoad = (...modules) => {
 		if (!window.FinsweetAttributes) window.FinsweetAttributes = [];
 		modules.forEach((m) => {
 			if (fsState.loadRequested.has(m)) return;
-			try { window.FinsweetAttributes.load && window.FinsweetAttributes.load(m); } catch (_) {}
+			try { window.FinsweetAttributes.load && window.FinsweetAttributes.load(m); } catch (_) { }
 			fsState.loadRequested.add(m);
 		});
 	};
 
 	ddg.setActiveList = (instances) => {
-		if (Array.isArray(instances) && instances.length) {
-			fsState.activeList = instances[0];
+		// Accept common shapes: array of instances, or object with `instances`/`listInstances`
+		let listArray = null;
+		if (Array.isArray(instances)) listArray = instances;
+		else if (instances && Array.isArray(instances.instances)) listArray = instances.instances;
+		else if (instances && Array.isArray(instances.listInstances)) listArray = instances.listInstances;
+
+		if (listArray && listArray.length) {
+			fsState.activeList = listArray[0];
 			ddg.ensurePageProgressRefreshHook(fsState.activeList);
 		}
 	};
@@ -163,6 +171,7 @@
 		debouncedRefresh();
 	};
 
+
 	// Coming soon Hover Animation
 	function initComingSoon() {
 		const wrapperEl = document.querySelector('.home-list_list');
@@ -177,34 +186,31 @@
 				try { s.revert(); } catch (e) { }
 			});
 			splits = [];
-			// Use requestAnimationFrame to ensure DOM has settled
-			requestAnimationFrame(() => {
-				wrapperEl
-					.querySelectorAll('.home-list_item-wrap[data-story-status="coming-soon"] .home-list_item')
-					.forEach(el => {
-						let split;
-						try {
-							split = SplitText.create(el, {
-								type: 'lines',
-								autoSplit: true,
-								tag: 'span',
-								linesClass: 'home-list_split-line'
-							});
-						} catch (e) {
-							console.warn('SplitText error', e);
-							return;
-						}
-						splits.push(split);
+			wrapperEl
+				.querySelectorAll('.home-list_item-wrap:has([data-coming-soon]) .home-list_item')
+				.forEach(el => {
+					let split;
+					try {
+						split = SplitText.create(el, {
+							type: 'lines',
+							autoSplit: true,
+							tag: 'span',
+							linesClass: 'home-list_split-line'
+						});
+					} catch (e) {
+						console.warn('SplitText error', e);
+						return;
+					}
+					splits.push(split);
 
-						const $el = $(el);
-						$el
-							.on('mouseenter.ddgComingSoon', () => animate(el, 0))
-							.on('mouseleave.ddgComingSoon', () => animate(el, '100%'));
-						if (el.tagName === 'A') {
-							$el.one('click.ddgComingSoon', e => e.preventDefault());
-						}
-					});
-			});
+					const $el = $(el);
+					$el
+						.on('mouseenter.ddgComingSoon', () => animate(el, 0))
+						.on('mouseleave.ddgComingSoon', () => animate(el, '100%'));
+					if (el.tagName === 'A') {
+						$el.one('click.ddgComingSoon', e => e.preventDefault());
+					}
+				});
 		};
 
 		const animate = (el, offset) => {
@@ -225,11 +231,8 @@
 			clearTimeout(resizeTimer);
 			resizeTimer = setTimeout(refresh, 200);
 		});
-
-		// Expose refresh globally
-		ddg.tickerTape = ddg.tickerTape || {};
-		ddg.tickerTape.refresh = refresh;
 	}
+
 
 	// Activity bar
 	const initActivityBar = () => {
@@ -255,10 +258,11 @@
 		splide.mount(window.splide.Extensions);
 	};
 
+
 	// Custom cursor
 	const initCustomCursor = () => {
 		if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) return;
-		
+
 		const cursorEl = $('.c-cursor')[0];
 		if (!cursorEl) return;
 
@@ -709,7 +713,7 @@
 		});
 
 		modal.$el.find(`[data-modal-close="${modalId}"]`).off('click.modal').on('click.ajax', handleClose);
-		
+
 		if (modal.$bg.length) {
 			modal.$bg.off('click.modal').on('click.ajax', handleClose);
 		}
@@ -751,33 +755,33 @@
 
 		const $target = $('[data-ajax-home="target"]');
 		if (!$target.length) return;
-		
+
 		$.ajax({
 			url: '/',
 			success: (response) => {
 				const $html = $('<div>').append($.parseHTML(response));
 				const $source = $html.find('[data-ajax-home="source"]');
-				
+
 				if (!$source.length) return;
 
 				const content = $source.html();
-				
+
 				// Simple check with fallback
 				const checkFinsweetReady = (attempt = 0) => {
 					if (window.FinsweetAttributes && typeof window.FinsweetAttributes.load === 'function') {
 						window.FinsweetAttributes.load('list');
 						window.FinsweetAttributes.load('copyclip');
-						
+
 						const checkModulesReady = (attempt2 = 0) => {
 							if (window.FinsweetAttributes.modules?.list?.restart) {
 								$target.empty().append(content);
 								data.ajaxHomeLoaded = true;
 
-									window.FinsweetAttributes.modules.list.restart();
-									window.FinsweetAttributes.modules.copyclip?.restart?.();
-									initModals();
-									initComingSoon();
-									initPageProgress();
+								window.FinsweetAttributes.modules.list.restart();
+								window.FinsweetAttributes.modules.copyclip?.restart?.();
+								initModals();
+								initComingSoon();
+								initPageProgress();
 
 								requestAnimationFrame(() => {
 									ScrollTrigger.refresh();
@@ -789,21 +793,21 @@
 							} else if (attempt2 < 100) {
 								setTimeout(() => checkModulesReady(attempt2 + 1), 50);
 							} else {
-									// Fallback: inject anyway
-									$target.empty().append(content);
-									data.ajaxHomeLoaded = true;
-									// Ensure Attributes processes the new content
-									try {
-										ddg.requestFsLoad('list', 'copyclip');
-										window.FinsweetAttributes.modules?.list?.restart?.();
-										window.FinsweetAttributes.modules?.copyclip?.restart?.();
-									} catch (_) {}
-									initModals();
-								}
-							};
-							checkModulesReady();
-						} else if (attempt < 100) {
-							setTimeout(() => checkFinsweetReady(attempt + 1), 50);
+								// Fallback: inject anyway
+								$target.empty().append(content);
+								data.ajaxHomeLoaded = true;
+								// Ensure Attributes processes the new content
+								try {
+									ddg.requestFsLoad('list', 'copyclip');
+									window.FinsweetAttributes.modules?.list?.restart?.();
+									window.FinsweetAttributes.modules?.copyclip?.restart?.();
+								} catch (_) { }
+								initModals();
+							}
+						};
+						checkModulesReady();
+					} else if (attempt < 100) {
+						setTimeout(() => checkFinsweetReady(attempt + 1), 50);
 					} else {
 						// Fallback: inject anyway
 						$target.empty().append(content);
@@ -816,169 +820,206 @@
 		});
 	};
 
-    // Randomise Filters (single list, API-only, 2–5 conditions from a single item)
-    function initRandomiseFilters() {
-        const log = (...args) => { try { console.log('[randomfilters]', ...args); } catch (_) {} };
-        const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+	// Randomise Filters (single list, API-only, 2–5 conditions from a single item)
+	function initRandomiseFilters() {
+		const log = (...args) => { try { console.log('[randomfilters]', ...args); } catch (_) { } };
+		const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
-        const fieldValueStrings = (field) => {
-            if (!field) return [];
-            const v = field.value;
-            if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
-            return String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-        };
+		const fieldValueStrings = (field) => {
+			if (!field) return [];
+			const v = field.value;
+			if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+			return String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+		};
 
-        let lastInstance = null; // kept for compatibility; primary source is ddg.getActiveList
+		let lastInstance = null; // kept for compatibility; primary source is ddg.getActiveList
 
-        const randomise = () => {
-            const listInstance = ddg.getActiveList() || lastInstance;
-            if (!listInstance) {
-                log('No list instance. Loading and retrying…');
-                ddg.requestFsLoad('list');
-                setTimeout(() => randomise(), 100);
-                return false;
-            }
+		// Attempt to resolve a list instance from any known source
+		const resolveListInstance = () => {
+			const fromState = ddg.getActiveList() || lastInstance;
+			if (fromState) return fromState;
 
-            const items = Array.isArray(listInstance.items?.value) ? listInstance.items.value : (Array.isArray(listInstance.items) ? listInstance.items : []);
-            if (!items.length) { log('List has no items.'); return false; }
+			// Try to discover via Finsweet module internals if present
+			try {
+				const mod = window.FinsweetAttributes?.modules?.list;
+				const candidates = mod?.instances || mod?.listInstances || mod?.__instances || [];
+				if (Array.isArray(candidates) && candidates.length) {
+					return candidates[0];
+				}
+			} catch (_) { }
+			return null;
+		};
 
-            const filtersForm = document.querySelector('[fs-list-element="filters"]');
-            if (!filtersForm) { log('No filters form found.'); return false; }
+		const randomise = (attempt = 0) => {
+			const listInstance = resolveListInstance();
+			if (!listInstance) {
+				if (attempt === 0) log('No list instance. Loading and retrying…');
 
-            // Build UI index: available checkbox values per field (skip empty facets)
-            const uiByField = new Map();
-            const allInputs = Array.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]'));
-            log('Found checkbox inputs:', allInputs.length);
-            allInputs.forEach((input) => {
-                const label = input.closest('label');
-                if (label && label.classList.contains('is-list-emptyfacet')) return;
-                const key = input.getAttribute('fs-list-field');
-                const val = input.getAttribute('fs-list-value');
-                if (!key || !val) return;
-                let map = uiByField.get(key);
-                if (!map) uiByField.set(key, (map = new Map()));
-                map.set(val, input);
-            });
-            log('Fields in UI:', Array.from(uiByField.keys()));
+				// On story index pages, ensure Ajax Home has been injected
+				try {
+					if (data.truePath?.startsWith('/stories/') && !data.ajaxHomeLoaded && typeof initAjaxHome === 'function') {
+						initAjaxHome();
+					}
+				} catch (_) { }
 
-            // Try random items until we find one with >= 2 UI-matchable fields
-            const maxTries = Math.min(items.length, 50);
-            let chosenFromItem = null;
-            for (let attempt = 0; attempt < maxTries; attempt++) {
-                const idx = rand(0, Math.max(0, items.length - 1));
-                const item = items[idx];
-                const fieldsEntries = Object.entries(item?.fields || {});
-                if (!fieldsEntries.length) continue;
+				// Ask Attributes to load/restart list if available
+				try {
+					ddg.requestFsLoad('list');
+					window.FinsweetAttributes?.modules?.list?.restart?.();
+				} catch (_) { }
 
-                // For this item, pick at most one random value per field that exists in UI
-                const candidates = [];
-                fieldsEntries.forEach(([key, field]) => {
-                    const map = uiByField.get(key);
-                    if (!map || !map.size) return;
-                    const values = fieldValueStrings(field);
-                    const exists = values.filter((v) => map.has(v));
-                    if (!exists.length) return;
-                    const val = exists[rand(0, exists.length - 1)];
-                    candidates.push({ fieldKey: key, value: val, input: map.get(val) });
-                });
+				if (attempt < 50) {
+					setTimeout(() => randomise(attempt + 1), 120);
+				} else {
+					log('Randomise aborted after waiting for list.');
+				}
+				return false;
+			}
 
-                if (candidates.length >= 2) {
-                    // Choose 2–5 conditions from this item
-                    for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
-                    const n = rand(2, Math.min(5, candidates.length));
-                    chosenFromItem = candidates.slice(0, n);
-                    log('Using item index', idx, 'with', n, 'conditions.');
-                    break;
-                }
-            }
+			const items = Array.isArray(listInstance.items?.value) ? listInstance.items.value : (Array.isArray(listInstance.items) ? listInstance.items : []);
+			if (!items.length) { log('List has no items.'); return false; }
 
-            if (!chosenFromItem) { log('No item found with >=2 UI-matchable fields; aborting (no fallbacks).'); return false; }
-            const chosen = chosenFromItem;
-            log('Chosen conditions:', chosen.map(c => ({ fieldKey: c.fieldKey, value: c.value })));
+			const filtersForm = document.querySelector('[fs-list-element="filters"]');
+			if (!filtersForm) { log('No filters form found.'); return false; }
 
-            // Prefer built-in clear if available to let Attributes handle state
-            const clearBtn = document.querySelector('[fs-list-element="clear"]');
-            if (clearBtn) {
-                log('Clearing via [fs-list-element="clear"]');
-                clearBtn.click();
-            } else {
-                // Uncheck all currently-checked inputs and emit events so Attributes updates state
-                log('Clearing by unchecking all inputs');
-                allInputs.forEach((input) => {
-                    if (input.checked) {
-                        input.checked = false;
-                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                        input.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                    const lab = input.closest('label');
-                    if (lab) lab.classList.remove('is-list-active');
-                });
-            }
+			// Build UI index: available checkbox values per field (skip empty facets)
+			const uiByField = new Map();
+			const allInputs = Array.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]'));
+			log('Found checkbox inputs:', allInputs.length);
+			allInputs.forEach((input) => {
+				const label = input.closest('label');
+				if (label && label.classList.contains('is-list-emptyfacet')) return;
+				const key = input.getAttribute('fs-list-field');
+				const val = input.getAttribute('fs-list-value');
+				if (!key || !val) return;
+				let map = uiByField.get(key);
+				if (!map) uiByField.set(key, (map = new Map()));
+				map.set(val, input);
+			});
+			log('Fields in UI:', Array.from(uiByField.keys()));
 
-            // Ensure page progress refreshes after any render
-            ddg.ensurePageProgressRefreshHook(listInstance);
+			// Try random items until we find one with >= 2 UI-matchable fields
+			const maxTries = Math.min(items.length, 50);
+			let chosenFromItem = null;
+			for (let attempt = 0; attempt < maxTries; attempt++) {
+				const idx = rand(0, Math.max(0, items.length - 1));
+				const item = items[idx];
+				const fieldsEntries = Object.entries(item?.fields || {});
+				if (!fieldsEntries.length) continue;
 
-            // Apply via API (reactive filters) to guarantee match to selected item
-            const apiFilters = listInstance.filters?.value;
-            if (!apiFilters) { log('List filters ref not available.'); return false; }
-            apiFilters.groupsMatch = 'and';
-            apiFilters.groups = [{
-                id: 'random',
-                conditionsMatch: 'and',
-                conditions: chosen.map(({ fieldKey, value }) => ({
-                    id: `rf-${fieldKey}-${Date.now()}`,
-                    type: 'checkbox',
-                    fieldKey,
-                    op: 'equal',
-                    value,
-                    interacted: true,
-                })),
-            }];
+				// For this item, pick at most one random value per field that exists in UI
+				const candidates = [];
+				fieldsEntries.forEach(([key, field]) => {
+					const map = uiByField.get(key);
+					if (!map || !map.size) return;
+					const values = fieldValueStrings(field);
+					const exists = values.filter((v) => map.has(v));
+					if (!exists.length) return;
+					const val = exists[rand(0, exists.length - 1)];
+					candidates.push({ fieldKey: key, value: val, input: map.get(val) });
+				});
 
-            // Trigger the filtering phase explicitly
-            if (typeof listInstance.triggerHook === 'function') listInstance.triggerHook('filter');
+				if (candidates.length >= 2) {
+					// Choose 2–5 conditions from this item
+					for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
+					const n = rand(2, Math.min(5, candidates.length));
+					chosenFromItem = candidates.slice(0, n);
+					log('Using item index', idx, 'with', n, 'conditions.');
+					break;
+				}
+			}
 
-            // Sync UI to reflect applied conditions (quietly; no events)
-            allInputs.forEach((input) => {
-                input.checked = false;
-                const lab = input.closest('label');
-                if (lab) lab.classList.remove('is-list-active');
-            });
-            chosen.forEach(({ input }) => {
-                input.checked = true;
-                const lab = input.closest('label');
-                if (lab) lab.classList.add('is-list-active');
-            });
-            log('Applied via API and synced UI for', chosen.length, 'conditions.');
-            // Also refresh ScrollTrigger immediately in case hooks are bypassed
-            ddg.refreshPageProgress();
-            return true;
-        };
+			if (!chosenFromItem) { log('No item found with >=2 UI-matchable fields; aborting (no fallbacks).'); return false; }
+			const chosen = chosenFromItem;
+			log('Chosen conditions:', chosen.map(c => ({ fieldKey: c.fieldKey, value: c.value })));
 
-        // Click handler: any element with data-randomfilters triggers randomisation on the single list
-        document.addEventListener(
-            'click',
-            (e) => {
-                const el = e.target.closest('[data-randomfilters]');
-                if (!el) return;
-                log('Click on [data-randomfilters]:', el);
+			// Prefer built-in clear if available to let Attributes handle state
+			const clearBtn = document.querySelector('[fs-list-element="clear"]');
+			if (clearBtn) {
+				log('Clearing via [fs-list-element="clear"]');
+				clearBtn.click();
+			} else {
+				// Uncheck all currently-checked inputs and emit events so Attributes updates state
+				log('Clearing by unchecking all inputs');
+				allInputs.forEach((input) => {
+					if (input.checked) {
+						input.checked = false;
+						input.dispatchEvent(new Event('input', { bubbles: true }));
+						input.dispatchEvent(new Event('change', { bubbles: true }));
+					}
+					const lab = input.closest('label');
+					if (lab) lab.classList.remove('is-list-active');
+				});
+			}
 
-                const ok = randomise();
-                if (!ok) log('Randomise aborted.');
-            },
-            true // capture phase to run before modal close handlers
-        );
+			// Ensure page progress refreshes after any render
+			ddg.ensurePageProgressRefreshHook(listInstance);
 
-        // Capture the single list instance via v2 API
-        window.FinsweetAttributes = window.FinsweetAttributes || [];
-        window.FinsweetAttributes.push([
-            'list',
-            (instances) => {
-                ddg.setActiveList(instances);
-                if (Array.isArray(instances) && instances.length) lastInstance = instances[0];
-            },
-        ]);
-    }
+			// Apply via API (reactive filters) to guarantee match to selected item
+			const apiFilters = listInstance.filters?.value;
+			if (!apiFilters) { log('List filters ref not available.'); return false; }
+			apiFilters.groupsMatch = 'and';
+			apiFilters.groups = [{
+				id: 'random',
+				conditionsMatch: 'and',
+				conditions: chosen.map(({ fieldKey, value }) => ({
+					id: `rf-${fieldKey}-${Date.now()}`,
+					type: 'checkbox',
+					fieldKey,
+					op: 'equal',
+					value,
+					interacted: true,
+				})),
+			}];
+
+			// Trigger the filtering phase explicitly
+			if (typeof listInstance.triggerHook === 'function') listInstance.triggerHook('filter');
+
+			// Sync UI to reflect applied conditions (quietly; no events)
+			allInputs.forEach((input) => {
+				input.checked = false;
+				const lab = input.closest('label');
+				if (lab) lab.classList.remove('is-list-active');
+			});
+			chosen.forEach(({ input }) => {
+				input.checked = true;
+				const lab = input.closest('label');
+				if (lab) lab.classList.add('is-list-active');
+			});
+			log('Applied via API and synced UI for', chosen.length, 'conditions.');
+			// Also refresh ScrollTrigger immediately in case hooks are bypassed
+			ddg.refreshPageProgress();
+			return true;
+		};
+
+		// Click handler: any element with data-randomfilters triggers randomisation on the single list
+		document.addEventListener(
+			'click',
+			(e) => {
+				const el = e.target.closest('[data-randomfilters]');
+				if (!el) return;
+				log('Click on [data-randomfilters]:', el);
+
+				randomise(0);
+			},
+			true // capture phase to run before modal close handlers
+		);
+
+		// Capture the single list instance via v2 API
+		window.FinsweetAttributes = window.FinsweetAttributes || [];
+		window.FinsweetAttributes.push([
+			'list',
+			(instances) => {
+				ddg.setActiveList(instances);
+				// Update lastInstance for any accepted shape
+				try {
+					if (Array.isArray(instances) && instances.length) lastInstance = instances[0];
+					else if (instances?.instances?.length) lastInstance = instances.instances[0];
+					else if (instances?.listInstances?.length) lastInstance = instances.listInstances[0];
+				} catch (_) { }
+			},
+		]);
+	}
 
 	// Boot 🚀
 	ddg.boot = initSite;
