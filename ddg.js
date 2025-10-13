@@ -8,33 +8,6 @@
 		ajaxHomeLoaded: false
 	});
 
-	// Debug helpers
-	const debug = (ddg.debug ??= {});
-
-	const flagAccessor = (flagKey, defaultValue = false) => {
-		if (typeof debug[flagKey] !== 'boolean') {
-			debug[flagKey] = defaultValue;
-		}
-		return () => Boolean(debug[flagKey]);
-	};
-
-	const createLogger = (namespace, flagKey, defaultValue = false) => {
-		const isEnabled = flagAccessor(flagKey, defaultValue);
-		return (...args) => {
-			if (!isEnabled()) return;
-			console.log(`[ddg:${namespace}]`, ...args);
-		};
-	};
-
-	// Utilities
-	const debounce = (fn, wait) => {
-		let timeoutId;
-		return (...args) => {
-			clearTimeout(timeoutId);
-			timeoutId = setTimeout(() => fn(...args), wait);
-		};
-	};
-
 
 	// Boot
 	const initSite = () => {
@@ -132,30 +105,18 @@
 			}
 		});
 
-		const $homeList = $('.home-list');
-		const homeListEl = $homeList[0];
+		const homeListEl = $('.home-list')[0];
 		if (!homeListEl) return;
 
-		const homeListItemSelector = '.home-list_item';
-		const hasListItems = () => $(homeListItemSelector).length > 0;
+		let debounceTimer;
+		const debouncedRefresh = () => {
+			clearTimeout(debounceTimer);
+			debounceTimer = setTimeout(() => ScrollTrigger.refresh(), 100);
+		};
 
-		const debouncedRefresh = debounce(() => ScrollTrigger.refresh(), 100);
-
-		const observer = new MutationObserver(() => {
-			debouncedRefresh();
-		});
+		const observer = new MutationObserver(debouncedRefresh);
 		observer.observe(homeListEl, { childList: true, subtree: true });
-
-		if (!hasListItems()) {
-			const waitObserver = new MutationObserver(() => {
-				if (!hasListItems()) return;
-				waitObserver.disconnect();
-				requestAnimationFrame(debouncedRefresh);
-			});
-			waitObserver.observe(homeListEl, { childList: true, subtree: true });
-		} else {
-			debouncedRefresh();
-		}
+		debouncedRefresh();
 	};
 
 	// Coming soon Hover Animation
@@ -168,7 +129,6 @@
 		let splits = [];
 
 		const refresh = () => {
-			// clean up old
 			splits.forEach(s => {
 				try { s.revert(); } catch (e) { }
 			});
@@ -211,27 +171,18 @@
 			});
 		};
 
-		// initial run
 		refresh();
 
-		const onResize = debounce(refresh, 200);
-		$(window).on('resize.ddgComingSoon', onResize);
-
-		return {
-			refresh,
-			destroy: () => {
-				splits.forEach(s => {
-					try { s.revert(); } catch (_) { }
-				});
-				$(window).off('resize.ddgComingSoon', onResize);
-			}
-		};
+		let resizeTimer;
+		$(window).on('resize.ddgComingSoon', () => {
+			clearTimeout(resizeTimer);
+			resizeTimer = setTimeout(refresh, 200);
+		});
 	}
 
 	// Activity bar
 	const initActivityBar = () => {
-		const $activity = $('.activity.splide');
-		const activityEl = $activity[0];
+		const activityEl = $('.activity.splide')[0];
 		if (!activityEl) return;
 
 		const splide = new Splide(activityEl, {
@@ -255,60 +206,34 @@
 
 	// Custom cursor
 	const initCustomCursor = () => {
-		// Disable custom cursor on mobile devices
 		if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) return;
-		const $cursor = $('.c-cursor');
-		const cursorEl = $cursor[0];
+		
+		const cursorEl = $('.c-cursor')[0];
 		if (!cursorEl) return;
 
-		// Ensure cursor is always visible and has fixed positioning
 		gsap.set(cursorEl, { autoAlpha: 1, position: 'fixed', top: 0, left: 0, pointerEvents: 'none' });
 
-		// --- Hide/reveal on scroll and window leave/enter ---
 		let scrollTimeout;
-		let isHidden = false;
 
-		const fadeOutCursor = () => {
-			if (isHidden) return;
-			gsap.to(cursorEl, { autoAlpha: 0, duration: 0.3 });
-			isHidden = true;
-		};
-
-		const fadeInCursor = () => {
-			if (!isHidden) return;
-			gsap.to(cursorEl, { autoAlpha: 1, duration: 0.3 });
-			isHidden = false;
-		};
-
-		// Improved scroll handler to fix fade glitch
-		let isScrolling = false;
 		$(window).on('wheel.ddgCursor', () => {
-			if (!isScrolling) {
-				fadeOutCursor();
-				isScrolling = true;
-			}
+			gsap.to(cursorEl, { autoAlpha: 0, duration: 0.3 });
 			clearTimeout(scrollTimeout);
 			scrollTimeout = setTimeout(() => {
-				isScrolling = false;
-				setTimeout(fadeInCursor, 1000);
+				setTimeout(() => gsap.to(cursorEl, { autoAlpha: 1, duration: 0.3 }), 1000);
 			}, 250);
 		});
 
-		// Hide when cursor leaves window, show when returns
-		$(window).on('mouseleave.ddgCursor', fadeOutCursor);
-		$(window).on('mouseenter.ddgCursor', fadeInCursor);
+		$(window).on('mouseleave.ddgCursor', () => {
+			gsap.to(cursorEl, { autoAlpha: 0, duration: 0.3 });
+		});
 
-		const quickConfig = { duration: 0.2, ease: 'power3.out' };
+		$(window).on('mouseenter.ddgCursor', () => {
+			gsap.to(cursorEl, { autoAlpha: 1, duration: 0.3 });
+		});
 
-		const moveX =
-			gsap.quickTo?.(cursorEl, 'x', quickConfig) ||
-			(value => gsap.to(cursorEl, { x: value, ...quickConfig }));
+		const moveX = gsap.quickTo(cursorEl, 'x', { duration: 0.2, ease: 'power3.out' });
+		const moveY = gsap.quickTo(cursorEl, 'y', { duration: 0.2, ease: 'power3.out' });
 
-		const moveY =
-			gsap.quickTo?.(cursorEl, 'y', quickConfig) ||
-			(value => gsap.to(cursorEl, { y: value, ...quickConfig }));
-
-		// Use clientX/Y instead of pageX/Y for accurate tracking regardless of scroll
 		$(window).on('mousemove.ddgCursor', event => {
 			moveX(event.clientX);
 			moveY(event.clientY);
@@ -527,57 +452,36 @@
 
 	// Modals
 	const initModals = () => {
-		const modalLog = createLogger('modals', 'logModals', false);
-
-		// Store modal instances in namespace
 		ddg.modals = ddg.modals || {};
 		ddg._modalsKeydownBound = Boolean(ddg._modalsKeydownBound);
 
-		// Find all unique modal IDs from triggers and elements
 		const modalIds = new Set();
 		$('[data-modal-trigger], [data-modal-el]').each((_, el) => {
 			const id = $(el).attr('data-modal-trigger') || $(el).attr('data-modal-el');
 			if (id) modalIds.add(id);
 		});
 
-		// Initialize each modal (idempotent: skip ones we already have)
 		modalIds.forEach(modalId => {
-			if (ddg.modals[modalId]) {
-				modalLog('skip:already-initialized', { modalId });
-				return;
-			}
-			const $triggers = $(`[data-modal-trigger="${modalId}"]`);
+			if (ddg.modals[modalId]) return;
+
 			const $el = $(`[data-modal-el="${modalId}"]`);
 			const $bg = $(`[data-modal-bg="${modalId}"]`);
 			const $inner = $el.find('[data-modal-inner]').first();
 			const $closeButtons = $(`[data-modal-close="${modalId}"]`);
 
-			if (!$el.length) {
-				modalLog('warn:no-modal-el', { modalId });
-				return;
-			}
+			if (!$el.length) return;
 
 			const elNode = $el[0];
 			const $animTarget = $inner.length ? $inner : $el;
 
-				// Get all descendants for is-open class
-				const getAllElements = () => $el.find('*').addBack();
+			// Initial state sync
+			if ($el.hasClass('is-open')) {
+				if ($bg.length) $bg.addClass('is-open');
+			} else {
+				if ($bg.length) $bg.removeClass('is-open');
+				$el.removeClass('is-open');
+			}
 
-				// Initial state sync: if modal starts open, ensure every
-				// descendant (and background) has `is-open`. If closed, strip any
-				// stray `is-open` classes from descendants and bg to avoid stale state.
-				if ($el.hasClass('is-open')) {
-					if ($bg.length) $bg.addClass('is-open');
-					getAllElements().addClass('is-open');
-				} else {
-					if ($bg.length) $bg.removeClass('is-open');
-					getAllElements().removeClass('is-open');
-				}
-
-			// Position management (removed - no positioning needed)
-			// Animation functions...
-
-			// Open animation
 			const open = (options = {}) => {
 				const { skipAnimation = false, beforeOpen = null, afterOpen = null } = options;
 
@@ -588,30 +492,19 @@
 					}
 				});
 
-				// Callback before opening
-				if (beforeOpen && typeof beforeOpen === 'function') {
-					beforeOpen();
-				}
+				if (beforeOpen) beforeOpen();
 
-				// Add is-open to ALL elements (bg, el, descendants) BEFORE animation
 				if ($bg.length) $bg.addClass('is-open');
-				getAllElements().addClass('is-open');
 
-				modalLog('open:start', { modalId, skipAnimation });
-
-				// Kill any existing animations
 				gsap.killTweensOf($animTarget[0]);
 
 				if (skipAnimation) {
 					gsap.set($animTarget[0], { opacity: 1, y: 0 });
-					modalLog('open:complete-no-animation', { modalId });
-					if (afterOpen && typeof afterOpen === 'function') {
-						afterOpen();
-					}
+					$el.addClass('is-open');
+					if (afterOpen) afterOpen();
 					return;
 				}
 
-				// Animate
 				gsap.fromTo($animTarget[0],
 					{ y: 60, opacity: 0 },
 					{
@@ -619,40 +512,24 @@
 						opacity: 1,
 						duration: 0.6,
 						ease: 'power2.out',
-						onComplete: () => {
-							modalLog('open:complete', { modalId });
-							if (afterOpen && typeof afterOpen === 'function') {
-								afterOpen();
-							}
-						}
+						onStart: () => $el.addClass('is-open'),
+						onComplete: () => { if (afterOpen) afterOpen(); }
 					}
 				);
 			};
 
-			// Close animation
 			const close = (options = {}) => {
 				const { skipAnimation = false, beforeClose = null, afterClose = null } = options;
 
-				// Callback before closing
-				if (beforeClose && typeof beforeClose === 'function') {
-					beforeClose();
-				}
+				if (beforeClose) beforeClose();
 
-				// Remove is-open from bg FIRST
 				if ($bg.length) $bg.removeClass('is-open');
 
-				modalLog('close:start', { modalId, skipAnimation });
-
-				// Kill any existing animations
 				gsap.killTweensOf($animTarget[0]);
 
 				const cleanup = () => {
-					// Remove is-open from el and descendants AFTER animation
-					getAllElements().removeClass('is-open');
-					modalLog('close:complete', { modalId });
-					if (afterClose && typeof afterClose === 'function') {
-						afterClose();
-					}
+					$el.removeClass('is-open');
+					if (afterClose) afterClose();
 				};
 
 				if (skipAnimation) {
@@ -661,7 +538,6 @@
 					return;
 				}
 
-				// Animate then cleanup
 				gsap.to($animTarget[0], {
 					y: 60,
 					opacity: 0,
@@ -671,139 +547,97 @@
 				});
 			};
 
-			// Check if open
 			const isOpen = () => $el.hasClass('is-open');
 
-			// Store instance API
-			ddg.modals[modalId] = {
-				open,
-				close,
-				isOpen,
-				$el,
-				$bg,
-				$triggers
-			};
+			ddg.modals[modalId] = { open, close, isOpen, $el, $bg };
 
-			// Event handlers - use delegation for dynamically added triggers
-			// Treat 'story' as ajax-driven modal; don't bind generic trigger handler
+			const $triggers = $(`[data-modal-trigger="${modalId}"]`);
 			const isAjaxModal = (modalId === 'story') || $triggers.first().is('[data-ajax-modal="link"]');
 
 			if (!isAjaxModal) {
 				$(document).on('click', `[data-modal-trigger="${modalId}"]`, e => {
 					e.preventDefault();
 					open();
-					modalLog('trigger:click', { modalId });
 				});
 			}
 
-			// Close button
 			$closeButtons.on('click.modal', e => {
 				e.preventDefault();
 				e.stopImmediatePropagation();
 				close();
-				modalLog('close-button:click', { modalId });
 			});
 
-			// Background click to close - handle both sibling and child backgrounds
 			if ($bg.length) {
 				$bg.on('click.modal', e => {
-					if (e.target === $bg[0]) {
-						close();
-						modalLog('background:click', { modalId });
-					}
+					if (e.target === $bg[0]) close();
 				});
 			}
 
-			// Modal element click to close (if click is directly on modal container, not its children)
 			$el.on('click.modal', e => {
-				if (e.target === elNode) {
-					close();
-					modalLog('modal-container:click', { modalId });
-				}
+				if (e.target === elNode) close();
 			});
-
-			modalLog('init:complete', { modalId, isAjaxModal });
 		});
 
-		// Single escape key handler for ALL modals (bind once)
 		if (!ddg._modalsKeydownBound) {
 			ddg._modalsKeydownBound = true;
 			$(document).on('keydown.modals', e => {
-			if (e.key === 'Escape') {
-				// Find which modal is open and close it
-				Object.keys(ddg.modals).forEach(modalId => {
-					if (ddg.modals[modalId].isOpen()) {
-						ddg.modals[modalId].close();
-						modalLog('escape:press', { modalId });
-					}
-				});
-			}
+				if (e.key === 'Escape') {
+					Object.keys(ddg.modals).forEach(modalId => {
+						if (ddg.modals[modalId].isOpen()) {
+							ddg.modals[modalId].close();
+						}
+					});
+				}
 			});
 		}
-
-		modalLog('init:all-complete', { count: modalIds.size });
 	};
 
 	// Ajax Modal
 	const initAjaxModal = () => {
-		const modalLog = createLogger('ajax-modal', 'ajaxModalLogs', true);
-		if (ddg._ajaxModalInitialized) { modalLog('skip:already-initialized'); return; }
+		if (ddg._ajaxModalInitialized) return;
 		ddg._ajaxModalInitialized = true;
-		modalLog('init:start');
 
-		const modalId = 'story'; // The modal ID for ajax modal
+		const modalId = 'story';
 		const $embed = $('[data-ajax-modal="embed"]');
 		const contentSelector = '[data-ajax-modal="content"]';
-
-		// Wait for generic modal to initialize
-		if (!ddg.modals || !ddg.modals[modalId]) {
-			modalLog('error:modal-not-initialized', { modalId });
-			return;
-		}
-
 		const modal = ddg.modals[modalId];
 		const homeTitle = document.title;
 
-		// Open with history management
 		const openWithHistory = (title, url) => {
-			// Open the modal (generic system handles animation)
 			modal.open({
 				afterOpen: () => {
-					// Update history and title after animation
 					if (title && url) {
 						document.title = title;
 						window.history.pushState({ modal: true }, '', url);
-						// Note: truePath stays as '/' because this is a modal overlay
-						modalLog('history:push', { title, url });
 					}
 				}
 			});
 		};
 
-		// Close with history management
 		const closeWithHistory = () => {
-			// Close the modal (generic system handles animation)
 			modal.close({
 				beforeClose: () => {
-					// Reset title and URL
 					document.title = homeTitle;
 					window.history.pushState({ modal: false }, '', '/');
-					modalLog('history:push-home');
 				}
 			});
 		};
 
-		// AJAX link click handler - use delegation and a simple reentry lock
+		const handleClose = (e) => {
+			if (e.target === e.currentTarget) {
+				e.preventDefault();
+				e.stopImmediatePropagation?.();
+				closeWithHistory();
+			}
+		};
+
 		ddg._ajaxModalLock = false;
 		$(document).on('click', '[data-ajax-modal="link"]', e => {
 			e.preventDefault();
-			if (ddg._ajaxModalLock) { modalLog('link:skip-locked'); return; }
-			if (modal.isOpen()) { modalLog('link:skip-open'); return; }
+			if (ddg._ajaxModalLock || modal.isOpen()) return;
 			ddg._ajaxModalLock = true;
-			const $link = $(e.currentTarget);
-			const linkUrl = $link.attr('href');
 
-			modalLog('link:click', { href: linkUrl });
+			const linkUrl = $(e.currentTarget).attr('href');
 
 			$.ajax({
 				url: linkUrl,
@@ -812,21 +646,10 @@
 					const title = $(response).filter('title').text();
 					const url = new URL(linkUrl, window.location.origin).href;
 
-					// Inject content
 					$embed.empty().append($content);
-
-					// Open modal with history
 					openWithHistory(title, url);
-
-					modalLog('ajax:success', {
-						href: linkUrl,
-						title,
-						url,
-						contentFound: Boolean($content.length)
-					});
 				},
 				error: () => {
-					modalLog('ajax:error', { href: linkUrl });
 					$embed.empty().append("<div class='modal-error'>Failed to load content.</div>");
 					modal.open();
 				},
@@ -834,347 +657,268 @@
 			});
 		});
 
-		// Override close button behavior to use history
-		const $closeButtons = modal.$el.find(`[data-modal-close="${modalId}"]`);
-		$closeButtons.off('click.modal').on('click.ajax', e => {
-			e.preventDefault();
-			e.stopImmediatePropagation();
-			closeWithHistory();
-			modalLog('close-button:click-override');
-		});
-
-		// Override background click to use history
+		modal.$el.find(`[data-modal-close="${modalId}"]`).off('click.modal').on('click.ajax', handleClose);
+		
 		if (modal.$bg.length) {
-			modal.$bg.off('click.modal').on('click.ajax', e => {
-				if (e.target === modal.$bg[0]) {
-					closeWithHistory();
-					modalLog('background:click-override');
-				}
-			});
+			modal.$bg.off('click.modal').on('click.ajax', handleClose);
 		}
 
-		// Override escape key for this modal
+		if (modal.$el.length) {
+			modal.$el.off('click.modal').on('click.ajax', handleClose);
+		}
+
 		$(document).off('keydown.modals').on('keydown.modals', e => {
 			if (e.key === 'Escape') {
 				Object.keys(ddg.modals).forEach(id => {
 					if (ddg.modals[id].isOpen()) {
-						if (id === modalId) {
-							closeWithHistory();
-						} else {
-							ddg.modals[id].close();
-						}
-						modalLog('escape:press-override', { id });
+						if (id === modalId) closeWithHistory();
+						else ddg.modals[id].close();
 					}
 				});
 			}
 		});
 
-		// Override modal container click to use history
-		if (modal.$el.length) {
-			modal.$el.off('click.modal').on('click.ajax', e => {
-				if (e.target === modal.$el[0]) {
-					closeWithHistory();
-					modalLog('modal-container:click-override');
-				}
-			});
-		}
-
-		// Popstate handler - browser back/forward
 		window.addEventListener('popstate', e => {
 			const state = e.state || {};
-
 			if (state.modal) {
-				// Opening via popstate - skip animation
 				modal.open({ skipAnimation: true });
-				modalLog('popstate:open', { state });
 			} else {
-				// Closing via popstate - skip animation
 				modal.close({ skipAnimation: true });
-				modalLog('popstate:close', { state });
 			}
 		});
 
-		// Direct URL detection on load - /story/ paths
 		if (window.location.pathname.startsWith('/story/')) {
-			// This is a true story page load (not a modal)
-			// truePath is already set correctly in data initialization
 			modal.open({ skipAnimation: true });
 			window.history.replaceState({ modal: true }, '', window.location.href);
-			modalLog('init:story-path', { path: window.location.pathname, truePath: data.truePath });
 		}
-
-		modalLog('init:complete');
 	};
 
 	// Ajax Home
 	const initAjaxHome = () => {
-		console.log('[ajaxHome] init', { truePath: data.truePath, ajaxHomeLoaded: data.ajaxHomeLoaded });
-		
-		// Only run once
-		if (data.ajaxHomeLoaded) {
-			console.log('[ajaxHome] skip - already loaded');
-			return;
-		}
-		
-		// Only run on true story pages (not modal overlays)
-		if (!data.truePath.startsWith('/stories/')) {
-			console.log('[ajaxHome] skip - not story path');
-			return;
-		}
+		if (data.ajaxHomeLoaded) return;
+		if (!data.truePath.startsWith('/stories/')) return;
 
 		const $target = $('[data-ajax-home="target"]');
-		console.log('[ajaxHome] target found:', $target.length);
-		
-		if (!$target.length) {
-			// Nothing to inject, but signal completion so dependents can continue
-			document.dispatchEvent(new CustomEvent('homeAjax:done'));
-			return;
-		}
-
-		console.log('[ajaxHome] fetching home page');
+		if (!$target.length) return;
 		
 		$.ajax({
 			url: '/',
 			success: (response) => {
-				console.log('[ajaxHome] response received');
 				const $html = $('<div>').append($.parseHTML(response));
 				const $source = $html.find('[data-ajax-home="source"]');
 				
-				console.log('[ajaxHome] source found:', $source.length);
+				if (!$source.length) return;
+
+				const content = $source.html();
 				
-				if ($source.length) {
-					const content = $source.html();
-					console.log('[ajaxHome] preparing to inject, length:', content.length);
+				// Simple check with fallback
+				const checkFinsweetReady = (attempt = 0) => {
+					if (window.FinsweetAttributes && typeof window.FinsweetAttributes.load === 'function') {
+						window.FinsweetAttributes.load('list');
+						window.FinsweetAttributes.load('copyclip');
+						
+						const checkModulesReady = (attempt2 = 0) => {
+							if (window.FinsweetAttributes.modules?.list?.restart) {
+								$target.empty().append(content);
+								data.ajaxHomeLoaded = true;
 
-					// Minimal wait for Attributes runtime, then load required modules
-					const waitFor = (test, { interval = 50, max = 200 } = {}) => new Promise((resolve, reject) => {
-						let tries = 0;
-						const id = setInterval(() => {
-							tries += 1;
-							if (test()) { clearInterval(id); resolve(true); }
-							else if (tries >= max) { clearInterval(id); reject(new Error('timeout')); }
-						}, interval);
-					});
+								window.FinsweetAttributes.modules.list.restart();
+								window.FinsweetAttributes.modules.copyclip?.restart?.();
+								initModals();
+								initComingSoon();
+								initPageProgress();
 
-					waitFor(() => window.FinsweetAttributes && typeof window.FinsweetAttributes.load === 'function')
-						.then(() => { window.FinsweetAttributes.load('list'); window.FinsweetAttributes.load('copyclip'); })
-						.then(() => waitFor(() => window.FinsweetAttributes.modules && window.FinsweetAttributes.modules.list && typeof window.FinsweetAttributes.modules.list.restart === 'function'))
-						.then(() => {
-							$target.empty().append(content);
-							data.ajaxHomeLoaded = true;
-							console.log('[ajaxHome] injection complete');
-
-							// Rebind Finsweet and local modules to injected DOM
-							window.FinsweetAttributes.modules.list.restart();
-							window.FinsweetAttributes.modules.copyclip?.restart?.();
-							initModals();
-
-							// Signal sitewide that Ajax Home is done
-							document.dispatchEvent(new CustomEvent('homeAjax:done'));
-
-							// Re-initialize features that depend on the injected content
-							initComingSoon();
-							initPageProgress();
-
-							// Refresh ScrollTrigger after content injection
-							requestAnimationFrame(() => {
-								ScrollTrigger.refresh();
-								console.log('[ajaxHome] ScrollTrigger refreshed');
-							});
-						})
-						.catch(() => {
-							// If Attributes not ready in time, still inject to avoid blank UI
-							$target.empty().append(content);
-							data.ajaxHomeLoaded = true;
-							console.warn('[ajaxHome] injected without Finsweet restart');
-							initModals();
-							document.dispatchEvent(new CustomEvent('homeAjax:done'));
-						});
-				} else {
-					console.log('[ajaxHome] no source element found on home page');
-					// Treat as complete to avoid blocking dependents
-					document.dispatchEvent(new CustomEvent('homeAjax:done'));
-				}
-			},
-			error: (xhr, status, error) => {
-				console.error('[ajaxHome] fetch failed:', status, error);
-				// Still signal completion so downstream can proceed
-				document.dispatchEvent(new CustomEvent('homeAjax:done'));
+								requestAnimationFrame(() => ScrollTrigger.refresh());
+							} else if (attempt2 < 100) {
+								setTimeout(() => checkModulesReady(attempt2 + 1), 50);
+							} else {
+								// Fallback: inject anyway
+								$target.empty().append(content);
+								data.ajaxHomeLoaded = true;
+								initModals();
+							}
+						};
+						checkModulesReady();
+					} else if (attempt < 100) {
+						setTimeout(() => checkFinsweetReady(attempt + 1), 50);
+					} else {
+						// Fallback: inject anyway
+						$target.empty().append(content);
+						data.ajaxHomeLoaded = true;
+						initModals();
+					}
+				};
+				checkFinsweetReady();
 			}
 		});
-		};
+	};
 
-	// Randomise Filters
-	function initRandomiseFilters() {
-		// Require a trigger element to exist on the page
-		const triggerExists = !!document.querySelector('[data-randomfilters]');
-		if (!triggerExists) return;
-		// Utilities
-		const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
-		const shuffle = (arr) => arr.sort(() => Math.random() - 0.5);
+    // Randomise Filters (single list, API-only, 2–5 conditions from a single item)
+    function initRandomiseFilters() {
+        const log = (...args) => { try { console.log('[randomfilters]', ...args); } catch (_) {} };
+        const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
-		// Build an index of the Filters UI so we can set inputs programmatically
-		const indexFiltersUI = () => {
-			const forms = Array.from(document.querySelectorAll('[fs-list-element="filters"]'));
-			const index = new Map();
+        const fieldValueStrings = (field) => {
+            if (!field) return [];
+            const v = field.value;
+            if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+            return String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+        };
 
-			forms.forEach((form) => {
-				const els = form.querySelectorAll('[fs-list-field]');
-				els.forEach((el) => {
-					const raw = el.getAttribute('fs-list-field') || '';
-					const fieldKeys = raw.split(',').map(s => s.trim()).filter(Boolean);
-					const tag = el.tagName.toLowerCase();
-					const type = (el.getAttribute('type') || '').toLowerCase();
+        let lastInstance = null; // updated via API callback; also try modules.list.instances at runtime
 
-					fieldKeys.forEach((key) => {
-						if (!key || key === '*') return; // skip catch‑all search
+        const getActiveListInstance = () => {
+            const mod = window.FinsweetAttributes?.modules?.list;
+            if (mod) {
+                const arr = Array.isArray(mod.instances) ? mod.instances : (Array.isArray(mod.instances?.value) ? mod.instances.value : null);
+                if (arr && arr.length) return arr[0];
+            }
+            return lastInstance;
+        };
 
-						const entry = index.get(key) || {
-							checkboxes: [], radios: [], select: null, text: [], valuesMap: new Map(), selectValues: new Set(), forms: new Set()
-						};
-						entry.forms.add(form);
+        const randomise = () => {
+            const listInstance = getActiveListInstance();
+            if (!listInstance) {
+                log('No list instance. Loading and retrying…');
+                try { if (window.FinsweetAttributes?.load) window.FinsweetAttributes.load('list'); } catch (_) {}
+                setTimeout(() => randomise(), 100);
+                return false;
+            }
 
-						if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
-							const val = el.getAttribute('fs-list-value') ?? el.value ?? '';
-							if (val) entry.valuesMap.set(val, el);
-							if (type === 'checkbox') entry.checkboxes.push(el);
-							if (type === 'radio') entry.radios.push(el);
-						} else if (tag === 'select') {
-							entry.select = el;
-							Array.from(el.options).forEach(opt => entry.selectValues.add(opt.value));
-						} else if (tag === 'input') {
-							entry.text.push(el);
-						}
+            const items = Array.isArray(listInstance.items?.value) ? listInstance.items.value : (Array.isArray(listInstance.items) ? listInstance.items : []);
+            if (!items.length) { log('List has no items.'); return false; }
 
-						index.set(key, entry);
-					});
-				});
-			});
+            const filtersForm = document.querySelector('[fs-list-element="filters"]');
+            if (!filtersForm) { log('No filters form found.'); return false; }
 
-			return index;
-		};
+            // Build UI index: available checkbox values per field (skip empty facets)
+            const uiByField = new Map();
+            const allInputs = Array.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]'));
+            log('Found checkbox inputs:', allInputs.length);
+            allInputs.forEach((input) => {
+                const label = input.closest('label');
+                if (label && label.classList.contains('is-list-emptyfacet')) return;
+                const key = input.getAttribute('fs-list-field');
+                const val = input.getAttribute('fs-list-value');
+                if (!key || !val) return;
+                let map = uiByField.get(key);
+                if (!map) uiByField.set(key, (map = new Map()));
+                map.set(val, input);
+            });
+            log('Fields in UI:', Array.from(uiByField.keys()));
 
-		// Access list items safely across potential versions
-		const getItemsArray = (listInstance) => {
-			if (!listInstance) return [];
-			if (Array.isArray(listInstance.items)) return listInstance.items;
-			if (Array.isArray(listInstance.items?.value)) return listInstance.items.value;
-			return [];
-		};
+            // Try random items until we find one with >= 2 UI-matchable fields
+            const maxTries = Math.min(items.length, 50);
+            let chosenFromItem = null;
+            for (let attempt = 0; attempt < maxTries; attempt++) {
+                const idx = rand(0, Math.max(0, items.length - 1));
+                const item = items[idx];
+                const fieldsEntries = Object.entries(item?.fields || {});
+                if (!fieldsEntries.length) continue;
 
-		// Read an item's field map; fall back to DOM when needed
-		const getItemFields = (item) => {
-			if (item?.fields) return item.fields; // expected shape: { [key]: { value } }
+                // For this item, pick at most one random value per field that exists in UI
+                const candidates = [];
+                fieldsEntries.forEach(([key, field]) => {
+                    const map = uiByField.get(key);
+                    if (!map || !map.size) return;
+                    const values = fieldValueStrings(field);
+                    const exists = values.filter((v) => map.has(v));
+                    if (!exists.length) return;
+                    const val = exists[rand(0, exists.length - 1)];
+                    candidates.push({ fieldKey: key, value: val, input: map.get(val) });
+                });
 
-			const map = {};
-			const root = item?.element;
-			if (!root) return map;
+                if (candidates.length >= 2) {
+                    // Choose 2–5 conditions from this item
+                    for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
+                    const n = rand(2, Math.min(5, candidates.length));
+                    chosenFromItem = candidates.slice(0, n);
+                    log('Using item index', idx, 'with', n, 'conditions.');
+                    break;
+                }
+            }
 
-			root.querySelectorAll('[fs-list-field]').forEach((el) => {
-				const key = el.getAttribute('fs-list-field');
-				if (!key || key === '*') return;
-				const vAttr = el.getAttribute('fs-list-value');
-				const txt = (el.textContent || '').trim();
-				const raw = vAttr ?? txt;
-				const values = raw.split(',').map(s => s.trim()).filter(Boolean);
-				map[key] = { value: values.length > 1 ? values : (values[0] ?? '') };
-			});
+            if (!chosenFromItem) { log('No item found with >=2 UI-matchable fields; aborting (no fallbacks).'); return false; }
+            const chosen = chosenFromItem;
+            log('Chosen conditions:', chosen.map(c => ({ fieldKey: c.fieldKey, value: c.value })));
 
-			return map;
-		};
+            // Prefer built-in clear if available to let Attributes handle state
+            const clearBtn = document.querySelector('[fs-list-element="clear"]');
+            if (clearBtn) {
+                log('Clearing via [fs-list-element="clear"]');
+                clearBtn.click();
+            } else {
+                // Uncheck all currently-checked inputs and emit events so Attributes updates state
+                log('Clearing by unchecking all inputs');
+                allInputs.forEach((input) => {
+                    if (input.checked) {
+                        input.checked = false;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    const lab = input.closest('label');
+                    if (lab) lab.classList.remove('is-list-active');
+                });
+            }
 
-		// Clear filters: prefer native Clear element, else reset forms
-		const clearFilters = (uiIndex) => {
-			const clearBtn = document.querySelector('[fs-list-element="clear"]');
-			if (clearBtn) { clearBtn.click(); return; }
+            // Apply via API (reactive filters) to guarantee match to selected item
+            const apiFilters = listInstance.filters?.value;
+            if (!apiFilters) { log('List filters ref not available.'); return false; }
+            apiFilters.groupsMatch = 'and';
+            apiFilters.groups = [{
+                id: 'random',
+                conditionsMatch: 'and',
+                conditions: chosen.map(({ fieldKey, value }) => ({
+                    id: `rf-${fieldKey}-${Date.now()}`,
+                    type: 'checkbox',
+                    fieldKey,
+                    op: 'equal',
+                    value,
+                    interacted: true,
+                })),
+            }];
 
-			const forms = new Set();
-			for (const [, entry] of uiIndex) entry.forms.forEach(f => forms.add(f));
+            // Trigger the filtering phase explicitly
+            if (typeof listInstance.triggerHook === 'function') listInstance.triggerHook('filter');
 
-			forms.forEach((form) => {
-				form.reset();
-				form.querySelectorAll('[fs-list-field]').forEach((el) => {
-					el.dispatchEvent(new Event('input', { bubbles: true }));
-					el.dispatchEvent(new Event('change', { bubbles: true }));
-				});
-			});
-		};
+            // Sync UI to reflect applied conditions (quietly; no events)
+            allInputs.forEach((input) => {
+                input.checked = false;
+                const lab = input.closest('label');
+                if (lab) lab.classList.remove('is-list-active');
+            });
+            chosen.forEach(({ input }) => {
+                input.checked = true;
+                const lab = input.closest('label');
+                if (lab) lab.classList.add('is-list-active');
+            });
+            log('Applied via API and synced UI for', chosen.length, 'conditions.');
+            return true;
+        };
 
-		// Apply one field/value to the UI
-		const applyOne = (uiEntry, value, formsToSubmit) => {
-			if (!uiEntry) return false;
-			// Checkbox/Radio mapped by fs-list-value
-			if (uiEntry.valuesMap.has(value)) {
-				const input = uiEntry.valuesMap.get(value);
-				if (input.type === 'checkbox' || input.type === 'radio') {
-					input.checked = true;
-					input.dispatchEvent(new Event('input', { bubbles: true }));
-					input.dispatchEvent(new Event('change', { bubbles: true }));
-					const form = input.closest('form');
-					if (form && form.getAttribute('fs-list-filteron') === 'submit') formsToSubmit.add(form);
-					return true;
-				}
-			}
-			// Select
-			if (uiEntry.select && uiEntry.selectValues.has(value)) {
-				uiEntry.select.value = value;
-				uiEntry.select.dispatchEvent(new Event('change', { bubbles: true }));
-				const form = uiEntry.select.closest('form');
-				if (form && form.getAttribute('fs-list-filteron') === 'submit') formsToSubmit.add(form);
-				return true;
-			}
-			return false;
-		};
+        // Click handler: any element with data-randomfilters triggers randomisation on the single list
+        document.addEventListener(
+            'click',
+            (e) => {
+                const el = e.target.closest('[data-randomfilters]');
+                if (!el) return;
+                log('Click on [data-randomfilters]:', el);
 
-		// When Finsweet List is ready, perform the randomisation
-		const run = (listInstances) => {
-			const [listInstance] = listInstances || [];
-			if (!listInstance) return;
+                const ok = randomise();
+                if (!ok) log('Randomise aborted.');
+            },
+            true // capture phase to run before modal close handlers
+        );
 
-			const uiIndex = indexFiltersUI();
-			const items = getItemsArray(listInstance);
-			if (!items.length) return;
-
-			const randomItem = items[randInt(0, items.length - 1)];
-			const fieldsMap = getItemFields(randomItem);
-
-			// Build candidate field/value pairs that actually exist in the UI
-			const candidates = [];
-			for (const [key, uiEntry] of uiIndex) {
-				const data = fieldsMap[key];
-				if (!data) continue;
-
-				let values = Array.isArray(data.value) ? data.value : [data.value];
-				values = values.flatMap(v => String(v).split(',')).map(s => s.trim()).filter(Boolean);
-
-				const allowed = values.filter(v => uiEntry.valuesMap.has(v) || (uiEntry.select && uiEntry.selectValues.has(v)));
-				if (!allowed.length) continue;
-
-				const chosen = allowed[randInt(0, allowed.length - 1)];
-				candidates.push({ key, value: chosen, uiEntry });
-			}
-
-			if (!candidates.length) return;
-
-			shuffle(candidates);
-			const howMany = randInt(2, Math.min(5, candidates.length));
-			const chosenPairs = candidates.slice(0, howMany);
-
-			clearFilters(uiIndex);
-
-			const formsToSubmit = new Set();
-			chosenPairs.forEach(({ value, uiEntry }) => applyOne(uiEntry, value, formsToSubmit));
-
-			formsToSubmit.forEach((form) => {
-				if (form.requestSubmit) form.requestSubmit();
-				else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-			});
-		};
-
-		// Queue via Finsweet Attributes API so it runs when List is loaded
-		window.FinsweetAttributes = window.FinsweetAttributes || [];
-		window.FinsweetAttributes.push(['list', run]);
-	}
+        // Capture the single list instance via v2 API
+        window.FinsweetAttributes = window.FinsweetAttributes || [];
+        window.FinsweetAttributes.push([
+            'list',
+            (instances) => {
+                if (Array.isArray(instances) && instances.length) lastInstance = instances[0];
+            },
+        ]);
+    }
 
 	// Boot 🚀
 	ddg.boot = initSite;
