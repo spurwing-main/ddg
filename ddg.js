@@ -657,7 +657,7 @@
 		const randomise = (attempt = 0) => {
 			const listInstance = resolveListInstance();
 			if (!listInstance) {
-				if (attempt === 0) log('No list instance. Loading and retrying…');
+				if (attempt === 0) console.log('No list instance. Loading and retrying…');
 
 				try {
 					if (data.truePath?.startsWith('/stories/') && !data.ajaxHomeLoaded) initAjaxHome();
@@ -671,20 +671,20 @@
 				if (attempt < 50) {
 					setTimeout(() => randomise(attempt + 1), 120);
 				} else {
-					log('Randomise aborted after waiting for list.');
+					console.log('Randomise aborted after waiting for list.');
 				}
 				return false;
 			}
 
 			const items = Array.isArray(listInstance.items?.value) ? listInstance.items.value : (Array.isArray(listInstance.items) ? listInstance.items : []);
-			if (!items.length) { log('List has no items.'); return false; }
+			if (!items.length) { console.log('List has no items.'); return false; }
 
 			const filtersForm = document.querySelector('[fs-list-element="filters"]');
-			if (!filtersForm) { log('No filters form found.'); return false; }
+			if (!filtersForm) { console.log('No filters form found.'); return false; }
 
 			const uiByField = new Map();
 			const allInputs = Array.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]'));
-			log('Found checkbox inputs:', allInputs.length);
+			console.log('Found checkbox inputs:', allInputs.length);
 			allInputs.forEach((input) => {
 				const label = input.closest('label');
 				if (label && label.classList.contains('is-list-emptyfacet')) return;
@@ -695,7 +695,7 @@
 				if (!map) uiByField.set(key, (map = new Map()));
 				map.set(val, input);
 			});
-			log('Fields in UI:', Array.from(uiByField.keys()));
+			console.log('Fields in UI:', Array.from(uiByField.keys()));
 
 			const maxTries = Math.min(items.length, 50);
 			let chosenFromItem = null;
@@ -720,21 +720,21 @@
 					for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
 					const n = rand(2, Math.min(5, candidates.length));
 					chosenFromItem = candidates.slice(0, n);
-					log('Using item index', idx, 'with', n, 'conditions.');
+					console.log('Using item index', idx, 'with', n, 'conditions.');
 					break;
 				}
 			}
 
-			if (!chosenFromItem) { log('No item found with >=2 UI-matchable fields; aborting (no fallbacks).'); return false; }
+			if (!chosenFromItem) { console.log('No item found with >=2 UI-matchable fields; aborting (no fallbacks).'); return false; }
 			const chosen = chosenFromItem;
-			log('Chosen conditions:', chosen.map(c => ({ fieldKey: c.fieldKey, value: c.value })));
+			console.log('Chosen conditions:', chosen.map(c => ({ fieldKey: c.fieldKey, value: c.value })));
 
 			const clearBtn = document.querySelector('[fs-list-element="clear"]');
 			if (clearBtn) {
-				log('Clearing via [fs-list-element="clear"]');
+				console.log('Clearing via [fs-list-element="clear"]');
 				clearBtn.click();
 			} else {
-				log('Clearing by unchecking all inputs');
+				console.log('Clearing by unchecking all inputs');
 				allInputs.forEach((input) => {
 					if (input.checked) {
 						input.checked = false;
@@ -747,7 +747,7 @@
 			}
 
 			const apiFilters = listInstance.filters?.value;
-			if (!apiFilters) { log('List filters ref not available.'); return false; }
+			if (!apiFilters) { console.log('List filters ref not available.'); return false; }
 			apiFilters.groupsMatch = 'and';
 			apiFilters.groups = [{
 				id: 'random',
@@ -774,7 +774,7 @@
 				const lab = input.closest('label');
 				if (lab) lab.classList.add('is-list-active');
 			});
-			log('Applied via API and synced UI for', chosen.length, 'conditions.');
+			console.log('Applied via API and synced UI for', chosen.length, 'conditions.');
 			return true;
 		};
 
