@@ -7,46 +7,39 @@
 	});
 
 	const fsState = (ddg.fsState ??= {
+		loadRequested: new Set(),
 		activeList: null
 	});
 
-	// --- GSAP base config ------------------------------------------------------
 	try {
 		if (window.gsap) {
 			gsap.defaults({ overwrite: 'auto' });
 			gsap.ticker.lagSmoothing(500, 33);
 		}
 		if (window.ScrollTrigger?.config) {
-			ScrollTrigger.config({
-				ignoreMobileResize: true,
-				autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load'
-			});
+			ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 		}
 	} catch (_) { }
 
-	// --- Finsweet (deduped helpers + single instance source of truth) ----------
-	const FS = (window.FinsweetAttributes ||= []);
-	const fsLoad = (m) => { try { window.FinsweetAttributes.load?.(m); } catch (_) { } };
-	const fsRestart = (m) => { try { window.FinsweetAttributes.modules?.[m]?.restart?.(); } catch (_) { } };
+	ddg.scheduleFsRestart = (moduleName) => {
+		ddg.__fsRestartScheduled = ddg.__fsRestartScheduled || {};
+		if (ddg.__fsRestartScheduled[moduleName]) return;
+		ddg.__fsRestartScheduled[moduleName] = true;
+		Promise.resolve().then(() => {
+			try { window.FinsweetAttributes?.modules?.[moduleName]?.restart?.(); } catch (_) { }
+			ddg.__fsRestartScheduled[moduleName] = false;
+		});
+	};
 
-	/** Single source of truth for the List instance */
-	let list = null;
+	ddg.requestFsLoad = (...modules) => {
+		if (!window.FinsweetAttributes) window.FinsweetAttributes = [];
+		modules.forEach((m) => {
+			if (fsState.loadRequested.has(m)) return;
+			try { window.FinsweetAttributes.load?.(m); } catch (_) { }
+			fsState.loadRequested.add(m);
+		});
+	};
 
-	// Hook once: when Attributes List boots, remember the first instance.
-	FS.push(['list', (instances) => {
-		try {
-			list = Array.isArray(instances) ? instances[0] : instances?.[0];
-			fsState.activeList = list || null;
-		} catch (_) {
-			list = null;
-			fsState.activeList = null;
-		}
-	}]);
-
-	// Optional helper to register list lifecycle hooks when available
-	const onList = (phase, fn) => { try { list?.addHook?.(phase, fn); } catch (_) { } };
-
-	// --- Public boot -----------------------------------------------------------
 	const initSite = () => {
 		if (data.siteBooted) return;
 		data.siteBooted = true;
@@ -56,52 +49,58 @@
 		initComingSoon();
 		initModals();
 		initAjaxModal();
-		initAjaxHome();           // stripped "checkers" version
+		initAjaxHome();
 		initMarquee();
 		setTimeout(initShare, 1000);
 		setTimeout(initRandomiseFilters, 1000);
 	};
 
 	const setupFinsweetListLoader = () => {
+		window.FinsweetAttributes = window.FinsweetAttributes || [];
 		if (data.truePath.startsWith('/stories/')) return;
-		// Load once: treat these as the canonical modules used on the site
-		fsLoad('list');
-		fsLoad('copyclip');
+
+		ddg.requestFsLoad('list', 'copyclip')
 	};
 
-	// --- Navigation (slim ScrollTrigger handler) -------------------------------
 	const initNavigation = () => {
 		const navEl = $('.nav')[0];
 		if (!navEl) return;
 
 		const showThreshold = 50;
 		const hideThreshold = 100;
-		let lastY = window.scrollY;
+		const revealBuffer = 50;
+
+		let lastScrollY = window.scrollY;
+		let revealDistance = 0;
 
 		ScrollTrigger.create({
 			trigger: document.body,
 			start: 'top top',
 			end: 'bottom bottom',
-			onUpdate: (self) => {
+			onUpdate: () => {
 				const y = (window.ScrollTrigger?.scroll?.() ?? window.scrollY);
-				const down = y > lastY;
-
-				navEl.classList.toggle('is-past-threshold', y > hideThreshold);
+				const delta = y - lastScrollY;
 
 				if (y <= showThreshold) {
-					navEl.classList.remove('is-hidden');
-				} else if (down && y > hideThreshold) {
-					navEl.classList.add('is-hidden');
-				} else if (!down) {
-					navEl.classList.remove('is-hidden');
+					navEl.classList.remove('is-hidden', 'is-past-threshold');
+					revealDistance = 0;
+				} else if (delta > 0 && y > hideThreshold) {
+					navEl.classList.add('is-hidden', 'is-past-threshold');
+					revealDistance = 0;
+				} else if (delta < 0) {
+					revealDistance -= delta;
+					if (revealDistance >= revealBuffer) {
+						navEl.classList.remove('is-hidden');
+						revealDistance = 0;
+					}
 				}
 
-				lastY = y;
+				navEl.classList.toggle('is-past-threshold', y > hideThreshold);
+				lastScrollY = y;
 			}
 		});
 	};
 
-	// --- Coming Soon (SplitText lines animation) -------------------------------
 	function initComingSoon() {
 		const wrapperEl = document.querySelector('.home-list_list');
 		if (!wrapperEl) return;
@@ -173,39 +172,48 @@
 		});
 	}
 
-	// --- Share (unchanged, tiny touch-ups only) --------------------------------
 	const initShare = () => {
-		const $shareItems = $('[data-share]');
-		if (!$shareItems.length || ddg.__shareInitialized) return;
+		if (ddg.__shareInitialized) return;
 		ddg.__shareInitialized = true;
 
 		const shareWebhookUrl = 'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
 		const dailyShareKey = 'share_done_date';
 
 		const todayString = () => new Date().toISOString().slice(0, 10);
-		const nextMidnight = () => { const d = new Date(); d.setHours(24, 0, 0, 0); return d; };
+		const nextMidnight = () => {
+			const date = new Date();
+			date.setHours(24, 0, 0, 0);
+			return date;
+		};
 
 		const setCookieValue = (name, value, expiresAt) => {
 			document.cookie = `${name}=${value}; expires=${expiresAt.toUTCString()}; path=/; SameSite=Lax`;
 		};
-		const getCookieValue = (name) => {
-			const pair = document.cookie.split('; ').find(row => row.startsWith(name + '=')) || '';
-			return pair.split('=')[1] || null;
+
+		const getCookieValue = name => {
+			const cookiePair = document.cookie.split('; ').find(row => row.startsWith(name + '=')) || '';
+			return cookiePair.split('=')[1] || null;
 		};
 
 		const markShareComplete = () => {
-			const today = todayString();
-			const exp = nextMidnight();
-			localStorage.setItem(dailyShareKey, today);
-			sessionStorage.setItem(dailyShareKey, today);
-			setCookieValue(dailyShareKey, today, exp);
+			const todayValue = todayString();
+			const expiresAt = nextMidnight();
+			localStorage.setItem(dailyShareKey, todayValue);
+			sessionStorage.setItem(dailyShareKey, todayValue);
+			setCookieValue(dailyShareKey, todayValue, expiresAt);
 		};
+
 		const alreadySharedToday = () => {
-			const t = todayString();
-			return [localStorage.getItem(dailyShareKey), sessionStorage.getItem(dailyShareKey), getCookieValue(dailyShareKey)].includes(t);
+			const todayValue = todayString();
+			return [
+				localStorage.getItem(dailyShareKey),
+				sessionStorage.getItem(dailyShareKey),
+				getCookieValue(dailyShareKey)
+			].includes(todayValue);
 		};
 
 		const shareUrlMap = {
+			clipboard: ({ url }) => url,
 			x: ({ url, text }) => `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
 			facebook: ({ url }) => `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}`,
 			linkedin: ({ url }) => `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(url)}`,
@@ -215,16 +223,89 @@
 			instagram: () => 'https://www.instagram.com/',
 			telegram: ({ url, text }) => `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`
 		};
+
 		const platformAlias = { twitter: 'x' };
+
+		let shareLiveRegion = null;
+		const ensureShareLiveRegion = () => {
+			if (shareLiveRegion && document.body.contains(shareLiveRegion)) return shareLiveRegion;
+			shareLiveRegion = document.createElement('div');
+			shareLiveRegion.setAttribute('aria-live', 'polite');
+			shareLiveRegion.setAttribute('aria-atomic', 'true');
+			shareLiveRegion.setAttribute('data-share-live-region', 'true');
+			Object.assign(shareLiveRegion.style, {
+				position: 'fixed',
+				width: '1px',
+				height: '1px',
+				padding: '0',
+				border: '0',
+				margin: '-1px',
+				overflow: 'hidden',
+				clip: 'rect(0 0 0 0)'
+			});
+			document.body.appendChild(shareLiveRegion);
+			return shareLiveRegion;
+		};
+
+		const announceShare = message => {
+			if (!message) return;
+			const region = ensureShareLiveRegion();
+			region.textContent = '';
+			setTimeout(() => { region.textContent = message; }, 20);
+		};
+
+		const updateShareState = (element, state) => {
+			if (!element) return;
+			element.setAttribute('data-share-state', state);
+			clearTimeout(element.__shareStateTimer);
+			element.__shareStateTimer = setTimeout(() => {
+				element.removeAttribute('data-share-state');
+				element.__shareStateTimer = null;
+			}, 2000);
+		};
+
+		const fallbackCopy = text => new Promise((resolve, reject) => {
+			if (!document.body) {
+				reject(new Error('Document body unavailable'));
+				return;
+			}
+			const textarea = document.createElement('textarea');
+			textarea.value = text;
+			textarea.setAttribute('readonly', '');
+			Object.assign(textarea.style, {
+				position: 'fixed',
+				top: '-9999px',
+				left: '-9999px',
+				opacity: '0'
+			});
+			document.body.appendChild(textarea);
+			textarea.focus();
+			textarea.select();
+			let successful = false;
+			try {
+				successful = document.execCommand('copy');
+			} catch (_) { successful = false; }
+			textarea.remove();
+			if (successful) resolve();
+			else reject(new Error('execCommand failed'));
+		});
+
+		const copyToClipboard = text => {
+			if (!text) return Promise.reject(new Error('Nothing to copy'));
+			if (navigator.clipboard?.writeText) {
+				return navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+			}
+			return fallbackCopy(text);
+		};
 
 		const decrementCountdown = () => {
 			$('[data-share-countdown]').each((_, element) => {
-				const $el = $(element);
-				let remaining = parseInt(element.getAttribute('data-share-countdown') || $el.text() || $el.val(), 10);
+				const $element = $(element);
+				let remaining = parseInt(element.getAttribute('data-share-countdown') || $element.text() || $element.val(), 10);
 				if (!Number.isFinite(remaining)) remaining = 0;
-				const next = Math.max(0, remaining - 1);
-				$el.attr('data-share-countdown', next);
-				$el.is('input, textarea') ? $el.val(next) : $el.text(next);
+				const nextValue = Math.max(0, remaining - 1);
+				$element.attr('data-share-countdown', nextValue);
+				$element.is('input, textarea') ? $element.val(nextValue) : $element.text(nextValue);
 			});
 		};
 
@@ -240,6 +321,7 @@
 			pointerTravel += Math.hypot(clientX - lastPointerPosition[0], clientY - lastPointerPosition[1]);
 			lastPointerPosition = [clientX, clientY];
 		};
+
 		const startTracking = () => {
 			if (tracking) return;
 			tracking = true;
@@ -249,6 +331,7 @@
 			$(document).on('pointermove.ddgShare', onSharePointerMove);
 			trackingTimeout = setTimeout(() => stopTracking(), 8000);
 		};
+
 		const stopTracking = () => {
 			if (!tracking) return;
 			tracking = false;
@@ -265,7 +348,7 @@
 			pointerTravel > 120 &&
 			document.hasFocus();
 
-		const sendShareWebhook = (platform) =>
+		const sendShareWebhook = platform =>
 			new Promise(resolve => {
 				const form = document.createElement('form');
 				const iframe = document.createElement('iframe');
@@ -297,7 +380,7 @@
 				}, 1000);
 			});
 
-		$(document).on('click.ddgShare', '[data-share]', async (event) => {
+		$(document).on('click.ddgShare', '[data-share]', event => {
 			const $target = $(event.currentTarget);
 			event.preventDefault();
 
@@ -310,30 +393,38 @@
 			const resolver = shareUrlMap[normalizedPlatform];
 			const destination = resolver ? resolver({ url: shareUrl, text: shareText }) : shareUrl;
 
-			// Prefer Web Share API on supported devices
-			if (navigator.share) {
-				try {
-					await navigator.share({ title: document.title, text: shareText, url: shareUrl });
-					if (!alreadySharedToday()) { sendShareWebhook(normalizedPlatform); markShareComplete(); }
-					decrementCountdown();
-					return;
-				} catch (_) { /* fall back */ }
-			}
-
-			const sharewindow = window.open('about:blank', '_blank');
-
-			if (!heuristicsSatisfied()) {
-				sharewindow?.close();
-				console.warn('[share] blocked');
-				return;
-			}
+			const isClipboardShare = normalizedPlatform === 'clipboard';
+			const sharewindow = isClipboardShare ? null : window.open('about:blank', '_blank');
+			const heuristicsPassed = heuristicsSatisfied();
 
 			stopTracking();
+			
+			// Fake the countdown for immediate feedback
 			decrementCountdown();
 
-			if (!alreadySharedToday()) {
-				sendShareWebhook(normalizedPlatform);
-				markShareComplete();
+			if (heuristicsPassed) {
+				if (!alreadySharedToday()) {
+					sendShareWebhook(normalizedPlatform);
+					markShareComplete();
+				}
+			} else {
+				console.warn('[share] heuristics not satisfied');
+			}
+
+			if (isClipboardShare) {
+				const successMessage = $target.attr('data-share-copy-label') || 'Link copied to clipboard';
+				const errorMessage = $target.attr('data-share-copy-error') || 'Copy failed. Copy the link manually.';
+				copyToClipboard(destination)
+					.then(() => {
+						updateShareState(event.currentTarget, 'copied');
+						announceShare(successMessage);
+					})
+					.catch(() => {
+						updateShareState(event.currentTarget, 'error');
+						announceShare(errorMessage);
+						try { window.prompt('Copy this link', destination); } catch (_) { }
+					});
+				return;
 			}
 
 			if (sharewindow) {
@@ -345,7 +436,6 @@
 		});
 	};
 
-	// --- Modals ----------------------------------------------------------------
 	const initModals = () => {
 		ddg.modals = ddg.modals || {};
 		ddg._modalsKeydownBound = Boolean(ddg._modalsKeydownBound);
@@ -362,14 +452,109 @@
 			const $el = $(`[data-modal-el="${modalId}"]`);
 			const $bg = $(`[data-modal-bg="${modalId}"]`);
 			const $inner = $el.find('[data-modal-inner]').first();
+			const $scrollHost = $el.find('[data-modal-scroll]').first();
 			const $closeButtons = $(`[data-modal-close="${modalId}"], [data-modal-close]`).filter((_, node) => {
 				const attr = node.getAttribute('data-modal-close');
-				return !attr || attr === modalId;
+				const matchesModal = !attr || attr === modalId;
+				if (!matchesModal) return false;
+				if ($bg.length && node === $bg[0]) return false;
+				return true;
 			});
 
 			if (!$el.length) return;
 
 			const $animTarget = $inner.length ? $inner : $el;
+			const scrollContainer = () => $scrollHost[0] || $inner[0] || $el[0];
+
+			const getScrollContainerForTarget = (target) => {
+				const baseContainer = scrollContainer();
+				if (!target || !baseContainer) return baseContainer;
+				if (!baseContainer.contains(target)) return baseContainer;
+
+				let current = target.parentElement;
+				const root = $el[0];
+
+				while (current && current !== document.body) {
+					if (current === baseContainer) return baseContainer;
+					if (!root.contains(current)) break;
+
+					const styles = getComputedStyle(current);
+					const overflowY = styles.overflowY || styles.overflow;
+					const canScroll = /(auto|scroll)/i.test(overflowY) && current.scrollHeight - current.clientHeight > 1;
+					if (canScroll) return current;
+
+					current = current.parentElement;
+				}
+
+				return baseContainer;
+			};
+
+			const scrollModalTo = (target) => {
+				const container = getScrollContainerForTarget(target);
+				if (!container || !target) return false;
+
+				try {
+					const containerRect = container.getBoundingClientRect();
+					const targetRect = target.getBoundingClientRect();
+					const computed = getComputedStyle(target);
+					const scrollMarginTop = parseFloat(computed.scrollMarginTop || computed.scrollMargin || '0') || 0;
+					const scrollMarginLeft = parseFloat(computed.scrollMarginLeft || computed.scrollMarginInlineStart || computed.scrollMargin || '0') || 0;
+					const nextTop = container.scrollTop + (targetRect.top - containerRect.top) - scrollMarginTop;
+					const nextLeft = container.scrollLeft + (targetRect.left - containerRect.left) - scrollMarginLeft;
+
+					container.scrollTop = Math.max(0, nextTop);
+					if (Number.isFinite(nextLeft) && typeof container.scrollLeft === 'number') {
+						container.scrollLeft = Math.max(0, nextLeft);
+					}
+
+					return true;
+				} catch (_) {
+					return false;
+				}
+			};
+
+			const lockBodyScrollTo = (allowedContainer) => {
+				const allowEl = allowedContainer || null;
+				const startX = window.scrollX;
+				const startY = window.scrollY;
+				let active = true;
+				let rafId = null;
+
+				const maintainPosition = () => {
+					if (!active) return;
+					if (window.scrollX !== startX || window.scrollY !== startY) {
+						window.scrollTo(startX, startY);
+					}
+					rafId = requestAnimationFrame(maintainPosition);
+				};
+				maintainPosition();
+
+				const isEventAllowed = (event) => {
+					if (!allowEl) return false;
+					if (event.target && allowEl.contains(event.target)) return true;
+					const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+					if (!path.length) return false;
+					return path.some(node => node instanceof Element && allowEl.contains(node));
+				};
+
+				const intercept = (event) => {
+					if (isEventAllowed(event)) return;
+					try { event.preventDefault(); } catch (_) { }
+				};
+
+				window.addEventListener('wheel', intercept, { capture: true, passive: false });
+				window.addEventListener('touchmove', intercept, { capture: true, passive: false });
+
+				const release = () => {
+					if (!active) return;
+					active = false;
+					if (rafId !== null) cancelAnimationFrame(rafId);
+					window.removeEventListener('wheel', intercept, true);
+					window.removeEventListener('touchmove', intercept, true);
+				};
+
+				return release;
+			};
 
 			if ($el.hasClass('is-open')) {
 				if ($bg.length) $bg.addClass('is-open');
@@ -448,12 +633,19 @@
 
 			const $triggers = $(`[data-modal-trigger="${modalId}"]`);
 			const isAjaxModal = (modalId === 'story') || $triggers.first().is('[data-ajax-modal="link"]');
-			const closeClickHandler = (e) => { if (e) { e.preventDefault(); e.stopPropagation?.(); } close(); };
+			const closeClickHandler = (e) => {
+				if (e) {
+					e.preventDefault();
+					e.stopPropagation?.();
+				}
+				close();
+			};
 
 			const bindCloseButtons = () => {
 				if (!$closeButtons.length) return;
 				$closeButtons.off('click.modal').on('click.modal', closeClickHandler);
 			};
+
 			const bindBackdrop = () => {
 				if (!$bg.length) return;
 				$bg.off('click.modal').on('click.modal', (e) => {
@@ -471,7 +663,69 @@
 			bindCloseButtons();
 			bindBackdrop();
 
-			$el.on('click.modal', e => { if (e.target === $el[0]) close(); });
+			$el.on('click.modal', e => {
+				if (e.target === $el[0]) close();
+			});
+
+			$el.on('click.modalAnchors', 'a[href^="#"]', e => {
+				const anchor = e.currentTarget;
+				const href = anchor.getAttribute('href') || '';
+				if (!href || href === '#' || href.length < 2) return;
+
+				const hash = href.slice(1);
+				let target = null;
+				try {
+					if (window.CSS?.escape) {
+						target = $el.find(`#${CSS.escape(hash)}`).first()[0] || null;
+					} else {
+						target = $el.find(`[id="${hash.replace(/"/g, '\\"')}"]`).first()[0] || null;
+					}
+				} catch (_) {
+					target = null;
+				}
+
+				if (!target) {
+					const docTarget = document.getElementById(hash);
+					if (docTarget && $el.has(docTarget).length) target = docTarget;
+				}
+
+				if (!target) return;
+
+				e.preventDefault();
+				e.stopPropagation();
+
+				const releaseBodyLock = lockBodyScrollTo(scrollContainer());
+				scrollModalTo(target);
+				try {
+					const updatedUrl = new URL(window.location.href);
+					updatedUrl.hash = hash;
+					window.history.replaceState(window.history.state, '', updatedUrl.toString());
+				} catch (_) { }
+
+				const hadTabIndex = target.hasAttribute('tabindex');
+				if (!hadTabIndex) target.setAttribute('tabindex', '-1');
+				const cleanupFocus = () => {
+					if (!hadTabIndex) target.removeAttribute('tabindex');
+				};
+
+				requestAnimationFrame(() => {
+					if (typeof target.focus === 'function') {
+						try {
+							target.focus({ preventScroll: true });
+						} catch (_) {
+							try {
+								target.focus();
+							} catch (_) { }
+						}
+						target.addEventListener('blur', cleanupFocus, { once: true, capture: false });
+					} else {
+						cleanupFocus();
+					}
+					setTimeout(() => {
+						if (typeof releaseBodyLock === 'function') releaseBodyLock();
+					}, 1000);
+				});
+			});
 		});
 
 		if (!ddg._modalsKeydownBound) {
@@ -486,7 +740,6 @@
 		}
 	};
 
-	// --- Ajax Modal ------------------------------------------------------------
 	const initAjaxModal = () => {
 		if (ddg._ajaxModalInitialized) return;
 		ddg._ajaxModalInitialized = true;
@@ -506,6 +759,7 @@
 				}
 			});
 		};
+
 		const closeWithHistory = () => {
 			modal.close({
 				beforeClose: () => {
@@ -514,7 +768,12 @@
 				}
 			});
 		};
-		const handleClose = (e) => { e.preventDefault(); e.stopImmediatePropagation?.(); closeWithHistory(); };
+
+		const handleClose = (e) => {
+			e.preventDefault();
+			e.stopImmediatePropagation?.();
+			closeWithHistory();
+		};
 
 		ddg._ajaxModalLock = false;
 		$(document).on('click', '[data-ajax-modal="link"]', e => {
@@ -549,12 +808,26 @@
 			});
 		});
 
-		modal.$el.find(`[data-modal-close="${modalId}"], [data-modal-close]`).filter((_, node) => {
+		const $modalCloseButtons = modal.$el.find(`[data-modal-close="${modalId}"], [data-modal-close]`).filter((_, node) => {
 			const attr = node.getAttribute('data-modal-close');
 			return !attr || attr === modalId;
-		}).off('click.modal').on('click.ajax', handleClose);
-		if (modal.$bg.length) modal.$bg.off('click.modal').on('click.ajax', handleClose);
-		if (modal.$el.length) modal.$el.off('click.modal').on('click.ajax', handleClose);
+		});
+
+		$modalCloseButtons.off('click.modal').on('click.ajax', handleClose);
+
+		if (modal.$bg.length) {
+			modal.$bg.off('click.modal').on('click.ajax', event => {
+				if (event.target !== event.currentTarget) return;
+				handleClose(event);
+			});
+		}
+
+		if (modal.$el.length) {
+			modal.$el.off('click.modal').on('click.ajax', event => {
+				if (event.target !== event.currentTarget) return;
+				handleClose(event);
+			});
+		}
 
 		$(document).off('keydown.modals').on('keydown.modals', e => {
 			if (e.key === 'Escape') {
@@ -573,7 +846,6 @@
 		}
 	};
 
-	// --- Ajax Home (STRIPPED CHECKERS: direct load → restart → refresh) -------
 	const initAjaxHome = () => {
 		if (data.ajaxHomeLoaded || !data.truePath.startsWith('/stories/')) return;
 
@@ -588,28 +860,59 @@
 				if (!$source.length) return;
 
 				const content = $source.html();
-				$target.empty().append(content);
-				data.ajaxHomeLoaded = true;
 
-				// load + restart relevant modules once
-				fsLoad('list'); fsLoad('copyclip');
-				fsRestart('list'); fsRestart('copyclip');
+				const checkFinsweetReady = (attempt = 0) => {
+					if (window.FinsweetAttributes?.load) {
+						window.FinsweetAttributes.load('list');
+						window.FinsweetAttributes.load('copyclip');
 
-				initModals();
-				initComingSoon();
-				initMarquee($target[0]);
+						const checkModulesReady = (attempt2 = 0) => {
+							if (window.FinsweetAttributes.modules?.list?.restart) {
+								$target.empty().append(content);
+								data.ajaxHomeLoaded = true;
 
-				requestAnimationFrame(() => {
-					ScrollTrigger?.refresh?.();
-					if (ddg.tickerTape?.refresh) setTimeout(() => ddg.tickerTape.refresh(), 100);
-				});
+								ddg.scheduleFsRestart('list');
+								ddg.scheduleFsRestart('copyclip');
+								initModals();
+								initComingSoon();
+								initMarquee($target[0]);
+
+								requestAnimationFrame(() => {
+									ScrollTrigger.refresh();
+									if (ddg.tickerTape?.refresh) setTimeout(() => ddg.tickerTape.refresh(), 100);
+								});
+							} else if (attempt2 < 100) {
+								setTimeout(() => checkModulesReady(attempt2 + 1), 50);
+							} else {
+								$target.empty().append(content);
+								data.ajaxHomeLoaded = true;
+								try {
+									ddg.requestFsLoad('list', 'copyclip');
+									ddg.scheduleFsRestart('list');
+									ddg.scheduleFsRestart('copyclip');
+								} catch (_) { }
+								initModals();
+								initMarquee($target[0]);
+							}
+						};
+						checkModulesReady();
+					} else if (attempt < 100) {
+						setTimeout(() => checkFinsweetReady(attempt + 1), 50);
+					} else {
+						$target.empty().append(content);
+						data.ajaxHomeLoaded = true;
+						initModals();
+						initMarquee($target[0]);
+					}
+				};
+				checkFinsweetReady();
 			}
 		});
 	};
 
-	// --- Randomise Filters (hook-based; no instance chasing) -------------------
 	function initRandomiseFilters() {
 		const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+
 		const fieldValueStrings = (field) => {
 			if (!field) return [];
 			const v = field.value;
@@ -617,17 +920,90 @@
 			return String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 		};
 
-		const filtersForm = document.querySelector('[fs-list-element="filters"]');
+		let lastInstance = null;
+		let resolvedInstance = null;
+		let filtersCache = new WeakMap();
+		let randomiseLock = false;
+		let fsLoadRequested = false;
+		const pendingListResolvers = [];
 
-		// Build a simple UI index once (rebuilt on afterRender if needed)
-		const buildUiIndex = () => {
+		const extractFirstInstance = (value) => {
+			if (!value) return null;
+			if (Array.isArray(value)) return value[0] || null;
+			if (Array.isArray(value.instances)) return value.instances[0] || null;
+			if (Array.isArray(value.listInstances)) return value.listInstances[0] || null;
+			return null;
+		};
+
+		const getModuleInstance = () => {
+			try {
+				const mod = window.FinsweetAttributes?.modules?.list;
+				return extractFirstInstance(mod?.instances) ||
+					extractFirstInstance(mod?.listInstances) ||
+					extractFirstInstance(mod?.__instances);
+			} catch (_) { }
+			return null;
+		};
+
+		const flushPendingResolvers = () => {
+			if (!resolvedInstance) return;
+			while (pendingListResolvers.length) {
+				const resolver = pendingListResolvers.shift();
+				try { resolver(resolvedInstance); } catch (_) { }
+			}
+		};
+
+		const setActiveInstance = (instance) => {
+			if (!instance) return;
+			if (resolvedInstance !== instance) {
+				resolvedInstance = instance;
+				filtersCache = new WeakMap();
+			}
+			lastInstance = instance;
+			fsState.activeList = instance;
+			flushPendingResolvers();
+		};
+
+		const getCurrentInstance = () =>
+			resolvedInstance || fsState.activeList || lastInstance || getModuleInstance();
+
+		const requestListModules = () => {
+			if (fsLoadRequested) return;
+			fsLoadRequested = true;
+			try { ddg.requestFsLoad('list'); } catch (_) { }
+			try { ddg.scheduleFsRestart('list'); } catch (_) { }
+			if (data.truePath?.startsWith('/stories/') && !data.ajaxHomeLoaded) {
+				try { initAjaxHome(); } catch (_) { }
+			}
+		};
+
+		const waitForListInstance = () => {
+			const existing = getCurrentInstance();
+			if (existing) {
+				setActiveInstance(existing);
+				return Promise.resolve(existing);
+			}
+
+			requestListModules();
+
+			return new Promise((resolve) => {
+				pendingListResolvers.push(resolve);
+			});
+		};
+
+		const resolveListInstance = async () => waitForListInstance();
+
+		const getFiltersForInstance = (instance) => {
+			let cached = filtersCache.get(instance);
+			if (cached?.filtersForm?.isConnected) return cached;
+
+			const filtersForm = document.querySelector('[fs-list-element="filters"]');
 			if (!filtersForm) return null;
-			const allInputs = Array
-				.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]'))
-				.filter((input) => {
-					const label = input.closest('label');
-					return !(label && label.classList.contains('is-list-emptyfacet'));
-				});
+
+			const allInputs = Array.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]')).filter((input) => {
+				const label = input.closest('label');
+				return !(label && label.classList.contains('is-list-emptyfacet'));
+			});
 			if (!allInputs.length) return null;
 
 			const uiByField = new Map();
@@ -641,128 +1017,189 @@
 			});
 
 			const clearBtn = document.querySelector('[fs-list-element="clear"]');
-			return { allInputs, uiByField, clearBtn };
+			cached = { filtersForm, allInputs, uiByField, clearBtn };
+			filtersCache.set(instance, cached);
+			return cached;
 		};
 
-		let uiIndex = buildUiIndex();
+		const randomise = async () => {
+			if (randomiseLock) return false;
+			randomiseLock = true;
+			try {
+				const listInstance = await resolveListInstance();
+				if (!listInstance) return false;
 
-		// Keep UI index fresh after list renders
-		onList('afterRender', () => { uiIndex = buildUiIndex(); });
+				const cache = getFiltersForInstance(listInstance);
+				if (!cache) return false;
 
-		async function randomise() {
-			if (!list) { fsLoad('list'); return false; } // ensure module is requested
+				const { allInputs, uiByField, clearBtn } = cache;
+				const items = Array.isArray(listInstance.items?.value) ? listInstance.items.value : (Array.isArray(listInstance.items) ? listInstance.items : []);
+				if (!items.length) return false;
 
-			const cache = uiIndex || buildUiIndex();
-			if (!cache) return false;
+				const maxTries = Math.min(items.length, 50);
+				let chosenFromItem = null;
+				for (let attempt = 0; attempt < maxTries; attempt++) {
+					const idx = rand(0, Math.max(0, items.length - 1));
+					const item = items[idx];
+					const fieldsEntries = Object.entries(item?.fields || {});
+					if (!fieldsEntries.length) continue;
 
-			const { allInputs, uiByField, clearBtn } = cache;
-			const items = Array.isArray(list.items?.value) ? list.items.value :
-				(Array.isArray(list.items) ? list.items : []);
-			if (!items.length) return false;
+					const candidates = [];
+					fieldsEntries.forEach(([key, field]) => {
+						const map = uiByField.get(key);
+						if (!map || !map.size) return;
+						const values = fieldValueStrings(field);
+						const exists = values.filter((v) => map.has(v));
+						if (!exists.length) return;
+						const val = exists[rand(0, exists.length - 1)];
+						candidates.push({ fieldKey: key, value: val, input: map.get(val) });
+					});
 
-			// Pick a random item; collect 2–5 existing facets that have UI
-			const maxTries = Math.min(items.length, 50);
-			let chosenFromItem = null;
-
-			for (let attempt = 0; attempt < maxTries; attempt++) {
-				const item = items[rand(0, Math.max(0, items.length - 1))];
-				const fieldsEntries = Object.entries(item?.fields || {});
-				if (!fieldsEntries.length) continue;
-
-				const candidates = [];
-				fieldsEntries.forEach(([key, field]) => {
-					const map = uiByField.get(key);
-					if (!map || !map.size) return;
-					const values = fieldValueStrings(field);
-					const exists = values.filter((v) => map.has(v));
-					if (!exists.length) return;
-					const val = exists[rand(0, exists.length - 1)];
-					candidates.push({ fieldKey: key, value: val, input: map.get(val) });
-				});
-
-				if (candidates.length >= 2) {
-					for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
-					const n = rand(2, Math.min(5, candidates.length));
-					chosenFromItem = candidates.slice(0, n);
-					break;
-				}
-			}
-
-			if (!chosenFromItem) return false;
-			const chosen = chosenFromItem;
-
-			// Clear via official clear button if present, else manually uncheck
-			if (clearBtn) {
-				clearBtn.click();
-			} else {
-				allInputs.forEach((input) => {
-					if (input.checked) {
-						input.checked = false;
-						input.dispatchEvent(new Event('input', { bubbles: true }));
-						input.dispatchEvent(new Event('change', { bubbles: true }));
+					if (candidates.length >= 2) {
+						for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
+						const n = rand(2, Math.min(5, candidates.length));
+						chosenFromItem = candidates.slice(0, n);
+						break;
 					}
+				}
+
+				if (!chosenFromItem) return false;
+				const chosen = chosenFromItem;
+
+				if (clearBtn) {
+					clearBtn.click();
+				} else {
+					allInputs.forEach((input) => {
+						if (input.checked) {
+							input.checked = false;
+							input.dispatchEvent(new Event('input', { bubbles: true }));
+							input.dispatchEvent(new Event('change', { bubbles: true }));
+						}
+						const lab = input.closest('label');
+						if (lab) lab.classList.remove('is-list-active');
+					});
+				}
+
+				const apiFilters = listInstance.filters?.value;
+				if (!apiFilters) return false;
+				apiFilters.groupsMatch = 'and';
+				apiFilters.groups = [{
+					id: 'random',
+					conditionsMatch: 'and',
+					conditions: chosen.map(({ fieldKey, value }) => ({
+						id: `rf-${fieldKey}-${Date.now()}`,
+						type: 'checkbox',
+						fieldKey,
+						op: 'equal',
+						value,
+						interacted: true,
+					})),
+				}];
+
+				if (typeof listInstance.triggerHook === 'function') listInstance.triggerHook('filter');
+
+				allInputs.forEach((input) => {
+					input.checked = false;
 					const lab = input.closest('label');
 					if (lab) lab.classList.remove('is-list-active');
 				});
+				chosen.forEach(({ input }) => {
+					input.checked = true;
+					const lab = input.closest('label');
+					if (lab) lab.classList.add('is-list-active');
+				});
+				return true;
+			} finally {
+				randomiseLock = false;
 			}
-
-			// Apply API-level filters and let Attributes drive UI/DOM update
-			const apiFilters = list.filters?.value;
-			if (!apiFilters) return false;
-			apiFilters.groupsMatch = 'and';
-			apiFilters.groups = [{
-				id: 'random',
-				conditionsMatch: 'and',
-				conditions: chosen.map(({ fieldKey, value }) => ({
-					id: `rf-${fieldKey}-${Date.now()}`,
-					type: 'checkbox',
-					fieldKey,
-					op: 'equal',
-					value,
-					interacted: true
-				}))
-			}];
-
-			if (typeof list.triggerHook === 'function') list.triggerHook('filter');
-
-			return true;
-		}
+		};
 
 		document.addEventListener('click', (e) => {
 			const el = e.target.closest('[data-randomfilters]');
 			if (!el) return;
 			void randomise();
 		}, true);
-	}
 
-	// --- Marquee (lean, single stylesheet rule) --------------------------------
-	function initMarquee(root = document) {
-		// global stylesheet once
-		if (!document.getElementById('ddg-marquee-style')) {
-			const s = document.createElement('style');
-			s.id = 'ddg-marquee-style';
-			s.textContent = `
-        @keyframes ddg-marquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }
-        [data-marquee] { display:flex; overflow:hidden; }
-        [data-marquee] .marquee-inner { display:flex; gap:inherit; width:max-content; animation: ddg-marquee var(--ddg-marquee-duration,20000ms) linear infinite; will-change: transform; }
-      `;
-			document.head.appendChild(s);
+		const handleFsList = (instances) => {
+			const instance = extractFirstInstance(instances) ||
+				extractFirstInstance(instances?.instances) ||
+				extractFirstInstance(instances?.listInstances);
+			setActiveInstance(instance);
+		};
+
+		window.FinsweetAttributes = window.FinsweetAttributes || [];
+		if (!ddg.__randomFiltersFsHooked) {
+			ddg.__randomFiltersFsHooked = true;
+			window.FinsweetAttributes.push(['list', (instances) => {
+				handleFsList(instances);
+				try {
+					if (Array.isArray(instances) && instances.length) lastInstance = instances[0];
+					else if (instances?.instances?.length) lastInstance = instances.instances[0];
+					else if (instances?.listInstances?.length) lastInstance = instances.listInstances[0];
+				} catch (_) { }
+			}]);
 		}
 
+		setActiveInstance(getCurrentInstance());
+	}
+
+	function initMarquee(root = document) {
 		const elements = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
 		elements.forEach((el) => {
-			el.setAttribute('data-marquee-init', '1');
+			el.setAttribute('data-marquee-init', '');
+			const duration = 20000;
+			const direction = 'left';
+			const uniqueId = `marquee-${Math.random().toString(36).substr(2, 9)}`;
 
 			const inner = document.createElement('div');
 			inner.className = 'marquee-inner';
 			while (el.firstChild) inner.appendChild(el.firstChild);
-			// clone content once so the animation can loop seamlessly
-			inner.append(...Array.from(inner.children).map((n) => n.cloneNode(true)));
 			el.appendChild(inner);
+
+			el.style.display = 'flex';
+			el.style.overflow = 'hidden';
+			inner.style.display = 'flex';
+			inner.style.gap = 'inherit';
+			inner.style.width = 'max-content';
+
+			const update = () => {
+				if (el.offsetParent === null) return;
+				const marqueeWidth = el.offsetWidth;
+				let contentWidth = inner.scrollWidth;
+
+				while (contentWidth < marqueeWidth * 2) {
+					const children = Array.from(inner.children);
+					children.forEach((child) => inner.appendChild(child.cloneNode(!0)));
+					contentWidth = inner.scrollWidth;
+				}
+
+				const totalWidth = inner.scrollWidth;
+				const from = direction === 'left' ? 0 : -totalWidth / 2;
+				const to = direction === 'left' ? -totalWidth / 2 : 0;
+
+				const keyframes = `@keyframes ${uniqueId} { from { transform: translateX(${from}px); } to { transform: translateX(${to}px); } }`;
+				let style = document.getElementById(`${uniqueId}-style`);
+				if (style) style.remove();
+				style = document.createElement('style');
+				style.id = `${uniqueId}-style`;
+				style.textContent = keyframes;
+				document.head.appendChild(style);
+
+				inner.style.animation = `${uniqueId} ${duration}ms linear infinite`;
+			};
+
+			const observer = new MutationObserver((mutations) => {
+				mutations.forEach((mutation) => {
+					if (mutation.attributeName === 'style') update();
+				});
+			});
+			observer.observe(el, { attributes: !0, attributeFilter: ['style'] });
+
+			update();
+			window.addEventListener('resize', update);
 		});
 	}
 	ddg.initMarquee = initMarquee;
 
-	// --- Export boot -----------------------------------------------------------
 	ddg.boot = initSite;
 })();
