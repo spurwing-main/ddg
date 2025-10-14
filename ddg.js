@@ -50,6 +50,7 @@
 		initModals();
 		initAjaxModal();
 		initAjaxHome();
+		initMarquee();
 		setTimeout(initShare, 1000);
 		setTimeout(initRandomiseFilters, 1000);
 	};
@@ -551,6 +552,7 @@
 					const url = new URL(linkUrl, window.location.origin).href;
 
 					$embed.empty().append(contentNode ? $(contentNode) : "<div class='modal-error'>Failed to load content.</div>");
+					if (contentNode) initMarquee(contentNode);
 					openWithHistory(title, url);
 				},
 				error: () => {
@@ -614,6 +616,7 @@
 								ddg.scheduleFsRestart('copyclip');
 								initModals();
 								initComingSoon();
+								initMarquee($target[0]);
 
 								requestAnimationFrame(() => {
 									ScrollTrigger.refresh();
@@ -630,6 +633,7 @@
 									ddg.scheduleFsRestart('copyclip');
 								} catch (_) { }
 								initModals();
+								initMarquee($target[0]);
 							}
 						};
 						checkModulesReady();
@@ -639,6 +643,7 @@
 						$target.empty().append(content);
 						data.ajaxHomeLoaded = true;
 						initModals();
+						initMarquee($target[0]);
 					}
 				};
 				checkFinsweetReady();
@@ -878,6 +883,64 @@
 
 		setActiveInstance(getCurrentInstance());
 	}
+
+	function initMarquee(root = document) {
+		const elements = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
+		elements.forEach((el) => {
+			el.setAttribute('data-marquee-init', '');
+			const duration = 20000;
+			const direction = 'left';
+			const uniqueId = `marquee-${Math.random().toString(36).substr(2, 9)}`;
+			
+			const inner = document.createElement('div');
+			inner.className = 'marquee-inner';
+			while (el.firstChild) inner.appendChild(el.firstChild);
+			el.appendChild(inner);
+			
+			el.style.display = 'flex';
+			el.style.overflow = 'hidden';
+			inner.style.display = 'flex';
+			inner.style.gap = 'inherit';
+			inner.style.width = 'max-content';
+			
+			const update = () => {
+				if (el.offsetParent === null) return;
+				const marqueeWidth = el.offsetWidth;
+				let contentWidth = inner.scrollWidth;
+				
+				while (contentWidth < marqueeWidth * 2) {
+					const children = Array.from(inner.children);
+					children.forEach((child) => inner.appendChild(child.cloneNode(!0)));
+					contentWidth = inner.scrollWidth;
+				}
+				
+				const totalWidth = inner.scrollWidth;
+				const from = direction === 'left' ? 0 : -totalWidth / 2;
+				const to = direction === 'left' ? -totalWidth / 2 : 0;
+				
+				const keyframes = `@keyframes ${uniqueId} { from { transform: translateX(${from}px); } to { transform: translateX(${to}px); } }`;
+				let style = document.getElementById(`${uniqueId}-style`);
+				if (style) style.remove();
+				style = document.createElement('style');
+				style.id = `${uniqueId}-style`;
+				style.textContent = keyframes;
+				document.head.appendChild(style);
+				
+				inner.style.animation = `${uniqueId} ${duration}ms linear infinite`;
+			};
+			
+			const observer = new MutationObserver((mutations) => {
+				mutations.forEach((mutation) => {
+					if (mutation.attributeName === 'style') update();
+				});
+			});
+			observer.observe(el, { attributes: !0, attributeFilter: ['style'] });
+			
+			update();
+			window.addEventListener('resize', update);
+		});
+	}
+	ddg.initMarquee = initMarquee;
 
 	ddg.boot = initSite;
 })();
