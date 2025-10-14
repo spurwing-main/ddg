@@ -11,15 +11,9 @@
 		activeList: null
 	});
 
-	try {
-		if (window.gsap) {
-			gsap.defaults({ overwrite: 'auto' });
-			gsap.ticker.lagSmoothing(500, 33);
-		}
-		if (window.ScrollTrigger?.config) {
-			ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
-		}
-	} catch (_) { }
+	gsap.defaults({ overwrite: 'auto' });
+	gsap.ticker.lagSmoothing(500, 33);
+	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 
 	ddg.scheduleFsRestart = (moduleName) => {
 		ddg.__fsRestartScheduled = ddg.__fsRestartScheduled || {};
@@ -52,14 +46,14 @@
 		initAjaxHome();
 		initMarquee();
 		setTimeout(initShare, 1000);
-		setTimeout(initRandomiseFilters, 1000);
+		initRandomiseFilters();
 	};
 
 	const setupFinsweetListLoader = () => {
 		window.FinsweetAttributes = window.FinsweetAttributes || [];
 		if (data.truePath.startsWith('/stories/')) return;
 
-		ddg.requestFsLoad('list', 'copyclip')
+		ddg.requestFsLoad('list', 'copyclip');
 	};
 
 	const initNavigation = () => {
@@ -160,7 +154,7 @@
 			});
 
 		let resizeTimer;
-		$(window).on('resize.ddgComingSoon', () => {
+		const resizeHandler = () => {
 			clearTimeout(resizeTimer);
 			resizeTimer = setTimeout(() => {
 				for (const el of splitSet) {
@@ -169,7 +163,22 @@
 				}
 				splitSet.clear();
 			}, 200);
-		});
+		};
+		
+		$(window).on('resize.ddgComingSoon', resizeHandler);
+		
+		// Cleanup function
+		if (!ddg.__comingSoonCleanup) {
+			ddg.__comingSoonCleanup = () => {
+				$(wrapperEl).off('.ddgComingSoon');
+				$(window).off('resize.ddgComingSoon', resizeHandler);
+				for (const el of splitSet) {
+					try { el.__ddgSplit?.revert(); } catch (_) { }
+					delete el.__ddgSplit;
+				}
+				splitSet.clear();
+			};
+		}
 	}
 
 	const initShare = () => {
@@ -519,13 +528,18 @@
 				const startY = window.scrollY;
 				let active = true;
 				let rafId = null;
+				let rafScheduled = false;
 
 				const maintainPosition = () => {
+					rafScheduled = false;
 					if (!active) return;
 					if (window.scrollX !== startX || window.scrollY !== startY) {
 						window.scrollTo(startX, startY);
 					}
-					rafId = requestAnimationFrame(maintainPosition);
+					if (active) {
+						rafScheduled = true;
+						rafId = requestAnimationFrame(maintainPosition);
+					}
 				};
 				maintainPosition();
 
@@ -548,7 +562,11 @@
 				const release = () => {
 					if (!active) return;
 					active = false;
-					if (rafId !== null) cancelAnimationFrame(rafId);
+					if (rafId !== null && rafScheduled) {
+						cancelAnimationFrame(rafId);
+						rafId = null;
+						rafScheduled = false;
+					}
 					window.removeEventListener('wheel', intercept, true);
 					window.removeEventListener('touchmove', intercept, true);
 				};
@@ -668,6 +686,10 @@
 			});
 
 			$el.on('click.modalAnchors', 'a[href^="#"]', e => {
+				e.preventDefault();
+				e.stopPropagation();
+				e.stopImmediatePropagation();
+				
 				const anchor = e.currentTarget;
 				const href = anchor.getAttribute('href') || '';
 				if (!href || href === '#' || href.length < 2) return;
@@ -690,9 +712,6 @@
 				}
 
 				if (!target) return;
-
-				e.preventDefault();
-				e.stopPropagation();
 
 				const releaseBodyLock = lockBodyScrollTo(scrollContainer());
 				scrollModalTo(target);
@@ -743,6 +762,7 @@
 	const initAjaxModal = () => {
 		if (ddg._ajaxModalInitialized) return;
 		ddg._ajaxModalInitialized = true;
+		if (!ddg.modals || !ddg.modals['story']) return;
 
 		const modalId = 'story';
 		const $embed = $('[data-ajax-modal="embed"]');
@@ -925,6 +945,7 @@
 		let filtersCache = new WeakMap();
 		let randomiseLock = false;
 		let fsLoadRequested = false;
+		let finsweetReady = false;
 		const pendingListResolvers = [];
 
 		const extractFirstInstance = (value) => {
@@ -986,8 +1007,12 @@
 
 			requestListModules();
 
-			return new Promise((resolve) => {
+			return new Promise((resolve, reject) => {
 				pendingListResolvers.push(resolve);
+				// Add timeout to prevent hanging forever
+				setTimeout(() => {
+					reject(new Error('Timeout waiting for Finsweet list instance'));
+				}, 10000);
 			});
 		};
 
@@ -1026,8 +1051,16 @@
 			if (randomiseLock) return false;
 			randomiseLock = true;
 			try {
+				// Wait for Finsweet to be ready
+				if (!finsweetReady) {
+					console.warn('Finsweet not ready yet, waiting...');
+				}
+				
 				const listInstance = await resolveListInstance();
-				if (!listInstance) return false;
+				if (!listInstance) {
+					console.warn('Could not get Finsweet list instance');
+					return false;
+				}
 
 				const cache = getFiltersForInstance(listInstance);
 				if (!cache) return false;
@@ -1038,6 +1071,8 @@
 
 				const maxTries = Math.min(items.length, 50);
 				let chosenFromItem = null;
+				let uniqueIdCounter = 0;
+				
 				for (let attempt = 0; attempt < maxTries; attempt++) {
 					const idx = rand(0, Math.max(0, items.length - 1));
 					const item = items[idx];
@@ -1087,7 +1122,7 @@
 					id: 'random',
 					conditionsMatch: 'and',
 					conditions: chosen.map(({ fieldKey, value }) => ({
-						id: `rf-${fieldKey}-${Date.now()}`,
+						id: `rf-${fieldKey}-${uniqueIdCounter++}`,
 						type: 'checkbox',
 						fieldKey,
 						op: 'equal',
@@ -1109,6 +1144,9 @@
 					if (lab) lab.classList.add('is-list-active');
 				});
 				return true;
+			} catch (error) {
+				console.error('Random filters error:', error);
+				return false;
 			} finally {
 				randomiseLock = false;
 			}
@@ -1117,6 +1155,7 @@
 		document.addEventListener('click', (e) => {
 			const el = e.target.closest('[data-randomfilters]');
 			if (!el) return;
+			e.preventDefault();
 			void randomise();
 		}, true);
 
@@ -1125,6 +1164,7 @@
 				extractFirstInstance(instances?.instances) ||
 				extractFirstInstance(instances?.listInstances);
 			setActiveInstance(instance);
+			finsweetReady = true;
 		};
 
 		window.FinsweetAttributes = window.FinsweetAttributes || [];
@@ -1140,7 +1180,12 @@
 			}]);
 		}
 
-		setActiveInstance(getCurrentInstance());
+		// Check if Finsweet is already loaded
+		const existing = getCurrentInstance();
+		if (existing) {
+			setActiveInstance(existing);
+			finsweetReady = true;
+		}
 	}
 
 	function initMarquee(root = document) {
@@ -1149,7 +1194,7 @@
 			el.setAttribute('data-marquee-init', '');
 			const duration = 20000;
 			const direction = 'left';
-			const uniqueId = `marquee-${Math.random().toString(36).substr(2, 9)}`;
+			const uniqueId = `marquee-${Math.random().toString(36).slice(2, 11)}`;
 
 			const inner = document.createElement('div');
 			inner.className = 'marquee-inner';
@@ -1162,15 +1207,40 @@
 			inner.style.gap = 'inherit';
 			inner.style.width = 'max-content';
 
+			let resizeHandler = null;
+			let mutationObserver = null;
+			
+			const cleanup = () => {
+				if (resizeHandler) {
+					window.removeEventListener('resize', resizeHandler);
+					resizeHandler = null;
+				}
+				if (mutationObserver) {
+					mutationObserver.disconnect();
+					mutationObserver = null;
+				}
+				const style = document.getElementById(`${uniqueId}-style`);
+				if (style) style.remove();
+			};
+
 			const update = () => {
 				if (el.offsetParent === null) return;
 				const marqueeWidth = el.offsetWidth;
 				let contentWidth = inner.scrollWidth;
+				
+				// Prevent infinite loop - bail if content is empty or too small
+				if (contentWidth === 0 || marqueeWidth === 0) return;
 
-				while (contentWidth < marqueeWidth * 2) {
+				let iterations = 0;
+				const maxIterations = 50;
+				while (contentWidth < marqueeWidth * 2 && iterations < maxIterations) {
 					const children = Array.from(inner.children);
-					children.forEach((child) => inner.appendChild(child.cloneNode(!0)));
-					contentWidth = inner.scrollWidth;
+					if (children.length === 0) break;
+					children.forEach((child) => inner.appendChild(child.cloneNode(true)));
+					const newWidth = inner.scrollWidth;
+					if (newWidth === contentWidth) break; // No change, prevent infinite loop
+					contentWidth = newWidth;
+					iterations++;
 				}
 
 				const totalWidth = inner.scrollWidth;
@@ -1188,15 +1258,19 @@
 				inner.style.animation = `${uniqueId} ${duration}ms linear infinite`;
 			};
 
-			const observer = new MutationObserver((mutations) => {
+			mutationObserver = new MutationObserver((mutations) => {
 				mutations.forEach((mutation) => {
 					if (mutation.attributeName === 'style') update();
 				});
 			});
-			observer.observe(el, { attributes: !0, attributeFilter: ['style'] });
+			mutationObserver.observe(el, { attributes: true, attributeFilter: ['style'] });
 
 			update();
-			window.addEventListener('resize', update);
+			resizeHandler = update;
+			window.addEventListener('resize', resizeHandler);
+			
+			// Store cleanup function on element for manual cleanup if needed
+			el.__ddgMarqueeCleanup = cleanup;
 		});
 	}
 	ddg.initMarquee = initMarquee;
