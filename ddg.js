@@ -44,30 +44,21 @@
 		if (data.siteBooted) return;
 		data.siteBooted = true;
 
-		const runInit = () => {
-			setTimeout(() => {
-				setupFinsweetListLoader();
-				setTimeout(initNavigation, 150);
-				setTimeout(initComingSoon, 450);
-				setTimeout(initModals, 600);
-				setTimeout(initAjaxModal, 800);
-				setTimeout(initShare, 1200);
-				setTimeout(initRandomiseFilters, 1400);
-				setTimeout(initAjaxHome, 1600);
-			}, 2000);
-		};
-
-		if (document.readyState === 'complete') {
-			runInit();
-		} else {
-			window.addEventListener('load', runInit, { once: true });
-		}
+		setupFinsweetListLoader();
+		initNavigation();
+		initComingSoon();
+		initModals();
+		initAjaxModal();
+		initAjaxHome();
+		setTimeout(initShare, 1000);
+		setTimeout(initRandomiseFilters, 1000);
 	};
 
 	const setupFinsweetListLoader = () => {
 		window.FinsweetAttributes = window.FinsweetAttributes || [];
 		if (data.truePath.startsWith('/stories/')) return;
-		setTimeout(() => ddg.requestFsLoad('list', 'copyclip'), 800);
+
+		ddg.requestFsLoad('list', 'copyclip')
 	};
 
 	const initNavigation = () => {
@@ -341,10 +332,8 @@
 			decrementCountdown();
 
 			if (!alreadySharedToday()) {
-				sendShareWebhook(normalizedPlatform).then(() => console.log('[share] webhook sent'));
+				sendShareWebhook(normalizedPlatform);
 				markShareComplete();
-			} else {
-				console.log('[share] daily cap hit');
 			}
 
 			if (sharewindow) {
@@ -372,7 +361,10 @@
 			const $el = $(`[data-modal-el="${modalId}"]`);
 			const $bg = $(`[data-modal-bg="${modalId}"]`);
 			const $inner = $el.find('[data-modal-inner]').first();
-			const $closeButtons = $(`[data-modal-close="${modalId}"]`);
+				const $closeButtons = $(`[data-modal-close="${modalId}"], [data-modal-close]`).filter((_, node) => {
+					const attr = node.getAttribute('data-modal-close');
+					return !attr || attr === modalId;
+				});
 
 			if (!$el.length) return;
 
@@ -455,6 +447,25 @@
 
 			const $triggers = $(`[data-modal-trigger="${modalId}"]`);
 			const isAjaxModal = (modalId === 'story') || $triggers.first().is('[data-ajax-modal="link"]');
+			const closeClickHandler = (e) => {
+				if (e) {
+					e.preventDefault();
+					e.stopPropagation?.();
+				}
+				close();
+			};
+
+			const bindCloseButtons = () => {
+				if (!$closeButtons.length) return;
+				$closeButtons.off('click.modal').on('click.modal', closeClickHandler);
+			};
+
+			const bindBackdrop = () => {
+				if (!$bg.length) return;
+				$bg.off('click.modal').on('click.modal', (e) => {
+					if (e.target === e.currentTarget) closeClickHandler(e);
+				});
+			};
 
 			if (!isAjaxModal) {
 				$(document).on('click', `[data-modal-trigger="${modalId}"]`, e => {
@@ -462,6 +473,9 @@
 					open();
 				});
 			}
+
+			bindCloseButtons();
+			bindBackdrop();
 
 			$el.on('click.modal', e => {
 				if (e.target === $el[0]) close();
@@ -510,11 +524,9 @@
 		};
 
 		const handleClose = (e) => {
-			if (e.target === e.currentTarget) {
-				e.preventDefault();
-				e.stopImmediatePropagation?.();
-				closeWithHistory();
-			}
+			e.preventDefault();
+			e.stopImmediatePropagation?.();
+			closeWithHistory();
 		};
 
 		ddg._ajaxModalLock = false;
@@ -549,7 +561,10 @@
 			});
 		});
 
-		modal.$el.find(`[data-modal-close="${modalId}"]`).off('click.modal').on('click.ajax', handleClose);
+		modal.$el.find(`[data-modal-close="${modalId}"], [data-modal-close]`).filter((_, node) => {
+			const attr = node.getAttribute('data-modal-close');
+			return !attr || attr === modalId;
+		}).off('click.modal').on('click.ajax', handleClose);
 		if (modal.$bg.length) modal.$bg.off('click.modal').on('click.ajax', handleClose);
 		if (modal.$el.length) modal.$el.off('click.modal').on('click.ajax', handleClose);
 
@@ -642,52 +657,93 @@
 		};
 
 		let lastInstance = null;
+		let resolvedInstance = null;
+		let filtersCache = new WeakMap();
+		let randomiseLock = false;
+		let fsLoadRequested = false;
+		const pendingListResolvers = [];
 
-		const resolveListInstance = () => {
-			if (fsState.activeList || lastInstance) return fsState.activeList || lastInstance;
+		const extractFirstInstance = (value) => {
+			if (!value) return null;
+			if (Array.isArray(value)) return value[0] || null;
+			if (Array.isArray(value.instances)) return value.instances[0] || null;
+			if (Array.isArray(value.listInstances)) return value.listInstances[0] || null;
+			return null;
+		};
 
+		const getModuleInstance = () => {
 			try {
 				const mod = window.FinsweetAttributes?.modules?.list;
-				const candidates = mod?.instances || mod?.listInstances || mod?.__instances || [];
-				if (Array.isArray(candidates) && candidates.length) return candidates[0];
+				return extractFirstInstance(mod?.instances) ||
+					extractFirstInstance(mod?.listInstances) ||
+					extractFirstInstance(mod?.__instances);
 			} catch (_) { }
 			return null;
 		};
 
-		const randomise = (attempt = 0) => {
-			const listInstance = resolveListInstance();
-			if (!listInstance) {
-				if (attempt === 0) console.log('No list instance. Loading and retrying…');
+		const flushPendingResolvers = () => {
+			if (!resolvedInstance) return;
+			while (pendingListResolvers.length) {
+				const resolver = pendingListResolvers.shift();
+				try { resolver(resolvedInstance); } catch (_) { }
+			}
+		};
 
-				try {
-					if (data.truePath?.startsWith('/stories/') && !data.ajaxHomeLoaded) initAjaxHome();
-				} catch (_) { }
+		const setActiveInstance = (instance) => {
+			if (!instance) return;
+			if (resolvedInstance !== instance) {
+				resolvedInstance = instance;
+				filtersCache = new WeakMap();
+			}
+			lastInstance = instance;
+			fsState.activeList = instance;
+			flushPendingResolvers();
+		};
 
-				try {
-					ddg.requestFsLoad('list');
-					ddg.scheduleFsRestart('list');
-				} catch (_) { }
+		const getCurrentInstance = () =>
+			resolvedInstance || fsState.activeList || lastInstance || getModuleInstance();
 
-				if (attempt < 50) {
-					setTimeout(() => randomise(attempt + 1), 120);
-				} else {
-					console.log('Randomise aborted after waiting for list.');
-				}
-				return false;
+		const requestListModules = () => {
+			if (fsLoadRequested) return;
+			fsLoadRequested = true;
+			try { ddg.requestFsLoad('list'); } catch (_) { }
+			try { ddg.scheduleFsRestart('list'); } catch (_) { }
+			if (data.truePath?.startsWith('/stories/') && !data.ajaxHomeLoaded) {
+				try { initAjaxHome(); } catch (_) { }
+			}
+		};
+
+		const waitForListInstance = () => {
+			const existing = getCurrentInstance();
+			if (existing) {
+				setActiveInstance(existing);
+				return Promise.resolve(existing);
 			}
 
-			const items = Array.isArray(listInstance.items?.value) ? listInstance.items.value : (Array.isArray(listInstance.items) ? listInstance.items : []);
-			if (!items.length) { console.log('List has no items.'); return false; }
+			requestListModules();
+
+			return new Promise((resolve) => {
+				pendingListResolvers.push(resolve);
+			});
+		};
+
+		const resolveListInstance = async () => waitForListInstance();
+
+		const getFiltersForInstance = (instance) => {
+			let cached = filtersCache.get(instance);
+			if (cached?.filtersForm?.isConnected) return cached;
 
 			const filtersForm = document.querySelector('[fs-list-element="filters"]');
-			if (!filtersForm) { console.log('No filters form found.'); return false; }
+			if (!filtersForm) return null;
+
+			const allInputs = Array.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]')).filter((input) => {
+				const label = input.closest('label');
+				return !(label && label.classList.contains('is-list-emptyfacet'));
+			});
+			if (!allInputs.length) return null;
 
 			const uiByField = new Map();
-			const allInputs = Array.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]'));
-			console.log('Found checkbox inputs:', allInputs.length);
 			allInputs.forEach((input) => {
-				const label = input.closest('label');
-				if (label && label.classList.contains('is-list-emptyfacet')) return;
 				const key = input.getAttribute('fs-list-field');
 				const val = input.getAttribute('fs-list-value');
 				if (!key || !val) return;
@@ -695,107 +751,132 @@
 				if (!map) uiByField.set(key, (map = new Map()));
 				map.set(val, input);
 			});
-			console.log('Fields in UI:', Array.from(uiByField.keys()));
-
-			const maxTries = Math.min(items.length, 50);
-			let chosenFromItem = null;
-			for (let attempt = 0; attempt < maxTries; attempt++) {
-				const idx = rand(0, Math.max(0, items.length - 1));
-				const item = items[idx];
-				const fieldsEntries = Object.entries(item?.fields || {});
-				if (!fieldsEntries.length) continue;
-
-				const candidates = [];
-				fieldsEntries.forEach(([key, field]) => {
-					const map = uiByField.get(key);
-					if (!map || !map.size) return;
-					const values = fieldValueStrings(field);
-					const exists = values.filter((v) => map.has(v));
-					if (!exists.length) return;
-					const val = exists[rand(0, exists.length - 1)];
-					candidates.push({ fieldKey: key, value: val, input: map.get(val) });
-				});
-
-				if (candidates.length >= 2) {
-					for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
-					const n = rand(2, Math.min(5, candidates.length));
-					chosenFromItem = candidates.slice(0, n);
-					console.log('Using item index', idx, 'with', n, 'conditions.');
-					break;
-				}
-			}
-
-			if (!chosenFromItem) { console.log('No item found with >=2 UI-matchable fields; aborting (no fallbacks).'); return false; }
-			const chosen = chosenFromItem;
-			console.log('Chosen conditions:', chosen.map(c => ({ fieldKey: c.fieldKey, value: c.value })));
 
 			const clearBtn = document.querySelector('[fs-list-element="clear"]');
-			if (clearBtn) {
-				console.log('Clearing via [fs-list-element="clear"]');
-				clearBtn.click();
-			} else {
-				console.log('Clearing by unchecking all inputs');
-				allInputs.forEach((input) => {
-					if (input.checked) {
-						input.checked = false;
-						input.dispatchEvent(new Event('input', { bubbles: true }));
-						input.dispatchEvent(new Event('change', { bubbles: true }));
+			cached = { filtersForm, allInputs, uiByField, clearBtn };
+			filtersCache.set(instance, cached);
+			return cached;
+		};
+
+		const randomise = async () => {
+			if (randomiseLock) return false;
+			randomiseLock = true;
+			try {
+				const listInstance = await resolveListInstance();
+				if (!listInstance) return false;
+
+				const cache = getFiltersForInstance(listInstance);
+				if (!cache) return false;
+
+				const { allInputs, uiByField, clearBtn } = cache;
+				const items = Array.isArray(listInstance.items?.value) ? listInstance.items.value : (Array.isArray(listInstance.items) ? listInstance.items : []);
+				if (!items.length) return false;
+
+				const maxTries = Math.min(items.length, 50);
+				let chosenFromItem = null;
+				for (let attempt = 0; attempt < maxTries; attempt++) {
+					const idx = rand(0, Math.max(0, items.length - 1));
+					const item = items[idx];
+					const fieldsEntries = Object.entries(item?.fields || {});
+					if (!fieldsEntries.length) continue;
+
+					const candidates = [];
+					fieldsEntries.forEach(([key, field]) => {
+						const map = uiByField.get(key);
+						if (!map || !map.size) return;
+						const values = fieldValueStrings(field);
+						const exists = values.filter((v) => map.has(v));
+						if (!exists.length) return;
+						const val = exists[rand(0, exists.length - 1)];
+						candidates.push({ fieldKey: key, value: val, input: map.get(val) });
+					});
+
+					if (candidates.length >= 2) {
+						for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
+						const n = rand(2, Math.min(5, candidates.length));
+						chosenFromItem = candidates.slice(0, n);
+						break;
 					}
+				}
+
+				if (!chosenFromItem) return false;
+				const chosen = chosenFromItem;
+
+				if (clearBtn) {
+					clearBtn.click();
+				} else {
+					allInputs.forEach((input) => {
+						if (input.checked) {
+							input.checked = false;
+							input.dispatchEvent(new Event('input', { bubbles: true }));
+							input.dispatchEvent(new Event('change', { bubbles: true }));
+						}
+						const lab = input.closest('label');
+						if (lab) lab.classList.remove('is-list-active');
+					});
+				}
+
+				const apiFilters = listInstance.filters?.value;
+				if (!apiFilters) return false;
+				apiFilters.groupsMatch = 'and';
+				apiFilters.groups = [{
+					id: 'random',
+					conditionsMatch: 'and',
+					conditions: chosen.map(({ fieldKey, value }) => ({
+						id: `rf-${fieldKey}-${Date.now()}`,
+						type: 'checkbox',
+						fieldKey,
+						op: 'equal',
+						value,
+						interacted: true,
+					})),
+				}];
+
+				if (typeof listInstance.triggerHook === 'function') listInstance.triggerHook('filter');
+
+				allInputs.forEach((input) => {
+					input.checked = false;
 					const lab = input.closest('label');
 					if (lab) lab.classList.remove('is-list-active');
 				});
+				chosen.forEach(({ input }) => {
+					input.checked = true;
+					const lab = input.closest('label');
+					if (lab) lab.classList.add('is-list-active');
+				});
+				return true;
+			} finally {
+				randomiseLock = false;
 			}
-
-			const apiFilters = listInstance.filters?.value;
-			if (!apiFilters) { console.log('List filters ref not available.'); return false; }
-			apiFilters.groupsMatch = 'and';
-			apiFilters.groups = [{
-				id: 'random',
-				conditionsMatch: 'and',
-				conditions: chosen.map(({ fieldKey, value }) => ({
-					id: `rf-${fieldKey}-${Date.now()}`,
-					type: 'checkbox',
-					fieldKey,
-					op: 'equal',
-					value,
-					interacted: true,
-				})),
-			}];
-
-			if (typeof listInstance.triggerHook === 'function') listInstance.triggerHook('filter');
-
-			allInputs.forEach((input) => {
-				input.checked = false;
-				const lab = input.closest('label');
-				if (lab) lab.classList.remove('is-list-active');
-			});
-			chosen.forEach(({ input }) => {
-				input.checked = true;
-				const lab = input.closest('label');
-				if (lab) lab.classList.add('is-list-active');
-			});
-			console.log('Applied via API and synced UI for', chosen.length, 'conditions.');
-			return true;
 		};
 
 		document.addEventListener('click', (e) => {
 			const el = e.target.closest('[data-randomfilters]');
 			if (!el) return;
-			console.log('[randomfilters]', 'Click on [data-randomfilters]:', el);
-			randomise(0);
+			void randomise();
 		}, true);
 
+		const handleFsList = (instances) => {
+			const instance = extractFirstInstance(instances) ||
+				extractFirstInstance(instances?.instances) ||
+				extractFirstInstance(instances?.listInstances);
+			setActiveInstance(instance);
+		};
+
 		window.FinsweetAttributes = window.FinsweetAttributes || [];
-		window.FinsweetAttributes.push(['list', (instances) => {
-			let listArray = Array.isArray(instances) ? instances : instances?.instances || instances?.listInstances;
-			if (listArray?.[0]) fsState.activeList = listArray[0];
-			
-			try {
-				if (Array.isArray(instances) && instances.length) lastInstance = instances[0];
-				else if (instances?.instances?.length) lastInstance = instances.instances[0];
-				else if (instances?.listInstances?.length) lastInstance = instances.listInstances[0];
-			} catch (_) { }
-		}]);
+		if (!ddg.__randomFiltersFsHooked) {
+			ddg.__randomFiltersFsHooked = true;
+			window.FinsweetAttributes.push(['list', (instances) => {
+				handleFsList(instances);
+				try {
+					if (Array.isArray(instances) && instances.length) lastInstance = instances[0];
+					else if (instances?.instances?.length) lastInstance = instances.instances[0];
+					else if (instances?.listInstances?.length) lastInstance = instances.listInstances[0];
+				} catch (_) { }
+			}]);
+		}
+
+		setActiveInstance(getCurrentInstance());
 	}
 
 	ddg.boot = initSite;
