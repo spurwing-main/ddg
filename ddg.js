@@ -6,54 +6,82 @@
 		ajaxHomeLoaded: false
 	});
 
-	const fsState = (ddg.fsState ??= {
-		loadRequested: new Set(),
-		activeList: null
-	});
-
+	// GSAP Defaults
 	gsap.defaults({ overwrite: 'auto' });
 	gsap.ticker.lagSmoothing(500, 33);
 	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 
-	ddg.scheduleFsRestart = (moduleName) => {
-		ddg.__fsRestartScheduled = ddg.__fsRestartScheduled || {};
-		if (ddg.__fsRestartScheduled[moduleName]) return;
-		ddg.__fsRestartScheduled[moduleName] = true;
-		Promise.resolve().then(() => {
-			try { window.FinsweetAttributes?.modules?.[moduleName]?.restart?.(); } catch (_) { }
-			ddg.__fsRestartScheduled[moduleName] = false;
-		});
-	};
+	// Finsweet
+	ddg.fs = (() => {
+		const state = { firstList: null, queued: [], subscribed: false };
 
-	ddg.requestFsLoad = (...modules) => {
-		if (!window.FinsweetAttributes) window.FinsweetAttributes = [];
-		modules.forEach((m) => {
-			if (fsState.loadRequested.has(m)) return;
-			try { window.FinsweetAttributes.load?.(m); } catch (_) { }
-			fsState.loadRequested.add(m);
-		});
-	};
+		const ensureFsArray = () => (window.FinsweetAttributes ||= []);
 
+		const setFirst = (inst) => {
+			if (!inst || state.firstList) return;
+			console.log('[fs] set first instance', inst);
+			state.firstList = inst;
+			state.queued.splice(0).forEach(fn => { try { fn(inst); } catch (e) { console.error(e); } });
+		};
+
+		const subscribeOnce = () => {
+			if (state.subscribed) return;
+			state.subscribed = true;
+			console.log('[fs] subscribe to list ready');
+			ensureFsArray().push([
+				'list',
+				(instances) => {
+					const inst = instances?.[0] || instances?.instances?.[0] || instances?.listInstances?.[0] || null;
+					if (inst) setFirst(inst);
+					else console.warn('[fs] no list instance found');
+				}
+			]);
+		};
+
+		const ensureLoad = () => {
+			console.log('[fs] ensureLoad');
+			try { ensureFsArray().load?.('list'); } catch (err) { console.warn('[fs] load error', err); }
+		};
+
+		const whenListReady = (fn) => {
+			if (state.firstList) return fn(state.firstList);
+			state.queued.push(fn);
+			subscribeOnce();
+			ensureLoad();
+		};
+
+		const restart = () => {
+			console.log('[fs] restart');
+			window.FinsweetAttributes?.modules?.list?.restart?.();
+		};
+
+		return { whenListReady, restart, ensureLoad };
+	})();
+
+	// Site boot
 	const initSite = () => {
 		if (data.siteBooted) return;
 		data.siteBooted = true;
+		console.log('[ddg] booting site');
 
-		setupFinsweetListLoader();
+		// Ensure Finsweet Loaded
+		ddg.fs.ensureLoad();
+
+		// On Scroll
 		initNavigation();
+
+		// On Hover
 		initComingSoon();
+
+		// On Load
 		initModals();
 		initAjaxModal();
 		initAjaxHome();
 		initMarquee();
-		setTimeout(initShare, 1000);
+
+		// On Click
+		initShare();
 		initRandomiseFilters();
-	};
-
-	const setupFinsweetListLoader = () => {
-		window.FinsweetAttributes = window.FinsweetAttributes || [];
-		if (data.truePath.startsWith('/stories/')) return;
-
-		ddg.requestFsLoad('list', 'copyclip');
 	};
 
 	const initNavigation = () => {
@@ -164,9 +192,9 @@
 				splitSet.clear();
 			}, 200);
 		};
-		
+
 		$(window).on('resize.ddgComingSoon', resizeHandler);
-		
+
 		// Cleanup function
 		if (!ddg.__comingSoonCleanup) {
 			ddg.__comingSoonCleanup = () => {
@@ -407,7 +435,7 @@
 			const heuristicsPassed = heuristicsSatisfied();
 
 			stopTracking();
-			
+
 			// Fake the countdown for immediate feedback
 			decrementCountdown();
 
@@ -689,7 +717,7 @@
 				e.preventDefault();
 				e.stopPropagation();
 				e.stopImmediatePropagation();
-				
+
 				const anchor = e.currentTarget;
 				const href = anchor.getAttribute('href') || '';
 				if (!href || href === '#' || href.length < 2) return;
@@ -866,6 +894,7 @@
 		}
 	};
 
+	// Ajax Home List Injection
 	const initAjaxHome = () => {
 		if (data.ajaxHomeLoaded || !data.truePath.startsWith('/stories/')) return;
 
@@ -879,216 +908,112 @@
 				const $source = $html.find('[data-ajax-home="source"]');
 				if (!$source.length) return;
 
-				const content = $source.html();
+				$target.empty().append($source.html());
+				data.ajaxHomeLoaded = true;
 
-				const checkFinsweetReady = (attempt = 0) => {
-					if (window.FinsweetAttributes?.load) {
-						window.FinsweetAttributes.load('list');
-						window.FinsweetAttributes.load('copyclip');
-
-						const checkModulesReady = (attempt2 = 0) => {
-							if (window.FinsweetAttributes.modules?.list?.restart) {
-								$target.empty().append(content);
-								data.ajaxHomeLoaded = true;
-
-								ddg.scheduleFsRestart('list');
-								ddg.scheduleFsRestart('copyclip');
-								initModals();
-								initComingSoon();
-								initMarquee($target[0]);
-
-								requestAnimationFrame(() => {
-									ScrollTrigger.refresh();
-									if (ddg.tickerTape?.refresh) setTimeout(() => ddg.tickerTape.refresh(), 100);
-								});
-							} else if (attempt2 < 100) {
-								setTimeout(() => checkModulesReady(attempt2 + 1), 50);
-							} else {
-								$target.empty().append(content);
-								data.ajaxHomeLoaded = true;
-								try {
-									ddg.requestFsLoad('list', 'copyclip');
-									ddg.scheduleFsRestart('list');
-									ddg.scheduleFsRestart('copyclip');
-								} catch (_) { }
-								initModals();
-								initMarquee($target[0]);
-							}
-						};
-						checkModulesReady();
-					} else if (attempt < 100) {
-						setTimeout(() => checkFinsweetReady(attempt + 1), 50);
-					} else {
-						$target.empty().append(content);
-						data.ajaxHomeLoaded = true;
-						initModals();
-						initMarquee($target[0]);
-					}
-				};
-				checkFinsweetReady();
+				console.log('[ajaxHome] injected home list');
+				ddg.fs.ensureLoad();
+				ddg.fs.restart();
+				console.log('[ajaxHome] ensureLoad + restart');
 			}
 		});
 	};
 
+	// Randomise Filters
 	function initRandomiseFilters() {
-		const selectors = {
+		const sel = {
 			list: '[fs-list-element="list"]',
-			filtersForm: '[fs-list-element="filters"]',
-			filterInputs: 'input[type="checkbox"][fs-list-field][fs-list-value]',
-			clearButton: '[fs-list-element="clear"]',
-			triggerButton: '[data-randomfilters]'
+			form: '[fs-list-element="filters"]',
+			inputs: 'input[type="checkbox"][fs-list-field][fs-list-value]',
+			clear: '[fs-list-element="clear"]',
+			trigger: '[data-randomfilters]'
 		};
 
 		const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
-		async function applyRandomFilters(listInstance) {
-			console.log('[randomfilters] starting randomisation...');
+		const apply = (list) => {
+			console.log('[randomfilters] applying...');
+			const listEl = document.querySelector(sel.list);
+			const formEl = document.querySelector(sel.form);
+			if (!listEl || !formEl) return console.warn('[randomfilters] no form/list');
 
-			const listEl = document.querySelector(selectors.list);
-			const formEl = document.querySelector(selectors.filtersForm);
-			if (!listEl || !formEl) {
-				console.warn('[randomfilters] list or filters form not found');
-				return;
-			}
+			const checkboxes = [...formEl.querySelectorAll(sel.inputs)]
+				.filter(i => !i.closest('label')?.classList.contains('is-list-emptyfacet'));
+			if (!checkboxes.length) return console.warn('[randomfilters] no checkboxes');
 
-			const checkboxes = Array.from(formEl.querySelectorAll(selectors.filterInputs))
-				.filter(input => !input.closest('label')?.classList.contains('is-list-emptyfacet'));
-			if (!checkboxes.length) {
-				console.warn('[randomfilters] no valid filter checkboxes found');
-				return;
-			}
-
-			const uiByField = new Map();
+			const byField = new Map();
 			for (const input of checkboxes) {
 				const field = input.getAttribute('fs-list-field');
 				const value = input.getAttribute('fs-list-value');
 				if (!field || !value) continue;
-				if (!uiByField.has(field)) uiByField.set(field, new Map());
-				uiByField.get(field).set(value, input);
+				if (!byField.has(field)) byField.set(field, new Map());
+				byField.get(field).set(value, input);
 			}
 
-			const items = Array.isArray(listInstance.items?.value)
-				? listInstance.items.value
-				: listInstance.items || [];
-			if (!items.length) {
-				console.warn('[randomfilters] no list items found');
-				return;
-			}
+			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
+			if (!items.length) return;
 
-			const randomItem = items[rand(0, items.length - 1)];
-			const itemFields = Object.entries(randomItem.fields || {});
-			if (!itemFields.length) {
-				console.warn('[randomfilters] random item has no usable fields');
-				return;
-			}
-
-			const candidates = [];
-			for (const [fieldKey, field] of itemFields) {
-				const map = uiByField.get(fieldKey);
+			const item = items[rand(0, items.length - 1)];
+			const fields = Object.entries(item.fields || []);
+			const cands = [];
+			for (const [key, f] of fields) {
+				const map = byField.get(key);
 				if (!map) continue;
-				const values = String(field.value ?? '')
-					.split(',')
-					.map(v => v.trim())
-					.filter(v => map.has(v));
-				if (!values.length) continue;
-				const value = values[rand(0, values.length - 1)];
-				candidates.push({ fieldKey, value, input: map.get(value) });
+				const vals = String(f?.value ?? '').split(',').map(v => v.trim()).filter(v => map.has(v));
+				if (!vals.length) continue;
+				const val = vals[rand(0, vals.length - 1)];
+				cands.push({ key, val, input: map.get(val) });
+			}
+			if (!cands.length) return console.warn('[randomfilters] no candidates');
+
+			const chosen = cands.slice(0, rand(2, Math.min(5, cands.length)));
+			const clearBtn = formEl.querySelector(sel.clear);
+			if (clearBtn) clearBtn.click();
+			else for (const input of checkboxes) {
+				input.checked = false;
+				input.closest('label')?.classList.remove('is-list-active');
+				input.dispatchEvent(new Event('change', { bubbles: true }));
 			}
 
-			if (!candidates.length) {
-				console.warn('[randomfilters] no matching filters found for this item');
-				return;
-			}
-
-			const selected = candidates.slice(0, rand(2, Math.min(5, candidates.length)));
-
-			const clearBtn = formEl.querySelector(selectors.clearButton);
-			if (clearBtn) {
-				clearBtn.click();
-			} else {
-				for (const input of checkboxes) {
-					input.checked = false;
-					input.closest('label')?.classList.remove('is-list-active');
-					input.dispatchEvent(new Event('change', { bubbles: true }));
-				}
-			}
-
-			const filters = listInstance.filters?.value;
+			const filters = list.filters?.value || list.filters;
+			if (!filters) return console.warn('[randomfilters] no filters obj');
 			filters.groupsMatch = 'and';
-			filters.groups = [
-				{
-					id: 'random',
-					conditionsMatch: 'and',
-					conditions: selected.map(({ fieldKey, value }, i) => ({
-						id: `rf-${fieldKey}-${i}`,
-						type: 'checkbox',
-						fieldKey,
-						op: 'equal',
-						value,
-						interacted: true
-					}))
-				}
-			];
+			filters.groups = [{
+				id: 'random',
+				conditionsMatch: 'and',
+				conditions: chosen.map(({ key, val }, i) => ({
+					id: `rf-${key}-${i}`,
+					type: 'checkbox',
+					fieldKey: key,
+					op: 'equal',
+					value: val,
+					interacted: true
+				}))
+			}];
 
-			listInstance.triggerHook?.('filter');
+			list.triggerHook?.('filter');
+			list.render?.();
 
-			for (const { input } of selected) {
+			for (const { input } of chosen) {
 				input.checked = true;
 				input.closest('label')?.classList.add('is-list-active');
 				input.dispatchEvent(new Event('input', { bubbles: true }));
 				input.dispatchEvent(new Event('change', { bubbles: true }));
 			}
 
-			console.log('[randomfilters] applied filters:', selected);
-		}
+			console.log('[randomfilters] done');
+		};
 
-		function getListInstance() {
-			const mod = window.FinsweetAttributes?.modules?.list;
-			return mod?.instances?.[0] || mod?.listInstances?.[0] || null;
-		}
-
-		function ensureListReadyAndRun() {
-			const instance = getListInstance();
-			if (instance) {
-				applyRandomFilters(instance);
-				return;
-			}
-
-			console.log('[randomfilters] waiting for finsweet list...');
-			const fs = (window.FinsweetAttributes = window.FinsweetAttributes || []);
-
-			fs.push([
-				'list',
-				instances => {
-					const first =
-						Array.isArray(instances) ? instances[0] : instances?.instances?.[0];
-					if (first) applyRandomFilters(first);
-					else console.warn('[randomfilters] no instance after finsweet callback');
-				}
-			]);
-
-			try {
-				fs.load?.('list');
-			} catch (_) { }
-		}
-
-		document.addEventListener(
-			'click',
-			e => {
-				const button = e.target.closest(selectors.triggerButton);
-				if (!button) return;
-
-				e.preventDefault();
-				if (button.__rfLock) return;
-
-				button.__rfLock = true;
-				setTimeout(() => (button.__rfLock = false), 250);
-
-				console.log('[randomfilters] trigger clicked');
-				ensureListReadyAndRun();
-			},
-			true
-		);
+		document.addEventListener('click', (e) => {
+			const btn = e.target.closest(sel.trigger);
+			if (!btn) return;
+			e.preventDefault();
+			if (btn.__rfLock) return;
+			btn.__rfLock = true;
+			setTimeout(() => (btn.__rfLock = false), 250);
+			console.log('[randomfilters] trigger clicked');
+			ddg.fs.whenListReady((list) => apply(list));
+		}, true);
 	}
 
 	function initMarquee(root = document) {
@@ -1112,7 +1037,7 @@
 
 			let resizeHandler = null;
 			let mutationObserver = null;
-			
+
 			const cleanup = () => {
 				if (resizeHandler) {
 					window.removeEventListener('resize', resizeHandler);
@@ -1130,7 +1055,7 @@
 				if (el.offsetParent === null) return;
 				const marqueeWidth = el.offsetWidth;
 				let contentWidth = inner.scrollWidth;
-				
+
 				// Prevent infinite loop - bail if content is empty or too small
 				if (contentWidth === 0 || marqueeWidth === 0) return;
 
@@ -1171,12 +1096,11 @@
 			update();
 			resizeHandler = update;
 			window.addEventListener('resize', resizeHandler);
-			
+
 			// Store cleanup function on element for manual cleanup if needed
 			el.__ddgMarqueeCleanup = cleanup;
 		});
 	}
-	ddg.initMarquee = initMarquee;
 
 	ddg.boot = initSite;
 })();
