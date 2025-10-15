@@ -473,194 +473,87 @@
 		});
 	};
 
-	const initModals = () => {
+	// ==============================
+	// initModals
+	// ==============================
+	function initModals() {
 		ddg.modals = ddg.modals || {};
 		ddg._modalsKeydownBound = Boolean(ddg._modalsKeydownBound);
+		console.log('[modals] initializing with CSS-state sync + delegated bindings');
 
-		const modalIds = new Set();
-		$('[data-modal-trigger], [data-modal-el]').each((_, el) => {
-			const id = $(el).attr('data-modal-trigger') || $(el).attr('data-modal-el');
-			if (id) modalIds.add(id);
-		});
+		const sel = {
+			trigger: '[data-modal-trigger]',
+			modal: '[data-modal-el]',
+			bg: '[data-modal-bg]',
+			inner: '[data-modal-inner]',
+			close: '[data-modal-close]',
+		};
 
-		modalIds.forEach(modalId => {
-			if (ddg.modals[modalId]) return;
+		const syncCssState = ($modal, open, id) => {
+			const $bg = $(`[data-modal-bg="${id}"]`);
+			const $inner = $modal.find(sel.inner).first();
+			[$modal[0], $inner[0], $bg[0]].filter(Boolean).forEach(el => el.classList.toggle('is-open', !!open));
+			console.log(`[modals:${id}] syncCssState -> ${!!open} (bg:${$bg.length})`);
+		};
 
-			const $el = $(`[data-modal-el="${modalId}"]`);
-			const $bg = $(`[data-modal-bg="${modalId}"]`);
-			const $inner = $el.find('[data-modal-inner]').first();
-			const $scrollHost = $el.find('[data-modal-scroll]').first();
-			const $closeButtons = $(`[data-modal-close="${modalId}"], [data-modal-close]`).filter((_, node) => {
-				const attr = node.getAttribute('data-modal-close');
-				const matchesModal = !attr || attr === modalId;
-				if (!matchesModal) return false;
-				if ($bg.length && node === $bg[0]) return false;
-				return true;
-			});
+		const createModal = (id) => {
+			if (ddg.modals[id]) return ddg.modals[id];
+			const $modal = $(`[data-modal-el="${id}"]`);
+			if (!$modal.length) return null;
 
-			if (!$el.length) return;
+			const $inner = $modal.find(sel.inner).first();
+			const $bg = $(`[data-modal-bg="${id}"]`);
+			const $animTarget = $inner.length ? $inner : $modal;
 
-			const $animTarget = $inner.length ? $inner : $el;
-			const scrollContainer = () => $scrollHost[0] || $inner[0] || $el[0];
-
-			const getScrollContainerForTarget = (target) => {
-				const baseContainer = scrollContainer();
-				if (!target || !baseContainer) return baseContainer;
-				if (!baseContainer.contains(target)) return baseContainer;
-
-				let current = target.parentElement;
-				const root = $el[0];
-
-				while (current && current !== document.body) {
-					if (current === baseContainer) return baseContainer;
-					if (!root.contains(current)) break;
-
-					const styles = getComputedStyle(current);
-					const overflowY = styles.overflowY || styles.overflow;
-					const canScroll = /(auto|scroll)/i.test(overflowY) && current.scrollHeight - current.clientHeight > 1;
-					if (canScroll) return current;
-
-					current = current.parentElement;
-				}
-
-				return baseContainer;
-			};
-
-			const scrollModalTo = (target) => {
-				const container = getScrollContainerForTarget(target);
-				if (!container || !target) return false;
-
-				try {
-					const containerRect = container.getBoundingClientRect();
-					const targetRect = target.getBoundingClientRect();
-					const computed = getComputedStyle(target);
-					const scrollMarginTop = parseFloat(computed.scrollMarginTop || computed.scrollMargin || '0') || 0;
-					const scrollMarginLeft = parseFloat(computed.scrollMarginLeft || computed.scrollMarginInlineStart || computed.scrollMargin || '0') || 0;
-					const nextTop = container.scrollTop + (targetRect.top - containerRect.top) - scrollMarginTop;
-					const nextLeft = container.scrollLeft + (targetRect.left - containerRect.left) - scrollMarginLeft;
-
-					container.scrollTop = Math.max(0, nextTop);
-					if (Number.isFinite(nextLeft) && typeof container.scrollLeft === 'number') {
-						container.scrollLeft = Math.max(0, nextLeft);
-					}
-
-					return true;
-				} catch (_) {
-					return false;
-				}
-			};
-
-			const lockBodyScrollTo = (allowedContainer) => {
-				const allowEl = allowedContainer || null;
-				const startX = window.scrollX;
-				const startY = window.scrollY;
-				let active = true;
-				let rafId = null;
-				let rafScheduled = false;
-
-				const maintainPosition = () => {
-					rafScheduled = false;
-					if (!active) return;
-					if (window.scrollX !== startX || window.scrollY !== startY) {
-						window.scrollTo(startX, startY);
-					}
-					if (active) {
-						rafScheduled = true;
-						rafId = requestAnimationFrame(maintainPosition);
-					}
-				};
-				maintainPosition();
-
-				const isEventAllowed = (event) => {
-					if (!allowEl) return false;
-					if (event.target && allowEl.contains(event.target)) return true;
-					const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
-					if (!path.length) return false;
-					return path.some(node => node instanceof Element && allowEl.contains(node));
-				};
-
-				const intercept = (event) => {
-					if (isEventAllowed(event)) return;
-					try { event.preventDefault(); } catch (_) { }
-				};
-
-				window.addEventListener('wheel', intercept, { capture: true, passive: false });
-				window.addEventListener('touchmove', intercept, { capture: true, passive: false });
-
-				const release = () => {
-					if (!active) return;
-					active = false;
-					if (rafId !== null && rafScheduled) {
-						cancelAnimationFrame(rafId);
-						rafId = null;
-						rafScheduled = false;
-					}
-					window.removeEventListener('wheel', intercept, true);
-					window.removeEventListener('touchmove', intercept, true);
-				};
-
-				return release;
-			};
-
-			if ($el.hasClass('is-open')) {
-				if ($bg.length) $bg.addClass('is-open');
-				try { document.documentElement.style.overflow = 'hidden'; } catch (_) { }
-			} else {
-				if ($bg.length) $bg.removeClass('is-open');
-				$el.removeClass('is-open');
-			}
-
-			const open = (options = {}) => {
-				const { skipAnimation = false, beforeOpen = null, afterOpen = null } = options;
-
-				Object.keys(ddg.modals).forEach(otherId => {
-					if (otherId !== modalId && ddg.modals[otherId]?.isOpen?.()) {
-						ddg.modals[otherId].close({ skipAnimation: true });
-					}
+			const open = ({ skipAnimation = false, beforeOpen, afterOpen } = {}) => {
+				console.log(`[modals:${id}] open (skipAnimation=${skipAnimation})`);
+				// Single-open policy
+				Object.entries(ddg.modals).forEach(([otherId, m]) => {
+					if (otherId !== id && m.isOpen()) m.close({ skipAnimation: true });
 				});
 
-				if (beforeOpen) beforeOpen();
-				if ($bg.length) $bg.addClass('is-open');
-
+				beforeOpen && beforeOpen();
 				gsap.killTweensOf($animTarget[0]);
+
+				// is-open on all parts BEFORE anim
+				syncCssState($modal, true, id);
 
 				if (skipAnimation) {
 					gsap.set($animTarget[0], { opacity: 1, y: 0 });
-					$el.addClass('is-open');
-					if (afterOpen) afterOpen();
+					afterOpen && afterOpen();
 					return;
 				}
 
-				gsap.fromTo($animTarget[0],
+				gsap.fromTo(
+					$animTarget[0],
 					{ y: 60, opacity: 0 },
 					{
 						y: 0,
 						opacity: 1,
 						duration: 0.6,
 						ease: 'power2.out',
-						onStart: () => $el.addClass('is-open'),
-						onComplete: () => { if (afterOpen) afterOpen(); }
+						onComplete: () => afterOpen && afterOpen(),
 					}
 				);
 			};
 
-			const close = (options = {}) => {
-				const { skipAnimation = false, beforeClose = null, afterClose = null } = options;
-
-				if (beforeClose) beforeClose();
-				if ($bg.length) $bg.removeClass('is-open');
-
+			const close = ({ skipAnimation = false, beforeClose, afterClose } = {}) => {
+				console.log(`[modals:${id}] close (skipAnimation=${skipAnimation})`);
+				beforeClose && beforeClose();
 				gsap.killTweensOf($animTarget[0]);
 
-				const cleanup = () => {
-					$el.removeClass('is-open');
-					try { document.documentElement.style.overflow = ''; } catch (_) { }
-					if (afterClose) afterClose();
+				// Remove bg immediately
+				if ($bg.length) $bg.removeClass('is-open');
+
+				const finish = () => {
+					$modal.removeClass('is-open');
+					$inner.removeClass('is-open');
+					afterClose && afterClose();
 				};
 
 				if (skipAnimation) {
 					gsap.set($animTarget[0], { opacity: 0, y: 60 });
-					cleanup();
+					finish();
 					return;
 				}
 
@@ -669,230 +562,240 @@
 					opacity: 0,
 					duration: 0.6,
 					ease: 'power2.out',
-					onComplete: cleanup
+					onComplete: finish,
 				});
 			};
 
-			const isOpen = () => $el.hasClass('is-open');
+			const isOpen = () => $modal.hasClass('is-open');
 
-			ddg.modals[modalId] = { open, close, isOpen, $el, $bg };
+			const modal = { open, close, isOpen, $modal };
+			ddg.modals[id] = modal;
 
-			const $triggers = $(`[data-modal-trigger="${modalId}"]`);
-			const isAjaxModal = (modalId === 'story') || $triggers.first().is('[data-ajax-modal="link"]');
-			const closeClickHandler = (e) => {
-				if (e) {
-					e.preventDefault();
-					e.stopPropagation?.();
-				}
-				close();
-			};
+			// Initial CSS sync (e.g. direct /stories/... loads)
+			const initial = $modal.hasClass('is-open');
+			console.log(`[modals:${id}] initial state is-open=${initial}`);
+			syncCssState($modal, initial, id);
 
-			const bindCloseButtons = () => {
-				if (!$closeButtons.length) return;
-				$closeButtons.off('click.modal').on('click.modal', closeClickHandler);
-			};
+			document.dispatchEvent(new CustomEvent('ddg:modal-created', { detail: id }));
+			return modal;
+		};
 
-			const bindBackdrop = () => {
-				if (!$bg.length) return;
-				$bg.off('click.modal').on('click.modal', (e) => {
-					if (e.target === e.currentTarget) closeClickHandler(e);
-				});
-			};
+		ddg.ensureModal = (id) => ddg.modals[id] || createModal(id);
 
-			if (!isAjaxModal) {
-				$(document).on('click', `[data-modal-trigger="${modalId}"]`, e => {
-					e.preventDefault();
-					open();
-				});
-			}
-
-			bindCloseButtons();
-			bindBackdrop();
-
-			$el.on('click.modal', e => {
-				if (e.target === $el[0]) close();
-			});
-
-			$el.on('click.modalAnchors', 'a[href^="#"]', e => {
-				e.preventDefault();
-				e.stopPropagation();
-				e.stopImmediatePropagation();
-
-				const anchor = e.currentTarget;
-				const href = anchor.getAttribute('href') || '';
-				if (!href || href === '#' || href.length < 2) return;
-
-				const hash = href.slice(1);
-				let target = null;
-				try {
-					if (window.CSS?.escape) {
-						target = $el.find(`#${CSS.escape(hash)}`).first()[0] || null;
-					} else {
-						target = $el.find(`[id="${hash.replace(/"/g, '\\"')}"]`).first()[0] || null;
-					}
-				} catch (_) {
-					target = null;
-				}
-
-				if (!target) {
-					const docTarget = document.getElementById(hash);
-					if (docTarget && $el.has(docTarget).length) target = docTarget;
-				}
-
-				if (!target) return;
-
-				const releaseBodyLock = lockBodyScrollTo(scrollContainer());
-				scrollModalTo(target);
-				try {
-					const updatedUrl = new URL(window.location.href);
-					updatedUrl.hash = hash;
-					window.history.replaceState(window.history.state, '', updatedUrl.toString());
-				} catch (_) { }
-
-				const hadTabIndex = target.hasAttribute('tabindex');
-				if (!hadTabIndex) target.setAttribute('tabindex', '-1');
-				const cleanupFocus = () => {
-					if (!hadTabIndex) target.removeAttribute('tabindex');
-				};
-
-				requestAnimationFrame(() => {
-					if (typeof target.focus === 'function') {
-						try {
-							target.focus({ preventScroll: true });
-						} catch (_) {
-							try {
-								target.focus();
-							} catch (_) { }
-						}
-						target.addEventListener('blur', cleanupFocus, { once: true, capture: false });
-					} else {
-						cleanupFocus();
-					}
-					setTimeout(() => {
-						if (typeof releaseBodyLock === 'function') releaseBodyLock();
-					}, 1000);
-				});
-			});
+		// Triggers — skip ajax links (ajaxModal handles them)
+		$(document).on('click.modal', sel.trigger, (e) => {
+			const el = e.currentTarget;
+			const id = el.getAttribute('data-modal-trigger');
+			if (el.hasAttribute('data-ajax-modal')) return;
+			e.preventDefault();
+			console.log(`[modals] trigger clicked for ${id}`);
+			ddg.ensureModal(id)?.open();
 		});
 
+		// Close buttons (targeted or generic)
+		$(document).on('click.modal', sel.close, (e) => {
+			e.preventDefault();
+			const id = e.currentTarget.getAttribute('data-modal-close');
+			if (id) ddg.ensureModal(id)?.close();
+			else Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
+		});
+
+		// Backdrop click
+		$(document).on('click.modal', sel.bg, (e) => {
+			if (e.target !== e.currentTarget) return;
+			const id = e.currentTarget.getAttribute('data-modal-bg');
+			console.log(`[modals] bg clicked for ${id}`);
+			ddg.ensureModal(id)?.close();
+		});
+
+		// ESC
 		if (!ddg._modalsKeydownBound) {
 			ddg._modalsKeydownBound = true;
-			$(document).on('keydown.modals', e => {
+			$(document).on('keydown.modal', (e) => {
 				if (e.key === 'Escape') {
-					Object.keys(ddg.modals).forEach(modalId => {
-						if (ddg.modals[modalId].isOpen()) ddg.modals[modalId].close();
-					});
+					Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
 				}
 			});
 		}
-	};
 
-	const initAjaxModal = () => {
+		// Build controllers for all present modals now
+		$(sel.modal).each((_, el) => {
+			const id = el.getAttribute('data-modal-el');
+			ddg.ensureModal(id);
+		});
+
+		// Final CSS sync pass
+		requestAnimationFrame(() => {
+			console.log('[modals] post-init CSS sync check');
+			$(sel.modal).each((_, el) => {
+				const id = el.getAttribute('data-modal-el');
+				const isOpen = el.classList.contains('is-open');
+				syncCssState($(el), isOpen, id);
+			});
+		});
+
+		console.log('[modals] initialized with lazy + scroll + delegated bindings');
+		document.dispatchEvent(new CustomEvent('ddg:modals-ready'));
+	}
+
+	// ==============================
+	// initAjaxModal
+	// ==============================
+	function initAjaxModal() {
 		if (ddg._ajaxModalInitialized) return;
 		ddg._ajaxModalInitialized = true;
-		if (!ddg.modals || !ddg.modals['story']) return;
+
+		console.log('[ajaxModal] init called');
 
 		const modalId = 'story';
 		const $embed = $('[data-ajax-modal="embed"]');
-		const modal = ddg.modals[modalId];
-		const homeTitle = document.title;
+		const originalTitle = document.title;
+		const homeUrl = '/';
 
-		const openWithHistory = (title, url) => {
-			modal.open({
-				afterOpen: () => {
-					if (title && url) {
-						document.title = title;
-						window.history.pushState({ modal: true }, '', url);
+		let storyModal = ddg.modals?.[modalId] || ddg.ensureModal?.(modalId) || null;
+
+		const augmentStoryModal = () => {
+			if (!storyModal || storyModal.__ajaxAugmented) return;
+			storyModal.__ajaxAugmented = true;
+
+			const origOpen = storyModal.open;
+			const origClose = storyModal.close;
+
+			// We leave open() mostly untouched; history is handled by openStory()
+			storyModal.open = (opts = {}) => {
+				return origOpen({
+					...opts,
+					afterOpen: () => {
+						try { opts.afterOpen?.(); } catch (_) { }
 					}
+				});
+			};
+
+			// Wrap close() so ANY close path restores home + title
+			storyModal.close = (opts = {}) => {
+				return origClose({
+					...opts,
+					afterClose: () => {
+						try { opts.afterClose?.(); } catch (_) { }
+						// Always restore to home when story modal closes
+						if (document.title !== originalTitle) document.title = originalTitle;
+						try { history.pushState({}, '', homeUrl); } catch (_) { }
+						console.log('[ajaxModal] (wrap) restored home');
+					}
+				});
+			};
+
+			console.log('[ajaxModal] story modal augmented');
+		};
+
+		if (storyModal) augmentStoryModal();
+
+		// If created later, grab and augment
+		document.addEventListener('ddg:modal-created', (e) => {
+			if (e.detail === modalId) {
+				storyModal = ddg.modals[modalId];
+				console.log('[ajaxModal] story modal created and ready');
+				augmentStoryModal();
+			}
+		});
+
+		const openStory = (url, title, $content) => {
+			if (!storyModal) {
+				console.warn('[ajaxModal] story modal not ready yet');
+				return;
+			}
+			$embed.empty().append($content || '');
+			storyModal.open({
+				afterOpen: () => {
+					if (title) document.title = title;
+					try { history.pushState({ modal: true, story: true }, '', url); } catch (_) { }
+					console.log('[ajaxModal] openStory -> updated history', url);
 				}
 			});
 		};
 
-		const closeWithHistory = () => {
-			modal.close({
-				beforeClose: () => {
-					document.title = homeTitle;
-					window.history.pushState({ modal: false }, '', '/');
-				}
-			});
-		};
-
-		const handleClose = (e) => {
+		// Live click handler (works for injected nodes too)
+		$(document).on('click.ajax', '[data-ajax-modal="link"]', (e) => {
+			const $link = $(e.currentTarget);
+			const linkUrl = $link.attr('href');
 			e.preventDefault();
-			e.stopImmediatePropagation?.();
-			closeWithHistory();
-		};
+			console.log('[ajaxModal] clicked link', linkUrl);
 
-		ddg._ajaxModalLock = false;
-		$(document).on('click', '[data-ajax-modal="link"]', e => {
-			e.preventDefault();
-			if (ddg._ajaxModalLock || modal.isOpen()) return;
+			// Ensure controller exists on the home page too
+			if (!storyModal) { storyModal = ddg.ensureModal?.(modalId) || null; augmentStoryModal(); }
+			if (!storyModal) {
+				console.warn('[ajaxModal] story modal not ready, aborting click');
+				return;
+			}
+
+			if (ddg._ajaxModalLock) {
+				console.log('[ajaxModal] still locked');
+				return;
+			}
 			ddg._ajaxModalLock = true;
 
-			const linkUrl = $(e.currentTarget).attr('href');
-			try { $embed.empty().append("<div class='modal-skeleton' aria-busy='true'></div>"); } catch (_) { }
+			$embed.empty().append("<div class='modal-skeleton' aria-busy='true'></div>");
 
 			$.ajax({
 				url: linkUrl,
 				success: (response) => {
-					let contentNode = null;
+					console.log('[ajaxModal] loaded', linkUrl, 'len:', response.length);
+					let $content = null;
 					let title = '';
 					try {
 						const doc = new DOMParser().parseFromString(response, 'text/html');
-						contentNode = doc.querySelector('[data-ajax-modal="content"]');
+						const node = doc.querySelector('[data-ajax-modal="content"]');
 						title = doc.title || '';
-					} catch (_) { }
-					const url = new URL(linkUrl, window.location.origin).href;
+						$content = node ? $(node) : $("<div class='modal-error'>Failed to load content.</div>");
+					} catch (err) {
+						console.warn('[ajaxModal] parse error', err);
+						$content = $("<div class='modal-error'>Failed to load content.</div>");
+					}
 
-					$embed.empty().append(contentNode ? $(contentNode) : "<div class='modal-error'>Failed to load content.</div>");
-					if (contentNode) initMarquee(contentNode);
-					openWithHistory(title, url);
+					console.log('[ajaxModal] injecting content');
+					openStory(linkUrl, title, $content);
+					if ($content && $content[0]) {
+						try { initMarquee($content[0]); } catch (_) { }
+					}
 				},
 				error: () => {
+					console.warn('[ajaxModal] load failed');
 					$embed.empty().append("<div class='modal-error'>Failed to load content.</div>");
-					modal.open();
+					openStory(linkUrl, 'Error', null);
 				},
-				complete: () => { ddg._ajaxModalLock = false; }
+				complete: () => {
+					ddg._ajaxModalLock = false;
+					console.log('[ajaxModal] complete');
+				}
 			});
 		});
 
-		const $modalCloseButtons = modal.$el.find(`[data-modal-close="${modalId}"], [data-modal-close]`).filter((_, node) => {
-			const attr = node.getAttribute('data-modal-close');
-			return !attr || attr === modalId;
-		});
-
-		$modalCloseButtons.off('click.modal').on('click.ajax', handleClose);
-
-		if (modal.$bg.length) {
-			modal.$bg.off('click.modal').on('click.ajax', event => {
-				if (event.target !== event.currentTarget) return;
-				handleClose(event);
-			});
-		}
-
-		if (modal.$el.length) {
-			modal.$el.off('click.modal').on('click.ajax', event => {
-				if (event.target !== event.currentTarget) return;
-				handleClose(event);
-			});
-		}
-
-		$(document).off('keydown.modals').on('keydown.modals', e => {
-			if (e.key === 'Escape') {
-				Object.keys(ddg.modals).forEach(id => {
-					if (ddg.modals[id].isOpen()) {
-						if (id === modalId) closeWithHistory();
-						else ddg.modals[id].close();
-					}
-				});
+		// Browser back/forward
+		window.addEventListener('popstate', (e) => {
+			console.log('[ajaxModal] popstate', e.state);
+			if (!e.state?.modal && storyModal?.isOpen()) {
+				// Will run the wrapped afterClose that restores home/title
+				storyModal.close({ skipAnimation: true });
 			}
 		});
 
-		if (window.location.pathname.startsWith('/story/')) {
-			modal.open({ skipAnimation: true });
-			window.history.replaceState({ modal: true }, '', window.location.href);
-		}
-	};
+		// Deep link on /stories/... -> open instantly and mark history
+		console.log('[ajaxModal] waiting for ddg:modals-ready');
+		document.addEventListener('ddg:modals-ready', () => {
+			console.log('[ajaxModal] modals-ready detected');
+			storyModal = ddg.modals?.[modalId] || ddg.ensureModal?.(modalId) || storyModal;
+			augmentStoryModal();
+			if (!storyModal) {
+				console.warn('[ajaxModal] story modal not found after ready');
+				return;
+			}
+			if (window.location.pathname.startsWith('/stories/')) {
+				console.log('[ajaxModal] story path detected — syncing open state');
+				storyModal.open({ skipAnimation: true });
+				try { history.replaceState({ modal: true, story: true }, '', window.location.href); } catch (_) { }
+			}
+		}, { once: true });
+	}
 
 	// Ajax Home List Injection
 	const initAjaxHome = () => {
