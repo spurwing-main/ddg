@@ -75,6 +75,8 @@
 			initComingSoon();
 			initShare();
 			initRandomiseFilters();
+			initRelatedFilters();
+			
 		});
 	}
 
@@ -756,7 +758,7 @@
 		console.log('[ajaxModal] waiting for ddg:modals-ready');
 	}
 
-	function initAjaxHome () {
+	function initAjaxHome() {
 		if (data.ajaxHomeLoaded || !data.truePath.startsWith('/stories/')) return;
 
 		const $target = $('[data-ajax-home="target"]');
@@ -776,6 +778,9 @@
 				ddg.fs.ensureLoad();
 				ddg.fs.restart();
 				console.log('[ajaxHome] ensureLoad + restart');
+				
+				document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
+				console.log('[ajaxHome] dispatched ddg:ajax-home-ready');
 			}
 		});
 	};
@@ -989,6 +994,213 @@
 				el.removeAttribute('data-marquee-init');
 			});
 		});
+	}
+
+	function initRelatedFilters() {
+		if (ddg.__relatedInitialized) return;
+		ddg.__relatedInitialized = true;
+
+		const TAG = '[related]';
+		const log = (...a) => console.log(TAG, ...a);
+		const warn = (...a) => console.warn(TAG, ...a);
+
+		// selectors at top
+		const sel = {
+			parent: '[data-relatedfilters="parent"]',
+			target: '[data-relatedfilters="target"]',
+			search: '[data-relatedfilters="search"]',
+			form: '[fs-list-element="filters"]',
+			list: '[fs-list-element="list"]',
+			uiCb: 'input[type="checkbox"][fs-list-field][fs-list-value]',
+			clear: '[fs-list-element="clear"]'
+		};
+
+		// local state
+		const state = {
+			byField: null,       // Map<field, Map<value, input>>
+			wantBuild: false,    // modal opened before home ready
+			builtForPath: null
+		};
+
+		// — helpers — //
+		const currentPath = () => window.location.pathname;
+
+		const findWrapForPath = (path) => {
+			const inList = document.querySelector(`${sel.list} a.home-list_item[href="${path}"]`);
+			const anywhere = inList || document.querySelector(`a.home-list_item[href="${path}"]`);
+			return anywhere ? anywhere.closest('.home-list_item-wrap') : null;
+		};
+
+		const harvestFieldsFromWrap = (wrap) => {
+			const out = new Map(); // field -> Set(values)
+			if (!wrap) return out;
+			wrap.querySelectorAll('[fs-list-field]').forEach(node => {
+				const field = node.getAttribute('fs-list-field');
+				const raw = (node.textContent || '').trim();
+				if (!field || !raw) return;
+				raw.split(',').map(v => v.trim()).filter(Boolean).forEach(val => {
+					if (!out.has(field)) out.set(field, new Set());
+					out.get(field).add(val);
+				});
+			});
+			return out;
+		};
+
+		const indexFilterUi = () => {
+			const form = document.querySelector(sel.form);
+			if (!form) { warn('no filters form'); return false; }
+			const inputs = [...form.querySelectorAll(sel.uiCb)]
+				.filter(i => !i.closest('label')?.classList.contains('is-list-emptyfacet'));
+			if (!inputs.length) { warn('no filter checkboxes'); return false; }
+
+			const byField = new Map();
+			for (const inp of inputs) {
+				const f = inp.getAttribute('fs-list-field');
+				const v = inp.getAttribute('fs-list-value');
+				if (!f || !v) continue;
+				if (!byField.has(f)) byField.set(f, new Map());
+				byField.get(f).set(v, inp);
+			}
+			state.byField = byField;
+			log('indexed filters:', inputs.length, 'inputs across', byField.size, 'fields');
+			return true;
+		};
+
+		const renderRelated = () => {
+			if (!state.byField) {
+				state.wantBuild = true;
+				return log('deferring build until ajax home is ready');
+			}
+
+			const parents = document.querySelectorAll(sel.parent);
+			if (!parents.length) return log('no related parents in DOM');
+
+			const wrap = findWrapForPath(currentPath());
+			if (!wrap) return log('no list item found for current path yet');
+
+			const fieldsMap = harvestFieldsFromWrap(wrap);
+
+			parents.forEach(parent => {
+				// cleanup previous
+				parent.__rfCleanup?.();
+
+				const target = parent.querySelector(sel.target);
+				const btn = parent.querySelector(sel.search);
+				if (!target || !btn) return warn('missing target/search in parent');
+
+				target.innerHTML = '';
+				parent.style.display = '';
+
+				// find values that actually exist in the real UI
+				const picks = [];
+				for (const [field, set] of fieldsMap.entries()) {
+					const map = state.byField.get(field);
+					if (!map) continue;
+					for (const val of set) {
+						if (map.has(val)) picks.push({ field, val });
+						if (picks.length >= 8) break;
+					}
+					if (picks.length >= 8) break;
+				}
+
+				if (!picks.length) {
+					parent.style.display = 'none';
+					return;
+				}
+
+				// template: reuse an existing checkbox label if present, else synthesize
+				const template = parent.__rfTemplate || (() => {
+					const ex = target.querySelector('label.checkbox_field');
+					if (ex) return ex.cloneNode(true);
+					const l = document.createElement('label');
+					l.className = 'checkbox_field';
+					l.innerHTML = '<input type="checkbox" class="u-display-none"><span class="checkbox_label"></span>';
+					return l;
+				})();
+				parent.__rfTemplate = template;
+
+				const frag = document.createDocumentFragment();
+				picks.forEach((p, i) => {
+					const node = template.cloneNode(true);
+					const input = node.querySelector('input[type="checkbox"]');
+					const label = node.querySelector('.checkbox_label');
+					const id = `rf_${p.field}_${i}_${Math.random().toString(36).slice(2, 7)}`;
+					input.id = id;
+					input.setAttribute('fs-list-field', p.field);
+					input.setAttribute('fs-list-value', p.val);
+					label.setAttribute('for', id);
+					label.textContent = p.val;
+
+					node.addEventListener('click', (e) => {
+						if (e.target !== input) { input.checked = !input.checked; e.preventDefault(); }
+						node.classList.toggle('is-list-active', input.checked);
+					});
+
+					frag.appendChild(node);
+				});
+				target.appendChild(frag);
+
+				// bind search (rebind safe)
+				btn.onclick = (e) => {
+					e.preventDefault();
+					const form = document.querySelector(sel.form);
+					if (!form) return warn('no filters form to apply to');
+
+					// clear existing
+					const clearBtn = form.querySelector(sel.clear);
+					if (clearBtn) clearBtn.click();
+					else form.querySelectorAll(sel.uiCb).forEach(i => {
+						i.checked = false;
+						i.closest('label')?.classList.remove('is-list-active');
+						i.dispatchEvent(new Event('change', { bubbles: true }));
+					});
+
+					// apply selections
+					target.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]:checked')
+						.forEach(inp => {
+							const f = inp.getAttribute('fs-list-field');
+							const v = inp.getAttribute('fs-list-value');
+							const real = state.byField.get(f)?.get(v);
+							if (!real) return;
+							real.checked = true;
+							real.closest('label')?.classList.add('is-list-active');
+							real.dispatchEvent(new Event('input', { bubbles: true }));
+							real.dispatchEvent(new Event('change', { bubbles: true }));
+						});
+				};
+
+				parent.__rfCleanup = () => { btn.onclick = null; };
+			});
+
+			state.builtForPath = currentPath();
+			log('built for', state.builtForPath);
+		};
+
+		// — events — //
+		document.addEventListener('ddg:ajax-home-ready', () => {
+			if (indexFilterUi() && state.wantBuild) {
+				log('home ready → running deferred build');
+				renderRelated();
+				state.wantBuild = false;
+			} else {
+				log('home ready');
+			}
+		});
+
+		document.addEventListener('ddg:modal-opened', (ev) => {
+			if (ev.detail?.id !== 'story') return;
+			log('modal opened → build');
+			renderRelated();
+		});
+
+		document.addEventListener('ddg:modal-closed', (ev) => {
+			if (ev.detail?.id !== 'story') return;
+			log('modal closed → cleanup');
+			document.querySelectorAll(sel.parent).forEach(p => p.__rfCleanup?.());
+			state.builtForPath = null;
+		});
+
+		log('ready (event-driven)');
 	}
 
 	ddg.boot = initSite;
