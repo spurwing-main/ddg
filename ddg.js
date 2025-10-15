@@ -931,261 +931,164 @@
 	};
 
 	function initRandomiseFilters() {
+		const selectors = {
+			list: '[fs-list-element="list"]',
+			filtersForm: '[fs-list-element="filters"]',
+			filterInputs: 'input[type="checkbox"][fs-list-field][fs-list-value]',
+			clearButton: '[fs-list-element="clear"]',
+			triggerButton: '[data-randomfilters]'
+		};
+
 		const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
-		const fieldValueStrings = (field) => {
-			if (!field) return [];
-			const v = field.value;
-			if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
-			return String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-		};
+		async function applyRandomFilters(listInstance) {
+			console.log('[randomfilters] starting randomisation...');
 
-		let lastInstance = null;
-		let resolvedInstance = null;
-		let filtersCache = new WeakMap();
-		let randomiseLock = false;
-		let fsLoadRequested = false;
-		let finsweetReady = false;
-		const pendingListResolvers = [];
-
-		const extractFirstInstance = (value) => {
-			if (!value) return null;
-			if (Array.isArray(value)) return value[0] || null;
-			if (Array.isArray(value.instances)) return value.instances[0] || null;
-			if (Array.isArray(value.listInstances)) return value.listInstances[0] || null;
-			return null;
-		};
-
-		const getModuleInstance = () => {
-			try {
-				const mod = window.FinsweetAttributes?.modules?.list;
-				return extractFirstInstance(mod?.instances) ||
-					extractFirstInstance(mod?.listInstances) ||
-					extractFirstInstance(mod?.__instances);
-			} catch (_) { }
-			return null;
-		};
-
-		const flushPendingResolvers = () => {
-			if (!resolvedInstance) return;
-			while (pendingListResolvers.length) {
-				const resolver = pendingListResolvers.shift();
-				try { resolver(resolvedInstance); } catch (_) { }
-			}
-		};
-
-		const setActiveInstance = (instance) => {
-			if (!instance) return;
-			if (resolvedInstance !== instance) {
-				resolvedInstance = instance;
-				filtersCache = new WeakMap();
-			}
-			lastInstance = instance;
-			fsState.activeList = instance;
-			flushPendingResolvers();
-		};
-
-		const getCurrentInstance = () =>
-			resolvedInstance || fsState.activeList || lastInstance || getModuleInstance();
-
-		const requestListModules = () => {
-			if (fsLoadRequested) return;
-			fsLoadRequested = true;
-			try { ddg.requestFsLoad('list'); } catch (_) { }
-			try { ddg.scheduleFsRestart('list'); } catch (_) { }
-			if (data.truePath?.startsWith('/stories/') && !data.ajaxHomeLoaded) {
-				try { initAjaxHome(); } catch (_) { }
-			}
-		};
-
-		const waitForListInstance = () => {
-			const existing = getCurrentInstance();
-			if (existing) {
-				setActiveInstance(existing);
-				return Promise.resolve(existing);
+			const listEl = document.querySelector(selectors.list);
+			const formEl = document.querySelector(selectors.filtersForm);
+			if (!listEl || !formEl) {
+				console.warn('[randomfilters] list or filters form not found');
+				return;
 			}
 
-			requestListModules();
-
-			return new Promise((resolve, reject) => {
-				pendingListResolvers.push(resolve);
-				// Add timeout to prevent hanging forever
-				setTimeout(() => {
-					reject(new Error('Timeout waiting for Finsweet list instance'));
-				}, 10000);
-			});
-		};
-
-		const resolveListInstance = async () => waitForListInstance();
-
-		const getFiltersForInstance = (instance) => {
-			let cached = filtersCache.get(instance);
-			if (cached?.filtersForm?.isConnected) return cached;
-
-			const filtersForm = document.querySelector('[fs-list-element="filters"]');
-			if (!filtersForm) return null;
-
-			const allInputs = Array.from(filtersForm.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]')).filter((input) => {
-				const label = input.closest('label');
-				return !(label && label.classList.contains('is-list-emptyfacet'));
-			});
-			if (!allInputs.length) return null;
+			const checkboxes = Array.from(formEl.querySelectorAll(selectors.filterInputs))
+				.filter(input => !input.closest('label')?.classList.contains('is-list-emptyfacet'));
+			if (!checkboxes.length) {
+				console.warn('[randomfilters] no valid filter checkboxes found');
+				return;
+			}
 
 			const uiByField = new Map();
-			allInputs.forEach((input) => {
-				const key = input.getAttribute('fs-list-field');
-				const val = input.getAttribute('fs-list-value');
-				if (!key || !val) return;
-				let map = uiByField.get(key);
-				if (!map) uiByField.set(key, (map = new Map()));
-				map.set(val, input);
-			});
+			for (const input of checkboxes) {
+				const field = input.getAttribute('fs-list-field');
+				const value = input.getAttribute('fs-list-value');
+				if (!field || !value) continue;
+				if (!uiByField.has(field)) uiByField.set(field, new Map());
+				uiByField.get(field).set(value, input);
+			}
 
-			const clearBtn = document.querySelector('[fs-list-element="clear"]');
-			cached = { filtersForm, allInputs, uiByField, clearBtn };
-			filtersCache.set(instance, cached);
-			return cached;
-		};
+			const items = Array.isArray(listInstance.items?.value)
+				? listInstance.items.value
+				: listInstance.items || [];
+			if (!items.length) {
+				console.warn('[randomfilters] no list items found');
+				return;
+			}
 
-		const randomise = async () => {
-			if (randomiseLock) return false;
-			randomiseLock = true;
-			try {
-				// Wait for Finsweet to be ready
-				if (!finsweetReady) {
-					console.warn('Finsweet not ready yet, waiting...');
+			const randomItem = items[rand(0, items.length - 1)];
+			const itemFields = Object.entries(randomItem.fields || {});
+			if (!itemFields.length) {
+				console.warn('[randomfilters] random item has no usable fields');
+				return;
+			}
+
+			const candidates = [];
+			for (const [fieldKey, field] of itemFields) {
+				const map = uiByField.get(fieldKey);
+				if (!map) continue;
+				const values = String(field.value ?? '')
+					.split(',')
+					.map(v => v.trim())
+					.filter(v => map.has(v));
+				if (!values.length) continue;
+				const value = values[rand(0, values.length - 1)];
+				candidates.push({ fieldKey, value, input: map.get(value) });
+			}
+
+			if (!candidates.length) {
+				console.warn('[randomfilters] no matching filters found for this item');
+				return;
+			}
+
+			const selected = candidates.slice(0, rand(2, Math.min(5, candidates.length)));
+
+			const clearBtn = formEl.querySelector(selectors.clearButton);
+			if (clearBtn) {
+				clearBtn.click();
+			} else {
+				for (const input of checkboxes) {
+					input.checked = false;
+					input.closest('label')?.classList.remove('is-list-active');
+					input.dispatchEvent(new Event('change', { bubbles: true }));
 				}
-				
-				const listInstance = await resolveListInstance();
-				if (!listInstance) {
-					console.warn('Could not get Finsweet list instance');
-					return false;
-				}
+			}
 
-				const cache = getFiltersForInstance(listInstance);
-				if (!cache) return false;
-
-				const { allInputs, uiByField, clearBtn } = cache;
-				const items = Array.isArray(listInstance.items?.value) ? listInstance.items.value : (Array.isArray(listInstance.items) ? listInstance.items : []);
-				if (!items.length) return false;
-
-				const maxTries = Math.min(items.length, 50);
-				let chosenFromItem = null;
-				let uniqueIdCounter = 0;
-				
-				for (let attempt = 0; attempt < maxTries; attempt++) {
-					const idx = rand(0, Math.max(0, items.length - 1));
-					const item = items[idx];
-					const fieldsEntries = Object.entries(item?.fields || {});
-					if (!fieldsEntries.length) continue;
-
-					const candidates = [];
-					fieldsEntries.forEach(([key, field]) => {
-						const map = uiByField.get(key);
-						if (!map || !map.size) return;
-						const values = fieldValueStrings(field);
-						const exists = values.filter((v) => map.has(v));
-						if (!exists.length) return;
-						const val = exists[rand(0, exists.length - 1)];
-						candidates.push({ fieldKey: key, value: val, input: map.get(val) });
-					});
-
-					if (candidates.length >= 2) {
-						for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
-						const n = rand(2, Math.min(5, candidates.length));
-						chosenFromItem = candidates.slice(0, n);
-						break;
-					}
-				}
-
-				if (!chosenFromItem) return false;
-				const chosen = chosenFromItem;
-
-				if (clearBtn) {
-					clearBtn.click();
-				} else {
-					allInputs.forEach((input) => {
-						if (input.checked) {
-							input.checked = false;
-							input.dispatchEvent(new Event('input', { bubbles: true }));
-							input.dispatchEvent(new Event('change', { bubbles: true }));
-						}
-						const lab = input.closest('label');
-						if (lab) lab.classList.remove('is-list-active');
-					});
-				}
-
-				const apiFilters = listInstance.filters?.value;
-				if (!apiFilters) return false;
-				apiFilters.groupsMatch = 'and';
-				apiFilters.groups = [{
+			const filters = listInstance.filters?.value;
+			filters.groupsMatch = 'and';
+			filters.groups = [
+				{
 					id: 'random',
 					conditionsMatch: 'and',
-					conditions: chosen.map(({ fieldKey, value }) => ({
-						id: `rf-${fieldKey}-${uniqueIdCounter++}`,
+					conditions: selected.map(({ fieldKey, value }, i) => ({
+						id: `rf-${fieldKey}-${i}`,
 						type: 'checkbox',
 						fieldKey,
 						op: 'equal',
 						value,
-						interacted: true,
-					})),
-				}];
+						interacted: true
+					}))
+				}
+			];
 
-				if (typeof listInstance.triggerHook === 'function') listInstance.triggerHook('filter');
+			listInstance.triggerHook?.('filter');
 
-				allInputs.forEach((input) => {
-					input.checked = false;
-					const lab = input.closest('label');
-					if (lab) lab.classList.remove('is-list-active');
-				});
-				chosen.forEach(({ input }) => {
-					input.checked = true;
-					const lab = input.closest('label');
-					if (lab) lab.classList.add('is-list-active');
-				});
-				return true;
-			} catch (error) {
-				console.error('Random filters error:', error);
-				return false;
-			} finally {
-				randomiseLock = false;
+			for (const { input } of selected) {
+				input.checked = true;
+				input.closest('label')?.classList.add('is-list-active');
+				input.dispatchEvent(new Event('input', { bubbles: true }));
+				input.dispatchEvent(new Event('change', { bubbles: true }));
 			}
-		};
 
-		document.addEventListener('click', (e) => {
-			const el = e.target.closest('[data-randomfilters]');
-			if (!el) return;
-			e.preventDefault();
-			void randomise();
-		}, true);
-
-		const handleFsList = (instances) => {
-			const instance = extractFirstInstance(instances) ||
-				extractFirstInstance(instances?.instances) ||
-				extractFirstInstance(instances?.listInstances);
-			setActiveInstance(instance);
-			finsweetReady = true;
-		};
-
-		window.FinsweetAttributes = window.FinsweetAttributes || [];
-		if (!ddg.__randomFiltersFsHooked) {
-			ddg.__randomFiltersFsHooked = true;
-			window.FinsweetAttributes.push(['list', (instances) => {
-				handleFsList(instances);
-				try {
-					if (Array.isArray(instances) && instances.length) lastInstance = instances[0];
-					else if (instances?.instances?.length) lastInstance = instances.instances[0];
-					else if (instances?.listInstances?.length) lastInstance = instances.listInstances[0];
-				} catch (_) { }
-			}]);
+			console.log('[randomfilters] applied filters:', selected);
 		}
 
-		// Check if Finsweet is already loaded
-		const existing = getCurrentInstance();
-		if (existing) {
-			setActiveInstance(existing);
-			finsweetReady = true;
+		function getListInstance() {
+			const mod = window.FinsweetAttributes?.modules?.list;
+			return mod?.instances?.[0] || mod?.listInstances?.[0] || null;
 		}
+
+		function ensureListReadyAndRun() {
+			const instance = getListInstance();
+			if (instance) {
+				applyRandomFilters(instance);
+				return;
+			}
+
+			console.log('[randomfilters] waiting for finsweet list...');
+			const fs = (window.FinsweetAttributes = window.FinsweetAttributes || []);
+
+			fs.push([
+				'list',
+				instances => {
+					const first =
+						Array.isArray(instances) ? instances[0] : instances?.instances?.[0];
+					if (first) applyRandomFilters(first);
+					else console.warn('[randomfilters] no instance after finsweet callback');
+				}
+			]);
+
+			try {
+				fs.load?.('list');
+			} catch (_) { }
+		}
+
+		document.addEventListener(
+			'click',
+			e => {
+				const button = e.target.closest(selectors.triggerButton);
+				if (!button) return;
+
+				e.preventDefault();
+				if (button.__rfLock) return;
+
+				button.__rfLock = true;
+				setTimeout(() => (button.__rfLock = false), 250);
+
+				console.log('[randomfilters] trigger clicked');
+				ensureListReadyAndRun();
+			},
+			true
+		);
 	}
 
 	function initMarquee(root = document) {
