@@ -209,44 +209,32 @@
 		}
 	}
 
-	const initShare = () => {
+	function initShare() {
 		if (ddg.__shareInitialized) return;
 		ddg.__shareInitialized = true;
 
+		const sel = { btn: '[data-share]' };
 		const shareWebhookUrl = 'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
 		const dailyShareKey = 'share_done_date';
 
 		const todayString = () => new Date().toISOString().slice(0, 10);
-		const nextMidnight = () => {
-			const date = new Date();
-			date.setHours(24, 0, 0, 0);
-			return date;
+		const nextMidnight = () => { const d = new Date(); d.setHours(24, 0, 0, 0); return d; };
+		const setCookieValue = (name, value, exp) => {
+			document.cookie = `${name}=${value}; expires=${exp.toUTCString()}; path=/; SameSite=Lax`;
 		};
-
-		const setCookieValue = (name, value, expiresAt) => {
-			document.cookie = `${name}=${value}; expires=${expiresAt.toUTCString()}; path=/; SameSite=Lax`;
+		const getCookieValue = (name) => {
+			const row = document.cookie.split('; ').find(r => r.startsWith(name + '=')) || '';
+			return row.split('=')[1] || null;
 		};
-
-		const getCookieValue = name => {
-			const cookiePair = document.cookie.split('; ').find(row => row.startsWith(name + '=')) || '';
-			return cookiePair.split('=')[1] || null;
-		};
-
 		const markShareComplete = () => {
-			const todayValue = todayString();
-			const expiresAt = nextMidnight();
-			localStorage.setItem(dailyShareKey, todayValue);
-			sessionStorage.setItem(dailyShareKey, todayValue);
-			setCookieValue(dailyShareKey, todayValue, expiresAt);
+			const v = todayString(); const exp = nextMidnight();
+			localStorage.setItem(dailyShareKey, v);
+			sessionStorage.setItem(dailyShareKey, v);
+			setCookieValue(dailyShareKey, v, exp);
 		};
-
 		const alreadySharedToday = () => {
-			const todayValue = todayString();
-			return [
-				localStorage.getItem(dailyShareKey),
-				sessionStorage.getItem(dailyShareKey),
-				getCookieValue(dailyShareKey)
-			].includes(todayValue);
+			const v = todayString();
+			return [localStorage.getItem(dailyShareKey), sessionStorage.getItem(dailyShareKey), getCookieValue(dailyShareKey)].includes(v);
 		};
 
 		const shareUrlMap = {
@@ -261,221 +249,92 @@
 			telegram: ({ url, text }) => `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`
 		};
 
-		const platformAlias = { twitter: 'x' };
-
-		let shareLiveRegion = null;
-		const ensureShareLiveRegion = () => {
-			if (shareLiveRegion && document.body.contains(shareLiveRegion)) return shareLiveRegion;
-			shareLiveRegion = document.createElement('div');
-			shareLiveRegion.setAttribute('aria-live', 'polite');
-			shareLiveRegion.setAttribute('aria-atomic', 'true');
-			shareLiveRegion.setAttribute('data-share-live-region', 'true');
-			Object.assign(shareLiveRegion.style, {
-				position: 'fixed',
-				width: '1px',
-				height: '1px',
-				padding: '0',
-				border: '0',
-				margin: '-1px',
-				overflow: 'hidden',
-				clip: 'rect(0 0 0 0)'
-			});
-			document.body.appendChild(shareLiveRegion);
-			return shareLiveRegion;
-		};
-
-		const announceShare = message => {
-			if (!message) return;
-			const region = ensureShareLiveRegion();
-			region.textContent = '';
-			setTimeout(() => { region.textContent = message; }, 20);
-		};
-
-		const updateShareState = (element, state) => {
-			if (!element) return;
-			element.setAttribute('data-share-state', state);
-			clearTimeout(element.__shareStateTimer);
-			element.__shareStateTimer = setTimeout(() => {
-				element.removeAttribute('data-share-state');
-				element.__shareStateTimer = null;
+		const setState = (el, state) => {
+			el.setAttribute('data-share-state', state);
+			clearTimeout(el.__shareStateTimer);
+			el.__shareStateTimer = setTimeout(() => {
+				el.removeAttribute('data-share-state');
+				el.__shareStateTimer = null;
 			}, 2000);
 		};
 
-		const fallbackCopy = text => new Promise((resolve, reject) => {
-			if (!document.body) {
-				reject(new Error('Document body unavailable'));
-				return;
-			}
-			const textarea = document.createElement('textarea');
-			textarea.value = text;
-			textarea.setAttribute('readonly', '');
-			Object.assign(textarea.style, {
-				position: 'fixed',
-				top: '-9999px',
-				left: '-9999px',
-				opacity: '0'
+		const decrementCountdown = () => {
+			$('[data-share-countdown]').each((_, el) => {
+				const $el = $(el);
+				let n = parseInt(el.getAttribute('data-share-countdown') || $el.text() || $el.val(), 10);
+				if (!Number.isFinite(n)) n = 0;
+				const next = Math.max(0, n - 1);
+				$el.attr('data-share-countdown', next);
+				$el.is('input, textarea') ? $el.val(next) : $el.text(next);
 			});
-			document.body.appendChild(textarea);
-			textarea.focus();
-			textarea.select();
-			let successful = false;
-			try {
-				successful = document.execCommand('copy');
-			} catch (_) { successful = false; }
-			textarea.remove();
-			if (successful) resolve();
-			else reject(new Error('execCommand failed'));
+		};
+
+		const sendShareWebhook = (platform) => new Promise((resolve) => {
+			const form = document.createElement('form');
+			const iframe = document.createElement('iframe');
+			const frameName = 'wf_' + Math.random().toString(36).slice(2);
+			iframe.name = frameName; iframe.style.display = 'none';
+			form.target = frameName; form.method = 'POST'; form.action = shareWebhookUrl; form.style.display = 'none';
+			[['platform', platform], ['date', todayString()]].forEach(([name, value]) => {
+				const input = document.createElement('input');
+				input.type = 'hidden'; input.name = name; input.value = value;
+				form.appendChild(input);
+			});
+			document.body.append(iframe, form);
+			form.submit();
+			setTimeout(() => { form.remove(); iframe.remove(); resolve(true); }, 800);
 		});
 
-		const copyToClipboard = text => {
-			if (!text) return Promise.reject(new Error('Nothing to copy'));
-			if (navigator.clipboard?.writeText) {
-				return navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
-			}
-			return fallbackCopy(text);
-		};
-
-		const decrementCountdown = () => {
-			$('[data-share-countdown]').each((_, element) => {
-				const $element = $(element);
-				let remaining = parseInt(element.getAttribute('data-share-countdown') || $element.text() || $element.val(), 10);
-				if (!Number.isFinite(remaining)) remaining = 0;
-				const nextValue = Math.max(0, remaining - 1);
-				$element.attr('data-share-countdown', nextValue);
-				$element.is('input, textarea') ? $element.val(nextValue) : $element.text(nextValue);
-			});
-		};
-
-		let shareStartTimestamp = null;
-		let pointerTravel = 0;
-		let lastPointerPosition = null;
-		let tracking = false;
-		let trackingTimeout = null;
-
-		const onSharePointerMove = (event) => {
-			const { clientX, clientY } = event;
-			if (!lastPointerPosition) { lastPointerPosition = [clientX, clientY]; return; }
-			pointerTravel += Math.hypot(clientX - lastPointerPosition[0], clientY - lastPointerPosition[1]);
-			lastPointerPosition = [clientX, clientY];
-		};
-
-		const startTracking = () => {
-			if (tracking) return;
-			tracking = true;
-			shareStartTimestamp = Date.now();
-			pointerTravel = 0;
-			lastPointerPosition = null;
-			$(document).on('pointermove.ddgShare', onSharePointerMove);
-			trackingTimeout = setTimeout(() => stopTracking(), 8000);
-		};
-
-		const stopTracking = () => {
-			if (!tracking) return;
-			tracking = false;
-			clearTimeout(trackingTimeout);
-			$(document).off('pointermove.ddgShare', onSharePointerMove);
-		};
-
-		$(document).on('pointerenter.ddgShare', '[data-share]', startTracking);
-		$(document).on('focusin.ddgShare', '[data-share]', startTracking);
-
-		const heuristicsSatisfied = () =>
-			shareStartTimestamp !== null &&
-			Date.now() - shareStartTimestamp > 1500 &&
-			pointerTravel > 120 &&
-			document.hasFocus();
-
-		const sendShareWebhook = platform =>
-			new Promise(resolve => {
-				const form = document.createElement('form');
-				const iframe = document.createElement('iframe');
-				const frameName = 'wf_' + Math.random().toString(36).slice(2);
-
-				iframe.name = frameName;
-				iframe.style.display = 'none';
-
-				form.target = frameName;
-				form.method = 'POST';
-				form.action = shareWebhookUrl;
-				form.style.display = 'none';
-
-				[['platform', platform], ['date', todayString()]].forEach(([name, value]) => {
-					const input = document.createElement('input');
-					input.type = 'hidden';
-					input.name = name;
-					input.value = value;
-					form.appendChild(input);
-				});
-
-				document.body.append(iframe, form);
-				form.submit();
-
-				setTimeout(() => {
-					form.remove();
-					iframe.remove();
-					resolve(true);
-				}, 1000);
-			});
-
-		$(document).on('click.ddgShare', '[data-share]', event => {
-			const $target = $(event.currentTarget);
+		// delegated (covers injected content)
+		$(document).off('click.ddgShare').on('click.ddgShare', sel.btn, async (event) => {
+			const el = event.currentTarget;
 			event.preventDefault();
 
-			const platformKey = ($target.data('share') || '').toString().toLowerCase();
-			const normalizedPlatform = (platformAlias[platformKey] || platformKey).toLowerCase();
+			// simple per-button lock
+			if (el.__shareLock) return;
+			el.__shareLock = true;
+			setTimeout(() => { el.__shareLock = false; }, 400);
 
-			const shareUrl = $target.data('share-url') || window.location.href;
-			const shareText = $target.data('share-text') || document.title;
-
-			const resolver = shareUrlMap[normalizedPlatform];
+			const platform = (el.getAttribute('data-share') || '').toLowerCase();
+			const shareUrl = el.getAttribute('data-share-url') || window.location.href;
+			const shareText = el.getAttribute('data-share-text') || document.title;
+			const resolver = shareUrlMap[platform];
 			const destination = resolver ? resolver({ url: shareUrl, text: shareText }) : shareUrl;
 
-			const isClipboardShare = normalizedPlatform === 'clipboard';
-			const sharewindow = isClipboardShare ? null : window.open('about:blank', '_blank');
-			const heuristicsPassed = heuristicsSatisfied();
+			// minimal guard
+			const realClick = event.isTrusted && document.hasFocus();
 
-			stopTracking();
-
-			// Fake the countdown for immediate feedback
+			// immediate UI feedback
 			decrementCountdown();
 
-			if (heuristicsPassed) {
-				if (!alreadySharedToday()) {
-					sendShareWebhook(normalizedPlatform);
-					markShareComplete();
-				}
-			} else {
-				console.warn('[share] heuristics not satisfied');
+			// webhook once/day on genuine clicks
+			if (realClick && !alreadySharedToday()) {
+				sendShareWebhook(platform).catch(() => { });
+				markShareComplete();
 			}
 
-			if (isClipboardShare) {
-				const successMessage = $target.attr('data-share-copy-label') || 'Link copied to clipboard';
-				const errorMessage = $target.attr('data-share-copy-error') || 'Copy failed. Copy the link manually.';
-				copyToClipboard(destination)
-					.then(() => {
-						updateShareState(event.currentTarget, 'copied');
-						announceShare(successMessage);
-					})
-					.catch(() => {
-						updateShareState(event.currentTarget, 'error');
-						announceShare(errorMessage);
-						try { window.prompt('Copy this link', destination); } catch (_) { }
-					});
+			if (platform === 'clipboard') {
+				try {
+					await navigator.clipboard.writeText(destination);
+					setState(el, 'copied');
+				} catch (err) {
+					console.warn('[share] clipboard failed', err);
+					setState(el, 'error');
+				}
 				return;
 			}
 
-			if (sharewindow) {
-				sharewindow.opener = null;
-				sharewindow.location.href = destination;
-			} else {
-				window.location.href = destination;
+			// open new tab; no fallbacks
+			const w = window.open('about:blank', '_blank');
+			if (w) {
+				w.opener = null;
+				w.location.href = destination;
 			}
 		});
-	};
 
-	// ==============================
-	// initModals
-	// ==============================
+		console.log('[share] ready (minimal)');
+	}
+
 	function initModals() {
 		ddg.modals = ddg.modals || {};
 		ddg._modalsKeydownBound = Boolean(ddg._modalsKeydownBound);
@@ -487,91 +346,179 @@
 			bg: '[data-modal-bg]',
 			inner: '[data-modal-inner]',
 			close: '[data-modal-close]',
+			scrollAny: '[data-modal-scroll]'
 		};
 
 		const syncCssState = ($modal, open, id) => {
 			const $bg = $(`[data-modal-bg="${id}"]`);
 			const $inner = $modal.find(sel.inner).first();
-			[$modal[0], $inner[0], $bg[0]].filter(Boolean).forEach(el => el.classList.toggle('is-open', !!open));
-			console.log(`[modals:${id}] syncCssState -> ${!!open} (bg:${$bg.length})`);
+			[$modal[0], $inner[0], $bg[0]].filter(Boolean).forEach(el => {
+				open ? el.classList.add('is-open') : el.classList.remove('is-open');
+			});
+			console.log(`[modals:${id}] syncCssState -> ${open} (bg:${$bg.length})`);
 		};
 
 		const createModal = (id) => {
 			if (ddg.modals[id]) return ddg.modals[id];
+
 			const $modal = $(`[data-modal-el="${id}"]`);
 			if (!$modal.length) return null;
 
-			const $inner = $modal.find(sel.inner).first();
 			const $bg = $(`[data-modal-bg="${id}"]`);
-			const $animTarget = $inner.length ? $inner : $modal;
+			const $inner = $modal.find(sel.inner).first();
+			const $anim = $inner.length ? $inner : $modal;
 
-			const open = ({ skipAnimation = false, beforeOpen, afterOpen } = {}) => {
-				console.log(`[modals:${id}] open (skipAnimation=${skipAnimation})`);
-				// Single-open policy
-				Object.entries(ddg.modals).forEach(([otherId, m]) => {
-					if (otherId !== id && m.isOpen()) m.close({ skipAnimation: true });
-				});
+			let lastActiveEl = null;
 
-				beforeOpen && beforeOpen();
-				gsap.killTweensOf($animTarget[0]);
-
-				// is-open on all parts BEFORE anim
-				syncCssState($modal, true, id);
-
-				if (skipAnimation) {
-					gsap.set($animTarget[0], { opacity: 1, y: 0 });
-					afterOpen && afterOpen();
-					return;
-				}
-
-				gsap.fromTo(
-					$animTarget[0],
-					{ y: 60, opacity: 0 },
-					{
-						y: 0,
-						opacity: 1,
-						duration: 0.6,
-						ease: 'power2.out',
-						onComplete: () => afterOpen && afterOpen(),
-					}
-				);
+			const ensureTabIndex = (el) => { if (el && !el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1'); };
+			const focusModal = () => {
+				const node = ($inner[0] || $modal[0]);
+				if (!node) return;
+				ensureTabIndex(node);
+				try { node.focus({ preventScroll: true }); } catch { try { node.focus(); } catch (_) { } }
 			};
 
-			const close = ({ skipAnimation = false, beforeClose, afterClose } = {}) => {
-				console.log(`[modals:${id}] close (skipAnimation=${skipAnimation})`);
-				beforeClose && beforeClose();
-				gsap.killTweensOf($animTarget[0]);
+			const onKeydownTrap = (e) => {
+				if (e.key !== 'Tab') return;
+				const root = $modal[0];
+				const list = root.querySelectorAll('a[href],button,textarea,input,select,[tabindex]:not([tabindex="-1"])');
+				if (!list.length) return;
+				const first = list[0], last = list[list.length - 1];
+				if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+				else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+			};
 
-				// Remove bg immediately
-				if ($bg.length) $bg.removeClass('is-open');
+			const setAnimating = (on) => {
+				if (!$anim[0]) return;
+				if (on) gsap.set($anim[0], { willChange: 'transform, opacity' });
+				else gsap.set($anim[0], { clearProps: 'will-change' });
+			};
+
+			// Resolve scroll container *lazily* (works after AJAX injection)
+			const resolveScrollContainer = () => {
+				const $global = $(`[data-modal-scroll="${id}"]`).first();
+				if ($global.length) return $global[0];
+				const $local = $modal.find(sel.scrollAny).first();
+				return $local[0] || $inner[0] || $modal[0];
+			};
+
+			const scrollToAnchor = (hash) => {
+				if (!hash) return;
+				let target = null;
+				try {
+					if (window.CSS?.escape) {
+						target = $modal.find(`#${CSS.escape(hash)}`).first()[0] || null;
+					} else {
+						target = $modal.find(`[id="${hash.replace(/"/g, '\\"')}"]`).first()[0] || null;
+					}
+				} catch (_) { target = null; }
+				if (!target) return;
+
+				const container = resolveScrollContainer();
+				if (!container) return;
+
+				const cRect = container.getBoundingClientRect();
+				const tRect = target.getBoundingClientRect();
+				const cs = getComputedStyle(target);
+				const smt = parseFloat(cs.scrollMarginTop || cs.scrollMargin || '0') || 0;
+				const nextTop = container.scrollTop + (tRect.top - cRect.top) - smt;
+
+				try { container.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' }); }
+				catch { container.scrollTop = Math.max(0, nextTop); }
+
+				// Briefly guard body scroll while smooth scroll runs
+				const guard = (ev) => { if (!container.contains(ev.target)) { try { ev.preventDefault(); } catch { } } };
+				window.addEventListener('wheel', guard, { capture: true, passive: false });
+				window.addEventListener('touchmove', guard, { capture: true, passive: false });
+				setTimeout(() => {
+					window.removeEventListener('wheel', guard, true);
+					window.removeEventListener('touchmove', guard, true);
+				}, 900);
+			};
+
+			// Delegate anchor clicks inside the modal (handles injected content)
+			$modal.on('click.modalAnchors', 'a[href^="#"]', (e) => {
+				const href = (e.currentTarget.getAttribute('href') || '');
+				if (!href || href === '#' || href.length < 2) return;
+				e.preventDefault();
+				e.stopPropagation();
+				scrollToAnchor(href.slice(1));
+				try {
+					const u = new URL(window.location.href);
+					u.hash = href.slice(1);
+					window.history.replaceState(window.history.state, '', u.toString());
+				} catch (_) { }
+			});
+
+			const open = ({ skipAnimation = false, afterOpen } = {}) => {
+				console.log(`[modals:${id}] open (skipAnimation=${skipAnimation})`);
+
+				Object.keys(ddg.modals).forEach(k => {
+					if (k !== id && ddg.modals[k]?.isOpen?.()) ddg.modals[k].close({ skipAnimation: true });
+				});
+
+				lastActiveEl = document.activeElement;
+				gsap.killTweensOf([$anim[0], $bg[0]]);
+				syncCssState($modal, true, id); // set classes first
+
+				if (skipAnimation) {
+					gsap.set($bg[0], { autoAlpha: 1 });
+					gsap.set($anim[0], { y: 0, autoAlpha: 1 });
+					document.addEventListener('keydown', onKeydownTrap, true);
+					requestAnimationFrame(focusModal);
+					document.dispatchEvent(new CustomEvent('ddg:modal-opened', { detail: { id } }));
+					return afterOpen && afterOpen();
+				}
+
+				setAnimating(true);
+				gsap.set($bg[0], { autoAlpha: 0 });
+				gsap.timeline({
+					onComplete: () => {
+						setAnimating(false);
+						document.addEventListener('keydown', onKeydownTrap, true);
+						requestAnimationFrame(focusModal);
+						document.dispatchEvent(new CustomEvent('ddg:modal-opened', { detail: { id } }));
+						afterOpen && afterOpen();
+					}
+				})
+					.to($bg[0], { autoAlpha: 1, duration: 0.18, ease: 'power1.out' }, 0)
+					.fromTo($anim[0], { y: 40, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, ease: 'power2.out' }, 0);
+			};
+
+			const close = ({ skipAnimation = false, afterClose } = {}) => {
+				if (!$modal.hasClass('is-open')) return;
+				console.log(`[modals:${id}] close (skipAnimation=${skipAnimation})`);
+
+				gsap.killTweensOf([$anim[0], $bg[0]]);
+				if ($bg.length) $bg[0].classList.remove('is-open'); // bg class off immediately
 
 				const finish = () => {
-					$modal.removeClass('is-open');
-					$inner.removeClass('is-open');
+					$modal[0].classList.remove('is-open');
+					$inner[0] && $inner[0].classList.remove('is-open');
+					document.removeEventListener('keydown', onKeydownTrap, true);
+					try { lastActiveEl && lastActiveEl.focus(); } catch { }
+					lastActiveEl = null;
+					document.dispatchEvent(new CustomEvent('ddg:modal-closed', { detail: { id } }));
 					afterClose && afterClose();
 				};
 
 				if (skipAnimation) {
-					gsap.set($animTarget[0], { opacity: 0, y: 60 });
-					finish();
-					return;
+					gsap.set($bg[0], { autoAlpha: 0 });
+					gsap.set($anim[0], { y: 40, autoAlpha: 0 });
+					return finish();
 				}
 
-				gsap.to($animTarget[0], {
-					y: 60,
-					opacity: 0,
-					duration: 0.6,
-					ease: 'power2.out',
-					onComplete: finish,
-				});
+				setAnimating(true);
+				gsap.timeline({ onComplete: () => { setAnimating(false); finish(); } })
+					.to($bg[0], { autoAlpha: 0, duration: 0.15, ease: 'power1.out' }, 0)
+					.to($anim[0], { y: 40, autoAlpha: 0, duration: 0.28, ease: 'power2.inOut' }, 0);
 			};
 
 			const isOpen = () => $modal.hasClass('is-open');
 
-			const modal = { open, close, isOpen, $modal };
+			const modal = { open, close, isOpen, $modal, $bg, $inner };
 			ddg.modals[id] = modal;
 
-			// Initial CSS sync (e.g. direct /stories/... loads)
 			const initial = $modal.hasClass('is-open');
 			console.log(`[modals:${id}] initial state is-open=${initial}`);
 			syncCssState($modal, initial, id);
@@ -580,57 +527,51 @@
 			return modal;
 		};
 
-		ddg.ensureModal = (id) => ddg.modals[id] || createModal(id);
+		// Expose factory so ajax module can lazily create the modal
+		ddg.__createModal = createModal;
 
-		// Triggers — skip ajax links (ajaxModal handles them)
+		// Triggers (non-ajax)
 		$(document).on('click.modal', sel.trigger, (e) => {
-			const el = e.currentTarget;
-			const id = el.getAttribute('data-modal-trigger');
-			if (el.hasAttribute('data-ajax-modal')) return;
+			const node = e.currentTarget;
+			if (node.hasAttribute('data-ajax-modal')) return;
 			e.preventDefault();
-			console.log(`[modals] trigger clicked for ${id}`);
-			ddg.ensureModal(id)?.open();
+			const id = node.getAttribute('data-modal-trigger');
+			console.log('[modals] trigger clicked for', id);
+			const modal = createModal(id);
+			modal?.open();
 		});
 
-		// Close buttons (targeted or generic)
+		// Close buttons
 		$(document).on('click.modal', sel.close, (e) => {
 			e.preventDefault();
 			const id = e.currentTarget.getAttribute('data-modal-close');
-			if (id) ddg.ensureModal(id)?.close();
+			if (id) (ddg.modals[id] || createModal(id))?.close();
 			else Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
 		});
 
-		// Backdrop click
+		// Backdrop
 		$(document).on('click.modal', sel.bg, (e) => {
 			if (e.target !== e.currentTarget) return;
 			const id = e.currentTarget.getAttribute('data-modal-bg');
-			console.log(`[modals] bg clicked for ${id}`);
-			ddg.ensureModal(id)?.close();
+			console.log('[modals] bg clicked for', id);
+			(ddg.modals[id] || createModal(id))?.close();
 		});
 
 		// ESC
 		if (!ddg._modalsKeydownBound) {
 			ddg._modalsKeydownBound = true;
 			$(document).on('keydown.modal', (e) => {
-				if (e.key === 'Escape') {
-					Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
-				}
+				if (e.key === 'Escape') Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
 			});
 		}
 
-		// Build controllers for all present modals now
-		$(sel.modal).each((_, el) => {
-			const id = el.getAttribute('data-modal-el');
-			ddg.ensureModal(id);
-		});
-
-		// Final CSS sync pass
+		// Post-init CSS sanity pass
 		requestAnimationFrame(() => {
 			console.log('[modals] post-init CSS sync check');
 			$(sel.modal).each((_, el) => {
 				const id = el.getAttribute('data-modal-el');
-				const isOpen = el.classList.contains('is-open');
-				syncCssState($(el), isOpen, id);
+				const open = el.classList.contains('is-open');
+				syncCssState($(el), open, id);
 			});
 		});
 
@@ -638,7 +579,6 @@
 		document.dispatchEvent(new CustomEvent('ddg:modals-ready'));
 	}
 
-	// ==============================
 	// initAjaxModal
 	// ==============================
 	function initAjaxModal() {
@@ -652,153 +592,131 @@
 		const originalTitle = document.title;
 		const homeUrl = '/';
 
-		let storyModal = ddg.modals?.[modalId] || ddg.ensureModal?.(modalId) || null;
+		let storyModal = ddg.modals?.[modalId] || null;
+		const storyCache = new Map();
+		let lock = false;
 
-		const augmentStoryModal = () => {
-			if (!storyModal || storyModal.__ajaxAugmented) return;
-			storyModal.__ajaxAugmented = true;
-
-			const origOpen = storyModal.open;
-			const origClose = storyModal.close;
-
-			// We leave open() mostly untouched; history is handled by openStory()
-			storyModal.open = (opts = {}) => {
-				return origOpen({
-					...opts,
-					afterOpen: () => {
-						try { opts.afterOpen?.(); } catch (_) { }
-					}
-				});
-			};
-
-			// Wrap close() so ANY close path restores home + title
-			storyModal.close = (opts = {}) => {
-				return origClose({
-					...opts,
-					afterClose: () => {
-						try { opts.afterClose?.(); } catch (_) { }
-						// Always restore to home when story modal closes
-						if (document.title !== originalTitle) document.title = originalTitle;
-						try { history.pushState({}, '', homeUrl); } catch (_) { }
-						console.log('[ajaxModal] (wrap) restored home');
-					}
-				});
-			};
-
-			console.log('[ajaxModal] story modal augmented');
+		const parseStory = (html) => {
+			try {
+				const doc = new DOMParser().parseFromString(html, 'text/html');
+				const node = doc.querySelector('[data-ajax-modal="content"]');
+				return { $content: node ? $(node) : null, title: doc.title || '' };
+			} catch { return { $content: null, title: '' }; }
 		};
 
-		if (storyModal) augmentStoryModal();
-
-		// If created later, grab and augment
-		document.addEventListener('ddg:modal-created', (e) => {
-			if (e.detail === modalId) {
-				storyModal = ddg.modals[modalId];
-				console.log('[ajaxModal] story modal created and ready');
-				augmentStoryModal();
-			}
-		});
+		const ensureModal = () => {
+			if (storyModal && storyModal.$modal?.length) return storyModal;
+			if (ddg.__createModal) storyModal = ddg.__createModal(modalId) || storyModal;
+			return storyModal;
+		};
 
 		const openStory = (url, title, $content) => {
-			if (!storyModal) {
-				console.warn('[ajaxModal] story modal not ready yet');
-				return;
-			}
-			$embed.empty().append($content || '');
-			storyModal.open({
+			const modal = ensureModal();
+			if (!modal) { console.warn('[ajaxModal] story modal not ready'); return; }
+
+			$embed.empty().append($content);
+			modal.open({
 				afterOpen: () => {
 					if (title) document.title = title;
-					try { history.pushState({ modal: true, story: true }, '', url); } catch (_) { }
+					try { history.pushState({ modal: true }, '', url); } catch { }
 					console.log('[ajaxModal] openStory -> updated history', url);
 				}
 			});
 		};
 
-		// Live click handler (works for injected nodes too)
+		// Ensure URL/title resets **whenever** the story modal closes
+		document.addEventListener('ddg:modal-closed', (ev) => {
+			if (ev.detail?.id !== modalId) return;
+			document.title = originalTitle;
+			try { history.pushState({}, '', homeUrl); } catch { }
+			console.log('[ajaxModal] modal closed -> restored home URL/title');
+		});
+
+		// Live click → fetch → inject → open
 		$(document).on('click.ajax', '[data-ajax-modal="link"]', (e) => {
 			const $link = $(e.currentTarget);
 			const linkUrl = $link.attr('href');
+			if (!linkUrl) return;
+
 			e.preventDefault();
 			console.log('[ajaxModal] clicked link', linkUrl);
 
-			// Ensure controller exists on the home page too
-			if (!storyModal) { storyModal = ddg.ensureModal?.(modalId) || null; augmentStoryModal(); }
-			if (!storyModal) {
-				console.warn('[ajaxModal] story modal not ready, aborting click');
-				return;
-			}
+			if (lock) { console.log('[ajaxModal] locked'); return; }
+			lock = true;
 
-			if (ddg._ajaxModalLock) {
-				console.log('[ajaxModal] still locked');
+			if (storyCache.has(linkUrl)) {
+				const { $content, title } = storyCache.get(linkUrl);
+				openStory(linkUrl, title, $content);
+				lock = false;
 				return;
 			}
-			ddg._ajaxModalLock = true;
 
 			$embed.empty().append("<div class='modal-skeleton' aria-busy='true'></div>");
 
 			$.ajax({
 				url: linkUrl,
 				success: (response) => {
-					console.log('[ajaxModal] loaded', linkUrl, 'len:', response.length);
-					let $content = null;
-					let title = '';
-					try {
-						const doc = new DOMParser().parseFromString(response, 'text/html');
-						const node = doc.querySelector('[data-ajax-modal="content"]');
-						title = doc.title || '';
-						$content = node ? $(node) : $("<div class='modal-error'>Failed to load content.</div>");
-					} catch (err) {
-						console.warn('[ajaxModal] parse error', err);
-						$content = $("<div class='modal-error'>Failed to load content.</div>");
-					}
-
+					console.log('[ajaxModal] loaded', linkUrl, 'len:', response?.length ?? 0);
+					const parsed = parseStory(response);
+					if (!parsed.$content) parsed.$content = $("<div class='modal-error'>Failed to load content.</div>");
+					storyCache.set(linkUrl, parsed);
 					console.log('[ajaxModal] injecting content');
-					openStory(linkUrl, title, $content);
-					if ($content && $content[0]) {
-						try { initMarquee($content[0]); } catch (_) { }
-					}
+					openStory(linkUrl, parsed.title, parsed.$content);
+					if (parsed.$content?.[0]) { try { initMarquee(parsed.$content[0]); } catch { } }
 				},
 				error: () => {
 					console.warn('[ajaxModal] load failed');
 					$embed.empty().append("<div class='modal-error'>Failed to load content.</div>");
-					openStory(linkUrl, 'Error', null);
 				},
-				complete: () => {
-					ddg._ajaxModalLock = false;
-					console.log('[ajaxModal] complete');
-				}
+				complete: () => { lock = false; console.log('[ajaxModal] complete'); }
 			});
 		});
 
-		// Browser back/forward
-		window.addEventListener('popstate', (e) => {
-			console.log('[ajaxModal] popstate', e.state);
-			if (!e.state?.modal && storyModal?.isOpen()) {
-				// Will run the wrapped afterClose that restores home/title
-				storyModal.close({ skipAnimation: true });
+		// Prefetch on hover/touch (snappy UX)
+		let pfTimer = null;
+		$(document).on('mouseenter.ajax touchstart.ajax', '[data-ajax-modal="link"]', (e) => {
+			const url = e.currentTarget.getAttribute('href');
+			if (!url || storyCache.has(url)) return;
+			clearTimeout(pfTimer);
+			pfTimer = setTimeout(() => {
+				$.ajax({
+					url, success: (html) => {
+						if (storyCache.has(url)) return;
+						storyCache.set(url, parseStory(html));
+						console.log('[ajaxModal] prefetched', url);
+					}
+				});
+			}, 120);
+		});
+
+		// Back/forward: close modal if leaving /stories/*
+		window.addEventListener('popstate', () => {
+			const path = window.location.pathname;
+			const modal = ensureModal();
+			if (!modal) return;
+			if (!path.startsWith('/stories/') && modal.isOpen()) {
+				console.log('[ajaxModal] popstate -> closing story modal');
+				modal.close();
 			}
 		});
 
-		// Deep link on /stories/... -> open instantly and mark history
-		console.log('[ajaxModal] waiting for ddg:modals-ready');
+		// Auto-open when landing on /stories/*
 		document.addEventListener('ddg:modals-ready', () => {
-			console.log('[ajaxModal] modals-ready detected');
-			storyModal = ddg.modals?.[modalId] || ddg.ensureModal?.(modalId) || storyModal;
-			augmentStoryModal();
-			if (!storyModal) {
-				console.warn('[ajaxModal] story modal not found after ready');
-				return;
-			}
+			const modal = ensureModal();
+			if (!modal) return console.warn('[ajaxModal] story modal not found after ready');
 			if (window.location.pathname.startsWith('/stories/')) {
-				console.log('[ajaxModal] story path detected — syncing open state');
-				storyModal.open({ skipAnimation: true });
-				try { history.replaceState({ modal: true, story: true }, '', window.location.href); } catch (_) { }
+				modal.open({
+					skipAnimation: true, afterOpen: () => {
+						try { history.replaceState({ modal: true }, '', window.location.href); } catch { }
+					}
+				});
 			}
 		}, { once: true });
+
+		console.log('[ajaxModal] waiting for ddg:modals-ready');
 	}
 
-	// Ajax Home List Injection
-	const initAjaxHome = () => {
+	function initAjaxHome () {
 		if (data.ajaxHomeLoaded || !data.truePath.startsWith('/stories/')) return;
 
 		const $target = $('[data-ajax-home="target"]');
@@ -822,7 +740,6 @@
 		});
 	};
 
-	// Randomise Filters
 	function initRandomiseFilters() {
 		const sel = {
 			list: '[fs-list-element="list"]',
