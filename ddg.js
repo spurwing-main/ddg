@@ -356,7 +356,7 @@
 	function initModals() {
 		ddg.modals = ddg.modals || {};
 		ddg._modalsKeydownBound = Boolean(ddg._modalsKeydownBound);
-		console.log('[modals] initializing with CSS-state sync + delegated bindings');
+		console.log('[modals] initializing');
 
 		const sel = {
 			trigger: '[data-modal-trigger]',
@@ -364,7 +364,7 @@
 			bg: '[data-modal-bg]',
 			inner: '[data-modal-inner]',
 			close: '[data-modal-close]',
-			scrollAny: '[data-modal-scroll]'
+			scrollAny: '[data-modal-scroll]',
 		};
 
 		const syncCssState = ($modal, open, id) => {
@@ -373,7 +373,6 @@
 			[$modal[0], $inner[0], $bg[0]].filter(Boolean).forEach(el => {
 				open ? el.classList.add('is-open') : el.classList.remove('is-open');
 			});
-			console.log(`[modals:${id}] syncCssState -> ${open} (bg:${$bg.length})`);
 		};
 
 		const createModal = (id) => {
@@ -387,13 +386,18 @@
 			const $anim = $inner.length ? $inner : $modal;
 
 			let lastActiveEl = null;
+			let closing = false;
+			let closingTl = null;
 
-			const ensureTabIndex = (el) => { if (el && !el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1'); };
+			const ensureTabIndex = (el) => {
+				if (el && !el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
+			};
+
 			const focusModal = () => {
 				const node = ($inner[0] || $modal[0]);
 				if (!node) return;
 				ensureTabIndex(node);
-				try { node.focus({ preventScroll: true }); } catch { try { node.focus(); } catch (_) { } }
+				try { node.focus({ preventScroll: true }); } catch { try { node.focus(); } catch { } }
 			};
 
 			const onKeydownTrap = (e) => {
@@ -412,7 +416,6 @@
 				else gsap.set($anim[0], { clearProps: 'will-change' });
 			};
 
-			// Resolve scroll container *lazily* (works after AJAX injection)
 			const resolveScrollContainer = () => {
 				const $global = $(`[data-modal-scroll="${id}"]`).first();
 				if ($global.length) return $global[0];
@@ -429,7 +432,7 @@
 					} else {
 						target = $modal.find(`[id="${hash.replace(/"/g, '\\"')}"]`).first()[0] || null;
 					}
-				} catch (_) { target = null; }
+				} catch { target = null; }
 				if (!target) return;
 
 				const container = resolveScrollContainer();
@@ -444,7 +447,6 @@
 				try { container.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' }); }
 				catch { container.scrollTop = Math.max(0, nextTop); }
 
-				// Briefly guard body scroll while smooth scroll runs
 				const guard = (ev) => { if (!container.contains(ev.target)) { try { ev.preventDefault(); } catch { } } };
 				window.addEventListener('wheel', guard, { capture: true, passive: false });
 				window.addEventListener('touchmove', guard, { capture: true, passive: false });
@@ -454,7 +456,6 @@
 				}, 900);
 			};
 
-			// Delegate anchor clicks inside the modal (handles injected content)
 			$modal.on('click.modalAnchors', 'a[href^="#"]', (e) => {
 				const href = (e.currentTarget.getAttribute('href') || '');
 				if (!href || href === '#' || href.length < 2) return;
@@ -465,11 +466,11 @@
 					const u = new URL(window.location.href);
 					u.hash = href.slice(1);
 					window.history.replaceState(window.history.state, '', u.toString());
-				} catch (_) { }
+				} catch { }
 			});
 
 			const open = ({ skipAnimation = false, afterOpen } = {}) => {
-				console.log(`[modals:${id}] open (skipAnimation=${skipAnimation})`);
+				console.log(`[modals:${id}] open (skip=${skipAnimation})`);
 
 				Object.keys(ddg.modals).forEach(k => {
 					if (k !== id && ddg.modals[k]?.isOpen?.()) ddg.modals[k].close({ skipAnimation: true });
@@ -477,7 +478,7 @@
 
 				lastActiveEl = document.activeElement;
 				gsap.killTweensOf([$anim[0], $bg[0]]);
-				syncCssState($modal, true, id); // Ensure visible before anim
+				syncCssState($modal, true, id);
 
 				if (skipAnimation) {
 					gsap.set([$bg[0], $anim[0]], { autoAlpha: 1, y: 0 });
@@ -489,6 +490,7 @@
 
 				setAnimating(true);
 				gsap.set($bg[0], { autoAlpha: 0 });
+
 				gsap.timeline({
 					onComplete: () => {
 						setAnimating(false);
@@ -502,77 +504,44 @@
 					.fromTo($anim[0], { y: 40, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, ease: 'power2.out' }, 0);
 			};
 
-			// add near other locals:
-			let closing = false;
-			let closingTl = null;
-
 			const close = ({ skipAnimation = false, afterClose } = {}) => {
-				if (!$modal.hasClass('is-open')) {
-					console.log(`[modals:${id}] close() aborted — modal not open`);
-					return;
-				}
+				if (!$modal.hasClass('is-open')) return;
+				if (closing) return closingTl;
 
-				// 🔒 Reentrancy guard: once we're closing, ignore any other close() calls
-				if (closing) {
-					console.log(`[modals:${id}] close() ignored — already closing`);
-					return closingTl;
-				}
-
-				console.log(`[modals:${id}] close(skipAnimation=${skipAnimation})`);
+				console.log(`[modals:${id}] close (skip=${skipAnimation})`);
 				closing = true;
 
 				gsap.killTweensOf([$anim[0], $bg[0]]);
 
 				const finish = () => {
-					console.log(`[modals:${id}] finish(): removing modal + inner classes`);
-					// 3️⃣ Remove remaining open classes AFTER the animation
 					[$modal[0], $inner[0]].forEach(el => el?.classList.remove('is-open'));
-
-					// Clear all inline props we touched (modal/inner/bg/anim)
 					gsap.set([$anim[0], $bg[0], $modal[0], $inner[0]], { clearProps: 'all' });
-
 					document.removeEventListener('keydown', onKeydownTrap, true);
 					try { lastActiveEl && lastActiveEl.focus(); } catch { }
 					lastActiveEl = null;
-
 					document.dispatchEvent(new CustomEvent('ddg:modal-closed', { detail: { id } }));
-					console.log(`[modals:${id}] finish(): complete`);
-
 					closing = false;
 					closingTl = null;
 					afterClose && afterClose();
 				};
 
 				if (skipAnimation) {
-					// 1️⃣ Remove bg class first
-					$bg[0]?.classList.remove('is-open');
-					// 2️⃣ Immediately hide visuals
+					$bg[0]?.classList.remove('is-open'); // remove bg first
 					gsap.set([$bg[0], $anim[0]], { autoAlpha: 0, y: 40 });
 					return finish();
 				}
 
 				setAnimating(true);
 
-				// 1️⃣ Remove bg `is-open` first (bg fades away)
-				console.log(`[modals:${id}] removing bg is-open`);
+				// 1) remove bg is-open first
 				$bg[0]?.classList.remove('is-open');
 
-				// 🛡️ Block further clicks (including bg) during the close
+				// block any interactions while closing
 				gsap.set([$modal[0], $inner[0], $bg[0]], { pointerEvents: 'none' });
 
-				// 2️⃣ Animate out (no parent visibility/alpha forcing)
+				// 2) animate out
 				closingTl = gsap.timeline({
-					onStart: () => console.log(`[modals:${id}] animation started`),
-					onUpdate: () => {
-						const animAlpha = gsap.getProperty($anim[0], 'autoAlpha');
-						const bgAlpha = gsap.getProperty($bg[0], 'autoAlpha');
-						console.log(`[modals:${id}] anim tick`, { animAlpha, bgAlpha });
-					},
-					onComplete: () => {
-						console.log(`[modals:${id}] animation complete`);
-						setAnimating(false);
-						finish();
-					}
+					onComplete: () => { setAnimating(false); finish(); }
 				});
 
 				closingTl.to($anim[0], {
@@ -580,14 +549,14 @@
 					autoAlpha: 0,
 					duration: 0.32,
 					ease: 'power2.in',
-					overwrite: 'auto',
+					overwrite: 'auto'
 				}, 0);
 
 				closingTl.to($bg[0], {
 					autoAlpha: 0,
 					duration: 0.18,
 					ease: 'power1.inOut',
-					overwrite: 'auto',
+					overwrite: 'auto'
 				}, 0);
 
 				return closingTl;
@@ -599,28 +568,23 @@
 			ddg.modals[id] = modal;
 
 			const initial = $modal.hasClass('is-open');
-			console.log(`[modals:${id}] initial state is-open=${initial}`);
 			syncCssState($modal, initial, id);
 
 			document.dispatchEvent(new CustomEvent('ddg:modal-created', { detail: id }));
 			return modal;
 		};
 
-		// Expose factory so ajax module can lazily create the modal
 		ddg.__createModal = createModal;
 
-		// Triggers (non-ajax)
 		$(document).on('click.modal', sel.trigger, (e) => {
 			const node = e.currentTarget;
 			if (node.hasAttribute('data-ajax-modal')) return;
 			e.preventDefault();
 			const id = node.getAttribute('data-modal-trigger');
-			console.log('[modals] trigger clicked for', id);
 			const modal = createModal(id);
 			modal?.open();
 		});
 
-		// Close buttons
 		$(document).on('click.modal', sel.close, (e) => {
 			e.preventDefault();
 			const id = e.currentTarget.getAttribute('data-modal-close');
@@ -628,15 +592,12 @@
 			else Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
 		});
 
-		// Backdrop
 		$(document).on('click.modal', sel.bg, (e) => {
 			if (e.target !== e.currentTarget) return;
 			const id = e.currentTarget.getAttribute('data-modal-bg');
-			console.log('[modals] bg clicked for', id);
 			(ddg.modals[id] || createModal(id))?.close();
 		});
 
-		// ESC
 		if (!ddg._modalsKeydownBound) {
 			ddg._modalsKeydownBound = true;
 			$(document).on('keydown.modal', (e) => {
@@ -644,9 +605,7 @@
 			});
 		}
 
-		// Post-init CSS sanity pass
 		requestAnimationFrame(() => {
-			console.log('[modals] post-init CSS sync check');
 			$(sel.modal).each((_, el) => {
 				const id = el.getAttribute('data-modal-el');
 				const open = el.classList.contains('is-open');
@@ -654,7 +613,7 @@
 			});
 		});
 
-		console.log('[modals] initialized with lazy + scroll + delegated bindings');
+		console.log('[modals] ready');
 		document.dispatchEvent(new CustomEvent('ddg:modals-ready'));
 	}
 
@@ -920,83 +879,116 @@
 	function initMarquee(root = document) {
 		console.log('[marquee] init', root);
 
-		const elements = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
-		if (!elements.length) return console.log('[marquee] none found');
+		const els = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
+		if (!els.length) return;
 
-		const BASE_SPEED = 100; // pixels per second (same for all marquees)
+		const baseSpeed = 100; // px/s
+		const accelTime = 1.2; // s to reach full speed
 
-		elements.forEach(el => {
+		function startTween(el) {
+			const { inner, distance, duration } = el.__ddgMarqueeConfig || {};
+			if (!inner) return;
+			el.__ddgMarqueeTween?.kill();
+
+			const tween = gsap.to(inner, {
+				x: -distance,
+				duration,
+				ease: 'none',
+				repeat: -1,
+				paused: true
+			});
+			tween.timeScale(0);
+			gsap.to(tween, { timeScale: 1, duration: accelTime, ease: 'power1.out' });
+			tween.play();
+			el.__ddgMarqueeTween = tween;
+		}
+
+		function build(el) {
+			const inner = el.querySelector('.marquee-inner');
+			if (!inner || !el.offsetParent) return;
+
+			// reset clones
+			while (inner.children.length > 1 && inner.scrollWidth > el.offsetWidth * 2)
+				inner.removeChild(inner.lastChild);
+
+			const width = el.offsetWidth;
+			let contentWidth = inner.scrollWidth;
+			if (!width || !contentWidth) return;
+
+			// duplicate content until 2× container width
+			let i = 0;
+			while (inner.scrollWidth < width * 2 && i++ < 20)
+				Array.from(inner.children).forEach(c => inner.appendChild(c.cloneNode(true)));
+
+			const totalWidth = inner.scrollWidth;
+			const distance = totalWidth / 2;
+			const duration = distance / baseSpeed;
+
+			gsap.set(inner, { x: 0 });
+			el.__ddgMarqueeConfig = { inner, distance, duration };
+			startTween(el);
+		}
+
+		els.forEach(el => {
 			el.setAttribute('data-marquee-init', '');
-			console.log('[marquee] setup', el);
+			el.querySelector('.marquee-inner')?.remove();
 
-			// Wrap existing content
 			const inner = document.createElement('div');
 			inner.className = 'marquee-inner';
 			while (el.firstChild) inner.appendChild(el.firstChild);
 			el.appendChild(inner);
 
-			Object.assign(el.style, {
-				display: 'flex',
-				overflow: 'hidden'
-			});
+			Object.assign(el.style, { overflow: 'hidden' });
 			Object.assign(inner.style, {
 				display: 'flex',
-				gap: 'inherit',
-				width: 'max-content',
+				gap: getComputedStyle(el).gap || '0px',
+				whiteSpace: 'nowrap',
 				willChange: 'transform'
 			});
 
-			let tween = null;
-			let resizeTimer = null;
-
-			function cleanup() {
-				console.log('[marquee] cleanup');
-				if (tween) tween.kill();
-				window.removeEventListener('resize', handleResize);
-				el.__ddgMarqueeCleanup = null;
-			}
-
-			function buildMarquee() {
-				if (tween) tween.kill();
-				if (el.offsetParent === null) return; // skip hidden
-
-				const elWidth = el.offsetWidth;
-				let contentWidth = inner.scrollWidth;
-
-				if (!contentWidth || !elWidth) return;
-				// Duplicate until wider than container * 2 for seamless scroll
-				let iterations = 0;
-				while (inner.scrollWidth < elWidth * 2 && iterations < 50) {
-					Array.from(inner.children).forEach(c => inner.appendChild(c.cloneNode(true)));
-					iterations++;
-				}
-
-				contentWidth = inner.scrollWidth;
-				const distance = contentWidth / 2; // One full cycle
-				const duration = distance / BASE_SPEED; // speed = px/s
-
-				console.log(`[marquee] width:${contentWidth}px duration:${duration}s`);
-
-				gsap.set(inner, { x: 0 });
-				tween = gsap.to(inner, {
-					x: -distance,
-					duration,
-					ease: 'none',
-					repeat: -1
-				});
-			}
-
+			let resizeTimer;
 			function handleResize() {
 				clearTimeout(resizeTimer);
-				resizeTimer = setTimeout(buildMarquee, 250);
+				resizeTimer = setTimeout(() => build(el), 200);
 			}
 
-			buildMarquee();
 			window.addEventListener('resize', handleResize);
-			el.__ddgMarqueeCleanup = cleanup;
+			el.__ddgMarqueeCleanup = () => {
+				el.__ddgMarqueeTween?.kill();
+				window.removeEventListener('resize', handleResize);
+				delete el.__ddgMarqueeTween;
+				delete el.__ddgMarqueeConfig;
+			};
+
+			el.__ddgMarqueeReady = () => build(el);
 		});
 
-		console.log('[marquee] complete');
+		// wait for stable fps before building any marquees
+		let stable = 0, last = performance.now();
+		requestAnimationFrame(function check(now) {
+			const fps = 1000 / (now - last);
+			last = now;
+			stable = fps > 30 ? stable + 1 : 0;
+			if (stable > 10) {
+				console.log('[marquee] stable FPS — building');
+				els.forEach(el => el.__ddgMarqueeReady?.());
+			} else requestAnimationFrame(check);
+		});
+
+		// modal lifecycle integration
+		document.addEventListener('ddg:modal-opened', e => {
+			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
+			if (modal) initMarquee(modal);
+		});
+
+		document.addEventListener('ddg:modal-closed', e => {
+			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
+			if (!modal) return;
+			modal.querySelectorAll('[data-marquee-init]').forEach(el => {
+				try { el.__ddgMarqueeCleanup?.(); } catch { }
+				el.removeAttribute('data-marquee-init');
+			});
+		});
 	}
 
 	ddg.boot = initSite;
