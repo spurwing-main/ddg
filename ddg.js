@@ -59,50 +59,56 @@
 	})();
 
 	// Site boot
-	const initSite = () => {
+	function initSite() {
 		if (data.siteBooted) return;
 		data.siteBooted = true;
 		console.log('[ddg] booting site');
 
-		// Ensure Finsweet Loaded
-		ddg.fs.ensureLoad();
+		queueMicrotask(() => ddg.fs.ensureLoad());
 
-		// On Scroll
-		initNavigation();
+		requestAnimationFrame(() => {
+			initNavigation();
+			initModals();
+			initAjaxModal();
+			initAjaxHome();
+			initMarquee();
+			initComingSoon();
+			initShare();
+			initRandomiseFilters();
+		});
+	}
 
-		// On Hover
-		initComingSoon();
+	function initNavigation() {
+		if (ddg.__navInitialized) return;
+		ddg.__navInitialized = true;
 
-		// On Load
-		initModals();
-		initAjaxModal();
-		initAjaxHome();
-		initMarquee();
-
-		// On Click
-		initShare();
-		initRandomiseFilters();
-	};
-
-	const initNavigation = () => {
-		const navEl = $('.nav')[0];
-		if (!navEl) return;
+		const navEl = document.querySelector('.nav');
+		if (!navEl) return console.warn('[nav] no .nav element found');
+		console.log('[nav] initialized');
 
 		const showThreshold = 50;
 		const hideThreshold = 100;
 		const revealBuffer = 50;
 
-		let lastScrollY = window.scrollY;
+		let lastY = window.scrollY;
 		let revealDistance = 0;
 
+		// Defensive GSAP setup
+		if (typeof ScrollTrigger === 'undefined' || !gsap) {
+			console.warn('[nav] GSAP ScrollTrigger not available');
+			return;
+		}
+
+		// Ensure a ScrollTrigger instance
 		ScrollTrigger.create({
 			trigger: document.body,
 			start: 'top top',
 			end: 'bottom bottom',
 			onUpdate: () => {
-				const y = (window.ScrollTrigger?.scroll?.() ?? window.scrollY);
-				const delta = y - lastScrollY;
+				const y = ScrollTrigger?.scroll?.() ?? window.scrollY;
+				const delta = y - lastY;
 
+				// SCROLL UP / DOWN BEHAVIOR
 				if (y <= showThreshold) {
 					navEl.classList.remove('is-hidden', 'is-past-threshold');
 					revealDistance = 0;
@@ -117,96 +123,108 @@
 					}
 				}
 
+				// STATE TOGGLE
 				navEl.classList.toggle('is-past-threshold', y > hideThreshold);
-				lastScrollY = y;
+
+				lastY = y;
 			}
 		});
-	};
+
+		console.log('[nav] ScrollTrigger active');
+
+		// Cleanup for dynamic environments
+		if (!ddg.__navCleanup) {
+			ddg.__navCleanup = () => {
+				console.log('[nav] cleanup triggered');
+				ScrollTrigger.getAll().forEach(st => {
+					if (st.trigger === document.body) st.kill();
+				});
+			};
+		}
+	}
 
 	function initComingSoon() {
-		const wrapperEl = document.querySelector('.home-list_list');
-		if (!wrapperEl) return;
+		if (ddg.__comingSoonInitialized) return;
+		ddg.__comingSoonInitialized = true;
 
-		const splitLineSel = '.home-list_split-line';
-		const tapeSpeed = 5000;
+		console.log('[comingSoon] initialized');
+
 		const splitSet = (ddg.__comingSoonSplitEls ||= new Set());
+		const lineSel = '.home-list_split-line';
+		const tapeSpeed = 5000;
 
-		const getSplit = (el) => {
+		function getSplit(el) {
 			if (el.__ddgSplit) return el.__ddgSplit;
 			try {
 				const split = SplitText.create(el, {
 					type: 'lines',
 					autoSplit: true,
+					reduceWhiteSpace: true,
 					tag: 'span',
 					linesClass: 'home-list_split-line'
 				});
 				el.__ddgSplit = split;
 				splitSet.add(el);
+				console.log('[comingSoon] split created for', `"${el.textContent.trim()}"`);
 				return split;
 			} catch (e) {
-				console.warn('SplitText error', e);
+				console.warn('[comingSoon] split failed', e);
 				return null;
 			}
-		};
+		}
 
-		const animate = (el, offset) => {
+		function animate(el, offset) {
 			const split = el.__ddgSplit || getSplit(el);
 			if (!split) return;
-			const lines = el.querySelectorAll(splitLineSel);
+			const lines = el.querySelectorAll(lineSel);
 			if (!lines.length) return;
+
+			console.log('[comingSoon] animate', `"${el.textContent.trim()}"`, '→', offset);
 			gsap.killTweensOf(lines);
-			const widths = Array.from(lines, (l) => l.offsetWidth);
+			const widths = Array.from(lines, l => l.offsetWidth);
 			gsap.set(lines, { willChange: 'transform' });
+
 			gsap.to(lines, {
 				'--home-list--tape-r': offset,
-				duration: (i) => widths[i] / tapeSpeed,
-				ease: 'linear',
+				duration: i => widths[i] / tapeSpeed,
+				ease: 'none',
+				overwrite: 'auto',
 				onComplete: () => gsap.set(lines, { clearProps: 'will-change' })
 			});
-		};
+		}
 
-		$(wrapperEl)
-			.on('mouseenter.ddgComingSoon', '.home-list_item', function () {
-				const wrap = this.closest('.home-list_item-wrap');
-				if (!wrap || !wrap.querySelector('[data-coming-soon]')) return;
-				if (this.tagName === 'A' && !this.__ddgCSClickBound) {
-					this.__ddgCSClickBound = true;
-					$(this).one('click.ddgComingSoon', e => e.preventDefault());
+		$(document)
+			.off('.ddgComingSoon')
+			.on('mouseenter.ddgComingSoon', '.home-list_item-wrap', function () {
+				if (!this.querySelector('[data-coming-soon]')) return;
+				const link = this.querySelector('.home-list_item');
+				if (!link) return;
+
+				if (!link.__ddgCSInit) {
+					link.__ddgCSInit = true;
+					if (link.tagName === 'A') $(link).one('click.ddgComingSoon', e => e.preventDefault());
+					console.log('[comingSoon] marked as coming soon:', `"${link.textContent.trim()}"`);
 				}
-				animate(this, 0);
+				animate(link, 0);
 			})
-			.on('mouseleave.ddgComingSoon', '.home-list_item', function () {
-				const wrap = this.closest('.home-list_item-wrap');
-				if (!wrap || !wrap.querySelector('[data-coming-soon]')) return;
-				animate(this, '100%');
+			.on('mouseleave.ddgComingSoon', '.home-list_item-wrap', function () {
+				if (!this.querySelector('[data-coming-soon]')) return;
+				const link = this.querySelector('.home-list_item');
+				if (link) animate(link, '100%');
 			});
 
 		let resizeTimer;
-		const resizeHandler = () => {
+		$(window).on('resize.ddgComingSoon', () => {
 			clearTimeout(resizeTimer);
 			resizeTimer = setTimeout(() => {
+				console.log('[comingSoon] resize → clear splits');
 				for (const el of splitSet) {
 					try { el.__ddgSplit?.revert(); } catch (_) { }
 					delete el.__ddgSplit;
 				}
 				splitSet.clear();
 			}, 200);
-		};
-
-		$(window).on('resize.ddgComingSoon', resizeHandler);
-
-		// Cleanup function
-		if (!ddg.__comingSoonCleanup) {
-			ddg.__comingSoonCleanup = () => {
-				$(wrapperEl).off('.ddgComingSoon');
-				$(window).off('resize.ddgComingSoon', resizeHandler);
-				for (const el of splitSet) {
-					try { el.__ddgSplit?.revert(); } catch (_) { }
-					delete el.__ddgSplit;
-				}
-				splitSet.clear();
-			};
-		}
+		});
 	}
 
 	function initShare() {
@@ -459,11 +477,10 @@
 
 				lastActiveEl = document.activeElement;
 				gsap.killTweensOf([$anim[0], $bg[0]]);
-				syncCssState($modal, true, id); // set classes first
+				syncCssState($modal, true, id); // Ensure visible before anim
 
 				if (skipAnimation) {
-					gsap.set($bg[0], { autoAlpha: 1 });
-					gsap.set($anim[0], { y: 0, autoAlpha: 1 });
+					gsap.set([$bg[0], $anim[0]], { autoAlpha: 1, y: 0 });
 					document.addEventListener('keydown', onKeydownTrap, true);
 					requestAnimationFrame(focusModal);
 					document.dispatchEvent(new CustomEvent('ddg:modal-opened', { detail: { id } }));
@@ -485,33 +502,95 @@
 					.fromTo($anim[0], { y: 40, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, ease: 'power2.out' }, 0);
 			};
 
+			// add near other locals:
+			let closing = false;
+			let closingTl = null;
+
 			const close = ({ skipAnimation = false, afterClose } = {}) => {
-				if (!$modal.hasClass('is-open')) return;
-				console.log(`[modals:${id}] close (skipAnimation=${skipAnimation})`);
+				if (!$modal.hasClass('is-open')) {
+					console.log(`[modals:${id}] close() aborted — modal not open`);
+					return;
+				}
+
+				// 🔒 Reentrancy guard: once we're closing, ignore any other close() calls
+				if (closing) {
+					console.log(`[modals:${id}] close() ignored — already closing`);
+					return closingTl;
+				}
+
+				console.log(`[modals:${id}] close(skipAnimation=${skipAnimation})`);
+				closing = true;
 
 				gsap.killTweensOf([$anim[0], $bg[0]]);
-				if ($bg.length) $bg[0].classList.remove('is-open'); // bg class off immediately
 
 				const finish = () => {
-					$modal[0].classList.remove('is-open');
-					$inner[0] && $inner[0].classList.remove('is-open');
+					console.log(`[modals:${id}] finish(): removing modal + inner classes`);
+					// 3️⃣ Remove remaining open classes AFTER the animation
+					[$modal[0], $inner[0]].forEach(el => el?.classList.remove('is-open'));
+
+					// Clear all inline props we touched (modal/inner/bg/anim)
+					gsap.set([$anim[0], $bg[0], $modal[0], $inner[0]], { clearProps: 'all' });
+
 					document.removeEventListener('keydown', onKeydownTrap, true);
 					try { lastActiveEl && lastActiveEl.focus(); } catch { }
 					lastActiveEl = null;
+
 					document.dispatchEvent(new CustomEvent('ddg:modal-closed', { detail: { id } }));
+					console.log(`[modals:${id}] finish(): complete`);
+
+					closing = false;
+					closingTl = null;
 					afterClose && afterClose();
 				};
 
 				if (skipAnimation) {
-					gsap.set($bg[0], { autoAlpha: 0 });
-					gsap.set($anim[0], { y: 40, autoAlpha: 0 });
+					// 1️⃣ Remove bg class first
+					$bg[0]?.classList.remove('is-open');
+					// 2️⃣ Immediately hide visuals
+					gsap.set([$bg[0], $anim[0]], { autoAlpha: 0, y: 40 });
 					return finish();
 				}
 
 				setAnimating(true);
-				gsap.timeline({ onComplete: () => { setAnimating(false); finish(); } })
-					.to($bg[0], { autoAlpha: 0, duration: 0.15, ease: 'power1.out' }, 0)
-					.to($anim[0], { y: 40, autoAlpha: 0, duration: 0.28, ease: 'power2.inOut' }, 0);
+
+				// 1️⃣ Remove bg `is-open` first (bg fades away)
+				console.log(`[modals:${id}] removing bg is-open`);
+				$bg[0]?.classList.remove('is-open');
+
+				// 🛡️ Block further clicks (including bg) during the close
+				gsap.set([$modal[0], $inner[0], $bg[0]], { pointerEvents: 'none' });
+
+				// 2️⃣ Animate out (no parent visibility/alpha forcing)
+				closingTl = gsap.timeline({
+					onStart: () => console.log(`[modals:${id}] animation started`),
+					onUpdate: () => {
+						const animAlpha = gsap.getProperty($anim[0], 'autoAlpha');
+						const bgAlpha = gsap.getProperty($bg[0], 'autoAlpha');
+						console.log(`[modals:${id}] anim tick`, { animAlpha, bgAlpha });
+					},
+					onComplete: () => {
+						console.log(`[modals:${id}] animation complete`);
+						setAnimating(false);
+						finish();
+					}
+				});
+
+				closingTl.to($anim[0], {
+					y: 40,
+					autoAlpha: 0,
+					duration: 0.32,
+					ease: 'power2.in',
+					overwrite: 'auto',
+				}, 0);
+
+				closingTl.to($bg[0], {
+					autoAlpha: 0,
+					duration: 0.18,
+					ease: 'power1.inOut',
+					overwrite: 'auto',
+				}, 0);
+
+				return closingTl;
 			};
 
 			const isOpen = () => $modal.hasClass('is-open');
@@ -579,8 +658,6 @@
 		document.dispatchEvent(new CustomEvent('ddg:modals-ready'));
 	}
 
-	// initAjaxModal
-	// ==============================
 	function initAjaxModal() {
 		if (ddg._ajaxModalInitialized) return;
 		ddg._ajaxModalInitialized = true;
@@ -595,6 +672,14 @@
 		let storyModal = ddg.modals?.[modalId] || null;
 		const storyCache = new Map();
 		let lock = false;
+
+		// === ADD THIS: delay prefetch activation for 2s after load ===
+		let prefetchEnabled = false;
+		setTimeout(() => {
+			prefetchEnabled = true;
+			console.log('[ajaxModal] prefetch enabled');
+		}, 2000);
+		// =============================================================
 
 		const parseStory = (html) => {
 			try {
@@ -624,7 +709,6 @@
 			});
 		};
 
-		// Ensure URL/title resets **whenever** the story modal closes
 		document.addEventListener('ddg:modal-closed', (ev) => {
 			if (ev.detail?.id !== modalId) return;
 			document.title = originalTitle;
@@ -632,7 +716,6 @@
 			console.log('[ajaxModal] modal closed -> restored home URL/title');
 		});
 
-		// Live click → fetch → inject → open
 		$(document).on('click.ajax', '[data-ajax-modal="link"]', (e) => {
 			const $link = $(e.currentTarget);
 			const linkUrl = $link.attr('href');
@@ -660,7 +743,6 @@
 					const parsed = parseStory(response);
 					if (!parsed.$content) parsed.$content = $("<div class='modal-error'>Failed to load content.</div>");
 					storyCache.set(linkUrl, parsed);
-					console.log('[ajaxModal] injecting content');
 					openStory(linkUrl, parsed.title, parsed.$content);
 					if (parsed.$content?.[0]) { try { initMarquee(parsed.$content[0]); } catch { } }
 				},
@@ -675,6 +757,7 @@
 		// Prefetch on hover/touch (snappy UX)
 		let pfTimer = null;
 		$(document).on('mouseenter.ajax touchstart.ajax', '[data-ajax-modal="link"]', (e) => {
+			if (!prefetchEnabled) return; // 🔒 skip until 2s have passed
 			const url = e.currentTarget.getAttribute('href');
 			if (!url || storyCache.has(url)) return;
 			clearTimeout(pfTimer);
@@ -689,7 +772,6 @@
 			}, 120);
 		});
 
-		// Back/forward: close modal if leaving /stories/*
 		window.addEventListener('popstate', () => {
 			const path = window.location.pathname;
 			const modal = ensureModal();
@@ -700,7 +782,6 @@
 			}
 		});
 
-		// Auto-open when landing on /stories/*
 		document.addEventListener('ddg:modals-ready', () => {
 			const modal = ensureModal();
 			if (!modal) return console.warn('[ajaxModal] story modal not found after ready');
@@ -837,89 +918,85 @@
 	}
 
 	function initMarquee(root = document) {
-		const elements = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
-		elements.forEach((el) => {
-			el.setAttribute('data-marquee-init', '');
-			const duration = 20000;
-			const direction = 'left';
-			const uniqueId = `marquee-${Math.random().toString(36).slice(2, 11)}`;
+		console.log('[marquee] init', root);
 
+		const elements = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
+		if (!elements.length) return console.log('[marquee] none found');
+
+		const BASE_SPEED = 100; // pixels per second (same for all marquees)
+
+		elements.forEach(el => {
+			el.setAttribute('data-marquee-init', '');
+			console.log('[marquee] setup', el);
+
+			// Wrap existing content
 			const inner = document.createElement('div');
 			inner.className = 'marquee-inner';
 			while (el.firstChild) inner.appendChild(el.firstChild);
 			el.appendChild(inner);
 
-			el.style.display = 'flex';
-			el.style.overflow = 'hidden';
-			inner.style.display = 'flex';
-			inner.style.gap = 'inherit';
-			inner.style.width = 'max-content';
+			Object.assign(el.style, {
+				display: 'flex',
+				overflow: 'hidden'
+			});
+			Object.assign(inner.style, {
+				display: 'flex',
+				gap: 'inherit',
+				width: 'max-content',
+				willChange: 'transform'
+			});
 
-			let resizeHandler = null;
-			let mutationObserver = null;
+			let tween = null;
+			let resizeTimer = null;
 
-			const cleanup = () => {
-				if (resizeHandler) {
-					window.removeEventListener('resize', resizeHandler);
-					resizeHandler = null;
-				}
-				if (mutationObserver) {
-					mutationObserver.disconnect();
-					mutationObserver = null;
-				}
-				const style = document.getElementById(`${uniqueId}-style`);
-				if (style) style.remove();
-			};
+			function cleanup() {
+				console.log('[marquee] cleanup');
+				if (tween) tween.kill();
+				window.removeEventListener('resize', handleResize);
+				el.__ddgMarqueeCleanup = null;
+			}
 
-			const update = () => {
-				if (el.offsetParent === null) return;
-				const marqueeWidth = el.offsetWidth;
+			function buildMarquee() {
+				if (tween) tween.kill();
+				if (el.offsetParent === null) return; // skip hidden
+
+				const elWidth = el.offsetWidth;
 				let contentWidth = inner.scrollWidth;
 
-				// Prevent infinite loop - bail if content is empty or too small
-				if (contentWidth === 0 || marqueeWidth === 0) return;
-
+				if (!contentWidth || !elWidth) return;
+				// Duplicate until wider than container * 2 for seamless scroll
 				let iterations = 0;
-				const maxIterations = 50;
-				while (contentWidth < marqueeWidth * 2 && iterations < maxIterations) {
-					const children = Array.from(inner.children);
-					if (children.length === 0) break;
-					children.forEach((child) => inner.appendChild(child.cloneNode(true)));
-					const newWidth = inner.scrollWidth;
-					if (newWidth === contentWidth) break; // No change, prevent infinite loop
-					contentWidth = newWidth;
+				while (inner.scrollWidth < elWidth * 2 && iterations < 50) {
+					Array.from(inner.children).forEach(c => inner.appendChild(c.cloneNode(true)));
 					iterations++;
 				}
 
-				const totalWidth = inner.scrollWidth;
-				const from = direction === 'left' ? 0 : -totalWidth / 2;
-				const to = direction === 'left' ? -totalWidth / 2 : 0;
+				contentWidth = inner.scrollWidth;
+				const distance = contentWidth / 2; // One full cycle
+				const duration = distance / BASE_SPEED; // speed = px/s
 
-				const keyframes = `@keyframes ${uniqueId} { from { transform: translateX(${from}px); } to { transform: translateX(${to}px); } }`;
-				let style = document.getElementById(`${uniqueId}-style`);
-				if (style) style.remove();
-				style = document.createElement('style');
-				style.id = `${uniqueId}-style`;
-				style.textContent = keyframes;
-				document.head.appendChild(style);
+				console.log(`[marquee] width:${contentWidth}px duration:${duration}s`);
 
-				inner.style.animation = `${uniqueId} ${duration}ms linear infinite`;
-			};
-
-			mutationObserver = new MutationObserver((mutations) => {
-				mutations.forEach((mutation) => {
-					if (mutation.attributeName === 'style') update();
+				gsap.set(inner, { x: 0 });
+				tween = gsap.to(inner, {
+					x: -distance,
+					duration,
+					ease: 'none',
+					repeat: -1
 				});
-			});
-			mutationObserver.observe(el, { attributes: true, attributeFilter: ['style'] });
+			}
 
-			update();
-			resizeHandler = update;
-			window.addEventListener('resize', resizeHandler);
+			function handleResize() {
+				clearTimeout(resizeTimer);
+				resizeTimer = setTimeout(buildMarquee, 250);
+			}
 
-			// Store cleanup function on element for manual cleanup if needed
+			buildMarquee();
+			window.addEventListener('resize', handleResize);
 			el.__ddgMarqueeCleanup = cleanup;
 		});
+
+		console.log('[marquee] complete');
 	}
 
 	ddg.boot = initSite;
