@@ -11,30 +11,84 @@
 	gsap.ticker.lagSmoothing(500, 33);
 	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 
-	// Finsweet (ultra-simple KISS version)
 	ddg.fs = (() => {
 		function whenReady() {
-			try { window.FinsweetAttributes?.load?.('list'); } catch { }
 			return new Promise((resolve, reject) => {
-				const t = setTimeout(() => reject(new Error('Finsweet list not ready (timeout)')), 8000);
+				const t = setTimeout(() => reject(new Error('Finsweet list not ready (timeout)')), 10000);
+
+				// Initialize FinsweetAttributes if needed
+				window.FinsweetAttributes ||= []; // Initialize if not present
+
+				// Check if list module is already loaded
 				const mod = window.FinsweetAttributes?.modules?.list;
+				console.log('[ddg.fs] whenReady called, module exists:', !!mod, 'has loading:', !!(mod?.loading));
+
 				if (mod?.loading && typeof mod.loading.then === 'function') {
-					return mod.loading.then(instances => {
+					// Module exists and has a loading promise - use it
+					console.log('[ddg.fs] using existing module loading promise');
+					mod.loading.then((instances) => {
 						clearTimeout(t);
 						const inst = Array.isArray(instances) ? instances[0] : instances;
-						if (inst?.items) resolve(inst);
-						else reject(new Error('No valid Finsweet list instance found'));
-					}).catch(err => {
+						if (inst?.items) {
+							console.log('[ddg.fs] Finsweet list instance ready (from existing module):', inst);
+							resolve(inst);
+						} else {
+							console.warn('[ddg.fs] no valid instance in existing module:', instances);
+							reject(new Error('No valid Finsweet list instance found'));
+						}
+					}).catch((err) => {
 						clearTimeout(t);
 						reject(err);
 					});
+					return;
 				}
-				if (Array.isArray(window.FinsweetAttributes))
-					return window.FinsweetAttributes.push(['list', (arr) => {
-						clearTimeout(t);
-						resolve(arr?.find?.(i => i?.items) || arr?.[0]);
-					}]);
-				reject(new Error('Finsweet list module not found'));
+
+				// Try to load the list attribute if not already loaded
+				try {
+					const loadResult = window.FinsweetAttributes?.load?.('list');
+					if (loadResult && typeof loadResult.then === 'function') {
+						console.log('[ddg.fs] called load(), waiting for result');
+						loadResult.then(() => {
+							// After load completes, check if module now exists
+							const mod = window.FinsweetAttributes?.modules?.list;
+							if (mod?.loading && typeof mod.loading.then === 'function') {
+								mod.loading.then((instances) => {
+									clearTimeout(t);
+									const inst = Array.isArray(instances) ? instances[0] : instances;
+									if (inst?.items) {
+										console.log('[ddg.fs] Finsweet list instance ready (from load):', inst);
+										resolve(inst);
+									} else {
+										reject(new Error('No valid Finsweet list instance found'));
+									}
+								}).catch(reject);
+							} else {
+								clearTimeout(t);
+								reject(new Error('No list module after load'));
+							}
+						}).catch((err) => {
+							clearTimeout(t);
+							reject(err);
+						});
+						return;
+					}
+				} catch (err) {
+					console.warn('[ddg.fs] load() failed:', err);
+				}
+
+				// Fallback: Use the official Finsweet push API for new loads
+				console.log('[ddg.fs] using push API as fallback');
+				window.FinsweetAttributes.push(['list', (instances) => {
+					clearTimeout(t);
+					const inst = Array.isArray(instances) ? instances[0] : instances;
+					if (inst?.items) {
+						console.log('[ddg.fs] Finsweet list instance ready (from push):', inst);
+						resolve(inst);
+					} else {
+						console.warn('[ddg.fs] no valid instance from push:', instances);
+						reject(new Error('No valid Finsweet list instance found'));
+					}
+				}]);
 			});
 		}
 		const restart = () => window.FinsweetAttributes?.modules?.list?.restart?.();
@@ -49,26 +103,6 @@
 		data.siteBooted = true;
 		console.log('[ddg] booting site');
 
-
-		// --- Wait for Finsweet readiness based on context ---
-		if (data.truePath.startsWith('/stories/')) {
-			document.addEventListener('ddg:ajax-home-ready', () => {
-				ddg.fs.whenReady().then(list => {
-					console.log('[ddg] Finsweet list ready (post-ajax-home):', list);
-					document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
-				}).catch(err => {
-					console.warn('[ddg] Finsweet list not ready after ajax-home', err);
-				});
-			}, { once: true });
-		} else {
-			ddg.fs.whenReady().then(list => {
-				console.log('[ddg] Finsweet list ready (home):', list);
-				document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
-			}).catch(err => {
-				console.warn('[ddg] Finsweet list not ready (home)', err);
-			});
-		}
-
 		requestAnimationFrame(() => {
 			initNavigation();
 			initModals();
@@ -78,7 +112,7 @@
 			initComingSoon();
 			initShare();
 			initRandomiseFilters();
-			initGetCurrentItem();
+			initCurrentItemTracker();
 
 		});
 	}
@@ -91,9 +125,9 @@
 		if (!navEl) return console.warn('[nav] no .nav element found');
 		console.log('[nav] initialized');
 
-		const showThreshold = 50;
-		const hideThreshold = 100;
-		const revealBuffer = 50;
+		const showThreshold = 50; // px from top to start hiding nav
+		const hideThreshold = 100; // px scrolled before nav can hide
+		const revealBuffer = 50; // px scroll up needed to reveal nav
 
 		let lastY = window.scrollY;
 		let revealDistance = 0;
@@ -128,7 +162,6 @@
 					}
 				}
 
-				// STATE TOGGLE
 				navEl.classList.toggle('is-past-threshold', y > hideThreshold);
 
 				lastY = y;
@@ -236,7 +269,7 @@
 		if (ddg.__shareInitialized) return;
 		ddg.__shareInitialized = true;
 
-		const sel = { btn: '[data-share]' };
+		const selectors = { btn: '[data-share]' };
 		const shareWebhookUrl = 'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
 		const dailyShareKey = 'share_done_date';
 
@@ -309,7 +342,7 @@
 		});
 
 		// delegated (covers injected content)
-		$(document).off('click.ddgShare').on('click.ddgShare', sel.btn, async (event) => {
+		$(document).off('click.ddgShare').on('click.ddgShare', selectors.btn, async (event) => {
 			const el = event.currentTarget;
 			event.preventDefault();
 
@@ -363,7 +396,7 @@
 		ddg._modalsKeydownBound = Boolean(ddg._modalsKeydownBound);
 		console.log('[modals] initializing');
 
-		const sel = {
+		const selectors = {
 			trigger: '[data-modal-trigger]',
 			modal: '[data-modal-el]',
 			bg: '[data-modal-bg]',
@@ -374,7 +407,7 @@
 
 		const syncCssState = ($modal, open, id) => {
 			const $bg = $(`[data-modal-bg="${id}"]`);
-			const $inner = $modal.find(sel.inner).first();
+			const $inner = $modal.find(selectors.inner).first();
 			[$modal[0], $inner[0], $bg[0]].filter(Boolean).forEach(el => {
 				open ? el.classList.add('is-open') : el.classList.remove('is-open');
 			});
@@ -387,7 +420,7 @@
 			if (!$modal.length) return null;
 
 			const $bg = $(`[data-modal-bg="${id}"]`);
-			const $inner = $modal.find(sel.inner).first();
+			const $inner = $modal.find(selectors.inner).first();
 			const $anim = $inner.length ? $inner : $modal;
 
 			let lastActiveEl = null;
@@ -424,7 +457,7 @@
 			const resolveScrollContainer = () => {
 				const $global = $(`[data-modal-scroll="${id}"]`).first();
 				if ($global.length) return $global[0];
-				const $local = $modal.find(sel.scrollAny).first();
+				const $local = $modal.find(selectors.scrollAny).first();
 				return $local[0] || $inner[0] || $modal[0];
 			};
 
@@ -581,7 +614,7 @@
 
 		ddg.__createModal = createModal;
 
-		$(document).on('click.modal', sel.trigger, (e) => {
+		$(document).on('click.modal', selectors.trigger, (e) => {
 			const node = e.currentTarget;
 			if (node.hasAttribute('data-ajax-modal')) return;
 			e.preventDefault();
@@ -590,14 +623,14 @@
 			modal?.open();
 		});
 
-		$(document).on('click.modal', sel.close, (e) => {
+		$(document).on('click.modal', selectors.close, (e) => {
 			e.preventDefault();
 			const id = e.currentTarget.getAttribute('data-modal-close');
 			if (id) (ddg.modals[id] || createModal(id))?.close();
 			else Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
 		});
 
-		$(document).on('click.modal', sel.bg, (e) => {
+		$(document).on('click.modal', selectors.bg, (e) => {
 			if (e.target !== e.currentTarget) return;
 			const id = e.currentTarget.getAttribute('data-modal-bg');
 			(ddg.modals[id] || createModal(id))?.close();
@@ -611,7 +644,7 @@
 		}
 
 		requestAnimationFrame(() => {
-			$(sel.modal).each((_, el) => {
+			$(selectors.modal).each((_, el) => {
 				const id = el.getAttribute('data-modal-el');
 				const open = el.classList.contains('is-open');
 				syncCssState($(el), open, id);
@@ -628,22 +661,20 @@
 
 		console.log('[ajaxModal] init called');
 
-		const modalId = 'story';
+		const storyModalId = 'story';
 		const $embed = $('[data-ajax-modal="embed"]');
 		const originalTitle = document.title;
 		const homeUrl = '/';
 
-		let storyModal = ddg.modals?.[modalId] || null;
+		let storyModal = ddg.modals?.[storyModalId] || null;
 		const storyCache = new Map();
 		let lock = false;
 
-		// === ADD THIS: delay prefetch activation for 2s after load ===
 		let prefetchEnabled = false;
 		setTimeout(() => {
 			prefetchEnabled = true;
 			console.log('[ajaxModal] prefetch enabled');
 		}, 2000);
-		// =============================================================
 
 		const parseStory = (html) => {
 			try {
@@ -655,7 +686,7 @@
 
 		const ensureModal = () => {
 			if (storyModal && storyModal.$modal?.length) return storyModal;
-			if (ddg.__createModal) storyModal = ddg.__createModal(modalId) || storyModal;
+			if (ddg.__createModal) storyModal = ddg.__createModal(storyModalId) || storyModal;
 			return storyModal;
 		};
 
@@ -678,7 +709,7 @@
 		};
 
 		document.addEventListener('ddg:modal-closed', (ev) => {
-			if (ev.detail?.id !== modalId) return;
+			if (ev.detail?.id !== storyModalId) return;
 			document.title = originalTitle;
 			try { history.pushState({}, '', homeUrl); } catch { }
 			console.log('[ajaxModal] modal closed -> restored home URL/title');
@@ -723,13 +754,13 @@
 		});
 
 		// Prefetch on hover/touch (snappy UX)
-		let pfTimer = null;
+		let prefetchTimer = null;
 		$(document).on('mouseenter.ajax touchstart.ajax', '[data-ajax-modal="link"]', (e) => {
 			if (!prefetchEnabled) return; // 🔒 skip until 2s have passed
 			const url = e.currentTarget.getAttribute('href');
 			if (!url || storyCache.has(url)) return;
-			clearTimeout(pfTimer);
-			pfTimer = setTimeout(() => {
+			clearTimeout(prefetchTimer);
+			prefetchTimer = setTimeout(() => {
 				$.ajax({
 					url, success: (html) => {
 						if (storyCache.has(url)) return;
@@ -804,70 +835,49 @@
 				$target.empty().append($source.html());
 				data.ajaxHomeLoaded = true;
 
-				// --- Improved Finsweet load logic after injection ---
 				console.log('[ajaxHome] injected home list');
-				try {
-					const mod = window.FinsweetAttributes?.modules?.list;
-					if (mod?.loading && typeof mod.loading.then === 'function') {
-						mod.loading.then(instances => {
-							const list = Array.isArray(instances) ? instances[0] : instances;
-							if (!list) return console.warn('[ajaxHome] Finsweet module resolved with no list');
 
-							const fire = (reason) => {
-								console.log(`[ajaxHome] ${reason} — dispatching finsweet-ready`);
-								document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
-							};
-							const hasItems = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
+				// Wait for DOM to settle, then load Finsweet
+				requestAnimationFrame(() => {
+					// Initialize FinsweetAttributes if needed
+					window.FinsweetAttributes ||= []; // Initialize if not present
 
-							if (hasItems) {
-								fire('list ready immediately');
-							} else if (typeof list.addHook === 'function') {
-								console.log('[ajaxHome] list empty — waiting for afterRender...');
-								list.addHook('afterRender', () => {
-									const ok = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
-									if (ok) fire('list populated after render');
+					// Load the list attribute
+					const loadResult = window.FinsweetAttributes?.load?.('list');
+
+					if (loadResult && typeof loadResult.then === 'function') {
+						// Wait for load to complete, then wait for the module's loading promise
+						loadResult.then(() => {
+							const mod = window.FinsweetAttributes?.modules?.list;
+							if (mod?.loading && typeof mod.loading.then === 'function') {
+								// Wait for the actual list instances to load
+								mod.loading.then((instances) => {
+									console.log('[ajaxHome] Finsweet list instances loaded:', instances?.length || 0);
+									document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
+								}).catch((err) => {
+									console.warn('[ajaxHome] Finsweet loading promise failed', err);
+									document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
 								});
 							} else {
-								console.warn('[ajaxHome] list empty and no hook interface');
+								console.log('[ajaxHome] Finsweet load completed, dispatching ready');
+								document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
 							}
+						}).catch((err) => {
+							console.warn('[ajaxHome] Finsweet load failed', err);
+							document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
 						});
 					} else {
-						const loadResult = window.FinsweetAttributes?.load?.('list');
-						loadResult?.then?.(instances => {
-							const list = Array.isArray(instances) ? instances[0] : instances;
-							if (!list) return console.warn('[ajaxHome] Finsweet load() resolved with no list');
-
-							const fire = (reason) => {
-								console.log(`[ajaxHome] ${reason} — dispatching finsweet-ready`);
-								document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
-							};
-							const hasItems = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
-
-							if (hasItems) {
-								fire('load() immediate');
-							} else if (typeof list.addHook === 'function') {
-								console.log('[ajaxHome] load() list empty — waiting for afterRender...');
-								list.addHook('afterRender', () => {
-								 const ok = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
-								 if (ok) fire('load() populated after render');
-								});
-							} else {
-								console.warn('[ajaxHome] load() list empty and no hook interface');
-							}
-						});
+						// Otherwise dispatch immediately
+						console.log('[ajaxHome] dispatching ready event immediately');
+						document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
 					}
-				} catch (err) {
-					console.warn('[ajaxHome] Finsweet load failed', err);
-				}
-
-				document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
-				console.log('[ajaxHome] dispatched ddg:ajax-home-ready');
+				});
 			}
 		});
 	}
 
 	function initRandomiseFilters() {
-		const sel = {
+		const selectors = {
 			list: '[fs-list-element="list"]',
 			form: '[fs-list-element="filters"]',
 			inputs: 'input[type="checkbox"][fs-list-field][fs-list-value]',
@@ -879,11 +889,11 @@
 
 		const apply = (list) => {
 			console.log('[randomfilters] applying...');
-			const listEl = document.querySelector(sel.list);
-			const formEl = document.querySelector(sel.form);
+			const listEl = document.querySelector(selectors.list);
+			const formEl = document.querySelector(selectors.form);
 			if (!listEl || !formEl) return console.warn('[randomfilters] no form/list');
 
-			const checkboxes = [...formEl.querySelectorAll(sel.inputs)]
+			const checkboxes = [...formEl.querySelectorAll(selectors.inputs)]
 				.filter(i => !i.closest('label')?.classList.contains('is-list-emptyfacet'));
 			if (!checkboxes.length) return console.warn('[randomfilters] no checkboxes');
 
@@ -913,7 +923,7 @@
 			if (!cands.length) return console.warn('[randomfilters] no candidates');
 
 			const chosen = cands.slice(0, rand(2, Math.min(5, cands.length)));
-			const clearBtn = formEl.querySelector(sel.clear);
+			const clearBtn = formEl.querySelector(selectors.clear);
 			if (clearBtn) clearBtn.click();
 			else for (const input of checkboxes) {
 				input.checked = false;
@@ -951,7 +961,7 @@
 		};
 
 		document.addEventListener('click', (e) => {
-			const btn = e.target.closest(sel.trigger);
+			const btn = e.target.closest(selectors.trigger);
 			if (!btn) return;
 			e.preventDefault();
 			if (btn.__rfLock) return;
@@ -1065,7 +1075,7 @@
 		requestAnimationFrame(function check(now) {
 			const fps = 1000 / (now - last);
 			last = now;
-			stable = fps > 30 ? stable + 1 : 0;
+			stable = fps > 20 ? stable + 1 : 0;
 			if (stable > 10) {
 				console.log('[marquee] stable FPS — building');
 				els.forEach(el => el.__ddgMarqueeReady?.());
@@ -1088,134 +1098,129 @@
 		});
 	}
 
-function initGetCurrentItem() {
-	const TAG = '[getCurrentItem]';
+	function initCurrentItemTracker() {
+		const logPrefix = '[currentItem]';
 
-	// exported handle
-	ddg.getCurrentItem = ddg.getCurrentItem || { item: null, url: null, list: null };
+		// exported handle
+		ddg.currentItem = ddg.currentItem || { item: null, url: null, list: null };
 
-	let lastKey = null;
-	let pendingUrl = null; // last seen story url (can arrive before list is ready)
+		let lastKey = null;
+		let pendingUrl = null; // last seen story url (can arrive before list is ready)
 
-	// ---- helpers ----
-	function keyFor(item) {
-		return (
-			(item?.slug) ||
-			(item?.fields?.slug?.value) ||
-			(item?.url?.pathname) ||
-			(item?.id) ||
-			''
-		);
-	}
+		// ---- helpers ----
+		function keyFor(item) {
+			return (
+				(item?.slug) ||
+				(item?.fields?.slug?.value) ||
+				(item?.url?.pathname) ||
+				(item?.id) ||
+				''
+			);
+		}
 
-	function findItem(list, urlString) {
-		if (!list) return null;
-		const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
-		if (!items.length) return null;
+		function findItem(list, urlString) {
+			if (!list) return null;
+			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
+			if (!items.length) return null;
 
-		const u = new URL(urlString || window.location.href, window.location.origin);
-		const pathname = u.pathname;
-		const slug = pathname.split('/').filter(Boolean).pop() || '';
+			const u = new URL(urlString || window.location.href, window.location.origin);
+			const pathname = u.pathname;
+			const slug = pathname.split('/').filter(Boolean).pop() || '';
 
-		// 1) strict pathname match
-		let found = items.find(it => {
-			try { return it?.url?.pathname === pathname; }
-			catch { return false; }
-		});
-		if (found) return found;
-
-		// 2) fallback slug match (case-insensitive)
-		if (slug) {
-			const lower = slug.toLowerCase();
-			found = items.find(it => {
-				const s = (typeof it?.slug === 'string' ? it.slug :
-					typeof it?.fields?.slug?.value === 'string' ? it.fields.slug.value : '');
-				return s && s.toLowerCase() === lower;
+			// 1) strict pathname match
+			let found = items.find(it => {
+				try { return it?.url?.pathname === pathname; }
+				catch { return false; }
 			});
+			if (found) return found;
+
+			// 2) fallback slug match (case-insensitive)
+			if (slug) {
+				const lower = slug.toLowerCase();
+				found = items.find(it => {
+					const s = (typeof it?.slug === 'string' ? it.slug :
+						typeof it?.fields?.slug?.value === 'string' ? it.fields.slug.value : '');
+					return s && s.toLowerCase() === lower;
+				});
+			}
+			return found || null;
 		}
-		return found || null;
-	}
 
-	function setCurrent(item, url) {
-		const k = keyFor(item);
-		if (!k) {
-			console.log(`${TAG} no match for`, url);
-			return;
+		function setCurrent(item, url) {
+			const k = keyFor(item);
+			if (!k) {
+				console.log(`${logPrefix} no match for`, url);
+				return;
+			}
+			if (k === lastKey) return; // no change
+
+			lastKey = k;
+			ddg.currentItem.item = item;
+			ddg.currentItem.url = url;
+
+			console.log(`${logPrefix} current item changed →`, k, item);
+			document.dispatchEvent(new CustomEvent('ddg:current-item-changed', {
+				detail: { item, url }
+			}));
 		}
-		if (k === lastKey) return; // no change
 
-		lastKey = k;
-		ddg.getCurrentItem.item = item;
-		ddg.getCurrentItem.url = url;
-
-		console.log(`${TAG} current item changed →`, k, item);
-		document.dispatchEvent(new CustomEvent('ddg:current-item-changed', {
-			detail: { item, url }
-		}));
-	}
-
-	function resolve(srcUrl) {
-		const list = ddg.getCurrentItem.list;
-		const url = srcUrl || pendingUrl || window.location.href;
-		if (!list) {
-			console.log(`${TAG} list not ready yet — waiting...`);
-			return;
+		function resolve(srcUrl) {
+			const list = ddg.currentItem.list;
+			const url = srcUrl || pendingUrl || window.location.href;
+			if (!list) {
+				console.log(`${logPrefix} list not ready yet — waiting...`);
+				return;
+			}
+			const item = findItem(list, url);
+			if (item) {
+				console.log(`${logPrefix} match found for`, new URL(url, window.location.origin).pathname);
+				setCurrent(item, url);
+			} else {
+				console.log(`${logPrefix} no match yet for`, new URL(url, window.location.origin).pathname, '— will retry after render');
+			}
 		}
-		const item = findItem(list, url);
-		if (item) {
-			console.log(`${TAG} match found for`, new URL(url, window.location.origin).pathname);
-			setCurrent(item, url);
-		} else {
-			console.log(`${TAG} no match yet for`, new URL(url, window.location.origin).pathname, '— will retry after render');
-		}
-	}
 
-	// capture early story-opened (can fire before list exists)
-	document.addEventListener('ddg:story-opened', (e) => {
-		pendingUrl = e.detail?.url || window.location.href;
-		console.log(`${TAG} story-opened (global):`, pendingUrl);
-		resolve(pendingUrl);
-	});
+		// capture early story-opened (can fire before list exists)
+		document.addEventListener('ddg:story-opened', (e) => {
+			pendingUrl = e.detail?.url || window.location.href;
+			console.log(`${logPrefix} story-opened (global):`, pendingUrl);
+			resolve(pendingUrl);
+		});
 
-	// try to grab the list immediately
-	ddg.fs.whenReady().then(list => {
-		ddg.getCurrentItem.list = list;
-		console.log(`${TAG} Finsweet list ready immediately`);
-		// re-resolve whenever items render/update
-		if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
-		if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
-		resolve();
-	}).catch(err => {
-		// On direct story pages, the list appears only after ajax-home injects the markup
+		// On story pages, the list comes from ajax-home injection
+		// Set up the listener FIRST to avoid race condition
 		if (window.location.pathname.startsWith('/stories/')) {
+			console.log(`${logPrefix} story page detected, setting up ajax-home-ready listener`);
 			document.addEventListener('ddg:ajax-home-ready', () => {
+				console.log(`${logPrefix} ajax-home-ready received, calling whenReady...`);
 				ddg.fs.whenReady().then(list => {
-					ddg.getCurrentItem.list = list;
-					console.log(`${TAG} Finsweet list ready after ajax-home`);
+					ddg.currentItem.list = list;
+					console.log(`${logPrefix} Finsweet list ready after ajax-home`, list);
 					if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
 					if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
 					resolve();
-				}).catch(err2 => {
-					console.warn(`${TAG} Finsweet list not ready after ajax-home`, err2, '→ forcing reload and retrying once');
-					try { window.FinsweetAttributes?.load?.('list'); } catch {}
-					setTimeout(() => {
-						ddg.fs.whenReady().then(list => {
-							ddg.getCurrentItem.list = list;
-							console.log(`${TAG} Finsweet list ready after forced load`);
-							if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
-							if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
-							resolve();
-						}).catch(err3 => console.warn(`${TAG} still no Finsweet list`, err3));
-					}, 250);
+				}).catch(err => {
+					console.warn(`${logPrefix} Finsweet list not ready after ajax-home`, err);
 				});
 			}, { once: true });
 		} else {
-			console.warn(`${TAG} Finsweet list not ready (home)`, err);
+			// On home page, try to grab the list
+			console.log(`${logPrefix} home page, attempting to get list`);
+			ddg.fs.whenReady().then(list => {
+				ddg.currentItem.list = list;
+				console.log(`${logPrefix} Finsweet list ready on home`);
+				// re-resolve whenever items render/update
+				if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
+				if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
+				resolve();
+			}).catch(err => {
+				// On home page, list might not exist or be needed - that's ok
+				console.log(`${logPrefix} no list on home page (expected if no list element exists)`);
+			});
 		}
-	});
 
-	console.log(`${TAG} initialized`);
-}
+		console.log(`${logPrefix} initialized`);
+	}
 
 	ddg.boot = initSite;
 })();
