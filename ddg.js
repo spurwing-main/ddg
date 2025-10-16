@@ -11,51 +11,36 @@
 	gsap.ticker.lagSmoothing(500, 33);
 	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 
-	// Finsweet
+	// Finsweet (ultra-simple KISS version)
 	ddg.fs = (() => {
-		const state = { firstList: null, queued: [], subscribed: false };
-
-		const ensureFsArray = () => (window.FinsweetAttributes ||= []);
-
-		const setFirst = (inst) => {
-			if (!inst || state.firstList) return;
-			console.log('[fs] set first instance', inst);
-			state.firstList = inst;
-			state.queued.splice(0).forEach(fn => { try { fn(inst); } catch (e) { console.error(e); } });
-		};
-
-		const subscribeOnce = () => {
-			if (state.subscribed) return;
-			state.subscribed = true;
-			console.log('[fs] subscribe to list ready');
-			ensureFsArray().push([
-				'list',
-				(instances) => {
-					const inst = instances?.[0] || instances?.instances?.[0] || instances?.listInstances?.[0] || null;
-					if (inst) setFirst(inst);
-					else console.warn('[fs] no list instance found');
+		function whenReady() {
+			try { window.FinsweetAttributes?.load?.('list'); } catch { }
+			return new Promise((resolve, reject) => {
+				const t = setTimeout(() => reject(new Error('Finsweet list not ready (timeout)')), 8000);
+				const mod = window.FinsweetAttributes?.modules?.list;
+				if (mod?.loading && typeof mod.loading.then === 'function') {
+					return mod.loading.then(instances => {
+						clearTimeout(t);
+						const inst = Array.isArray(instances) ? instances[0] : instances;
+						if (inst?.items) resolve(inst);
+						else reject(new Error('No valid Finsweet list instance found'));
+					}).catch(err => {
+						clearTimeout(t);
+						reject(err);
+					});
 				}
-			]);
-		};
-
-		const ensureLoad = () => {
-			console.log('[fs] ensureLoad');
-			try { ensureFsArray().load?.('list'); } catch (err) { console.warn('[fs] load error', err); }
-		};
-
-		const whenListReady = (fn) => {
-			if (state.firstList) return fn(state.firstList);
-			state.queued.push(fn);
-			subscribeOnce();
-			ensureLoad();
-		};
-
-		const restart = () => {
-			console.log('[fs] restart');
-			window.FinsweetAttributes?.modules?.list?.restart?.();
-		};
-
-		return { whenListReady, restart, ensureLoad };
+				if (Array.isArray(window.FinsweetAttributes))
+					return window.FinsweetAttributes.push(['list', (arr) => {
+						clearTimeout(t);
+						resolve(arr?.find?.(i => i?.items) || arr?.[0]);
+					}]);
+				reject(new Error('Finsweet list module not found'));
+			});
+		}
+		const restart = () => window.FinsweetAttributes?.modules?.list?.restart?.();
+		const onRender = fn => whenReady().then(list => list.addHook?.('afterRender', fn));
+		const watchItems = fn => whenReady().then(list => list.watch?.(() => list.items.value, fn));
+		return { whenReady, restart, onRender, watchItems };
 	})();
 
 	// Site boot
@@ -64,7 +49,28 @@
 		data.siteBooted = true;
 		console.log('[ddg] booting site');
 
-		queueMicrotask(() => ddg.fs.ensureLoad());
+
+		// Use whenReady to log the list instance and ensure readiness
+		ddg.fs.whenReady().then(list => {
+			console.log('[ddg] Finsweet list ready:', list);
+			const fire = () => document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
+			const hasItems = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
+			if (hasItems) {
+				console.log('[ddg] dispatching finsweet-ready (home/immediate)');
+				fire();
+			} else if (typeof list.addHook === 'function') {
+				console.log('[ddg] list empty — waiting for afterRender to dispatch finsweet-ready');
+				list.addHook('afterRender', () => {
+					const ok = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
+					if (ok) {
+						console.log('[ddg] list populated after render — dispatching finsweet-ready (home)');
+						fire();
+					}
+				});
+			}
+		}).catch(err => {
+			console.warn('[ddg] Finsweet list not ready', err);
+		});
 
 		requestAnimationFrame(() => {
 			initNavigation();
@@ -76,7 +82,7 @@
 			initShare();
 			initRandomiseFilters();
 			initRelatedFilters();
-			
+
 		});
 	}
 
@@ -665,6 +671,10 @@
 				afterOpen: () => {
 					if (title) document.title = title;
 					try { history.pushState({ modal: true }, '', url); } catch { }
+					// Local event for listeners that care about the opened story URL
+					document.dispatchEvent(new CustomEvent('ddg:story-opened', {
+						detail: { url }
+					}));
 					console.log('[ajaxModal] openStory -> updated history', url);
 				}
 			});
@@ -743,19 +753,42 @@
 			}
 		});
 
-		document.addEventListener('ddg:modals-ready', () => {
+		const tryOpenDirectStory = () => {
 			const modal = ensureModal();
 			if (!modal) return console.warn('[ajaxModal] story modal not found after ready');
-			if (window.location.pathname.startsWith('/stories/')) {
-				modal.open({
-					skipAnimation: true, afterOpen: () => {
-						try { history.replaceState({ modal: true }, '', window.location.href); } catch { }
-					}
-				});
-			}
-		}, { once: true });
 
-		console.log('[ajaxModal] waiting for ddg:modals-ready');
+			if (!window.location.pathname.startsWith('/stories/')) return;
+
+			const url = window.location.href;
+			const after = () => {
+				try { history.replaceState({ modal: true }, '', url); } catch { }
+				document.dispatchEvent(new CustomEvent('ddg:story-opened', { detail: { url } }));
+			};
+
+			if (modal.isOpen()) {
+				console.log('[ajaxModal] direct story detected — modal already open, dispatching story-opened');
+				after();
+			} else {
+				console.log('[ajaxModal] direct story detected — opening modal (skipAnimation)');
+				modal.open({ skipAnimation: true, afterOpen: after });
+			}
+
+			// Safety recheck in case some other script closes it right after load
+			setTimeout(() => {
+				if (!modal.isOpen()) {
+					console.log('[ajaxModal] re-opening story modal after initial close');
+					modal.open({ skipAnimation: true, afterOpen: after });
+				}
+			}, 500);
+		};
+
+		// If modals are already initialized, run immediately; otherwise, wait.
+		if (ddg.__createModal || (ddg.modals && Object.keys(ddg.modals).length)) {
+			tryOpenDirectStory();
+		} else {
+			document.addEventListener('ddg:modals-ready', tryOpenDirectStory, { once: true });
+			console.log('[ajaxModal] waiting for ddg:modals-ready');
+		}
 	}
 
 	function initAjaxHome() {
@@ -774,16 +807,67 @@
 				$target.empty().append($source.html());
 				data.ajaxHomeLoaded = true;
 
+				// --- Improved Finsweet load logic after injection ---
 				console.log('[ajaxHome] injected home list');
-				ddg.fs.ensureLoad();
-				ddg.fs.restart();
-				console.log('[ajaxHome] ensureLoad + restart');
-				
+				try {
+					const mod = window.FinsweetAttributes?.modules?.list;
+					if (mod?.loading && typeof mod.loading.then === 'function') {
+						mod.loading.then(instances => {
+							const list = Array.isArray(instances) ? instances[0] : instances;
+							if (!list) return console.warn('[ajaxHome] Finsweet module resolved with no list');
+
+							const fire = (reason) => {
+								console.log(`[ajaxHome] ${reason} — dispatching finsweet-ready`);
+								document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
+							};
+							const hasItems = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
+
+							if (hasItems) {
+								fire('list ready immediately');
+							} else if (typeof list.addHook === 'function') {
+								console.log('[ajaxHome] list empty — waiting for afterRender...');
+								list.addHook('afterRender', () => {
+									const ok = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
+									if (ok) fire('list populated after render');
+								});
+							} else {
+								console.warn('[ajaxHome] list empty and no hook interface');
+							}
+						});
+					} else {
+						const loadResult = window.FinsweetAttributes?.load?.('list');
+						loadResult?.then?.(instances => {
+							const list = Array.isArray(instances) ? instances[0] : instances;
+							if (!list) return console.warn('[ajaxHome] Finsweet load() resolved with no list');
+
+							const fire = (reason) => {
+								console.log(`[ajaxHome] ${reason} — dispatching finsweet-ready`);
+								document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
+							};
+							const hasItems = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
+
+							if (hasItems) {
+								fire('load() immediate');
+							} else if (typeof list.addHook === 'function') {
+								console.log('[ajaxHome] load() list empty — waiting for afterRender...');
+								list.addHook('afterRender', () => {
+								 const ok = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
+								 if (ok) fire('load() populated after render');
+								});
+							} else {
+								console.warn('[ajaxHome] load() list empty and no hook interface');
+							}
+						});
+					}
+				} catch (err) {
+					console.warn('[ajaxHome] Finsweet load failed', err);
+				}
+
 				document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
 				console.log('[ajaxHome] dispatched ddg:ajax-home-ready');
 			}
 		});
-	};
+	}
 
 	function initRandomiseFilters() {
 		const sel = {
@@ -877,7 +961,18 @@
 			btn.__rfLock = true;
 			setTimeout(() => (btn.__rfLock = false), 250);
 			console.log('[randomfilters] trigger clicked');
-			ddg.fs.whenListReady((list) => apply(list));
+			console.log('[randomfilters] waiting for list...');
+			// Try once, and if it fails, forcibly reload and retry once more
+			ddg.fs.whenReady().then(list => {
+				console.log('[randomfilters] list ready, applying random filters');
+				apply(list);
+			}).catch(err => {
+				console.warn('[randomfilters] list not ready', err, '→ forcing reload and retrying once');
+				try { window.FinsweetAttributes?.load?.('list'); } catch { }
+				setTimeout(() => {
+					ddg.fs.whenReady().then(apply);
+				}, 250);
+			});
 		}, true);
 	}
 
@@ -996,212 +1091,62 @@
 		});
 	}
 
-	function initRelatedFilters() {
-		if (ddg.__relatedInitialized) return;
-		ddg.__relatedInitialized = true;
-
-		const TAG = '[related]';
-		const log = (...a) => console.log(TAG, ...a);
-		const warn = (...a) => console.warn(TAG, ...a);
-
-		// selectors at top
-		const sel = {
-			parent: '[data-relatedfilters="parent"]',
-			target: '[data-relatedfilters="target"]',
-			search: '[data-relatedfilters="search"]',
-			form: '[fs-list-element="filters"]',
-			list: '[fs-list-element="list"]',
-			uiCb: 'input[type="checkbox"][fs-list-field][fs-list-value]',
-			clear: '[fs-list-element="clear"]'
-		};
-
-		// local state
-		const state = {
-			byField: null,       // Map<field, Map<value, input>>
-			wantBuild: false,    // modal opened before home ready
-			builtForPath: null
-		};
-
-		// — helpers — //
-		const currentPath = () => window.location.pathname;
-
-		const findWrapForPath = (path) => {
-			const inList = document.querySelector(`${sel.list} a.home-list_item[href="${path}"]`);
-			const anywhere = inList || document.querySelector(`a.home-list_item[href="${path}"]`);
-			return anywhere ? anywhere.closest('.home-list_item-wrap') : null;
-		};
-
-		const harvestFieldsFromWrap = (wrap) => {
-			const out = new Map(); // field -> Set(values)
-			if (!wrap) return out;
-			wrap.querySelectorAll('[fs-list-field]').forEach(node => {
-				const field = node.getAttribute('fs-list-field');
-				const raw = (node.textContent || '').trim();
-				if (!field || !raw) return;
-				raw.split(',').map(v => v.trim()).filter(Boolean).forEach(val => {
-					if (!out.has(field)) out.set(field, new Set());
-					out.get(field).add(val);
-				});
-			});
-			return out;
-		};
-
-		const indexFilterUi = () => {
-			const form = document.querySelector(sel.form);
-			if (!form) { warn('no filters form'); return false; }
-			const inputs = [...form.querySelectorAll(sel.uiCb)]
-				.filter(i => !i.closest('label')?.classList.contains('is-list-emptyfacet'));
-			if (!inputs.length) { warn('no filter checkboxes'); return false; }
-
-			const byField = new Map();
-			for (const inp of inputs) {
-				const f = inp.getAttribute('fs-list-field');
-				const v = inp.getAttribute('fs-list-value');
-				if (!f || !v) continue;
-				if (!byField.has(f)) byField.set(f, new Map());
-				byField.get(f).set(v, inp);
-			}
-			state.byField = byField;
-			log('indexed filters:', inputs.length, 'inputs across', byField.size, 'fields');
-			return true;
-		};
-
-		const renderRelated = () => {
-			if (!state.byField) {
-				state.wantBuild = true;
-				return log('deferring build until ajax home is ready');
-			}
-
-			const parents = document.querySelectorAll(sel.parent);
-			if (!parents.length) return log('no related parents in DOM');
-
-			const wrap = findWrapForPath(currentPath());
-			if (!wrap) return log('no list item found for current path yet');
-
-			const fieldsMap = harvestFieldsFromWrap(wrap);
-
-			parents.forEach(parent => {
-				// cleanup previous
-				parent.__rfCleanup?.();
-
-				const target = parent.querySelector(sel.target);
-				const btn = parent.querySelector(sel.search);
-				if (!target || !btn) return warn('missing target/search in parent');
-
-				target.innerHTML = '';
-				parent.style.display = '';
-
-				// find values that actually exist in the real UI
-				const picks = [];
-				for (const [field, set] of fieldsMap.entries()) {
-					const map = state.byField.get(field);
-					if (!map) continue;
-					for (const val of set) {
-						if (map.has(val)) picks.push({ field, val });
-						if (picks.length >= 8) break;
-					}
-					if (picks.length >= 8) break;
+function initRelatedFilters() {
+	// Wait for the ddg:finsweet-ready event before running Finsweet-related logic
+	document.addEventListener('ddg:finsweet-ready', function handler() {
+		console.log('[relatedFilters] running after finsweet-ready');
+		function matchPath(list, urlString) {
+			const u = urlString ? new URL(urlString, window.location.origin) : window.location;
+			const currentPath = u.pathname;
+			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
+			const found = items.find(item => {
+				try {
+					return item.url && item.url.pathname === currentPath;
+				} catch {
+					return false;
 				}
-
-				if (!picks.length) {
-					parent.style.display = 'none';
-					return;
-				}
-
-				// template: reuse an existing checkbox label if present, else synthesize
-				const template = parent.__rfTemplate || (() => {
-					const ex = target.querySelector('label.checkbox_field');
-					if (ex) return ex.cloneNode(true);
-					const l = document.createElement('label');
-					l.className = 'checkbox_field';
-					l.innerHTML = '<input type="checkbox" class="u-display-none"><span class="checkbox_label"></span>';
-					return l;
-				})();
-				parent.__rfTemplate = template;
-
-				const frag = document.createDocumentFragment();
-				picks.forEach((p, i) => {
-					const node = template.cloneNode(true);
-					const input = node.querySelector('input[type="checkbox"]');
-					const label = node.querySelector('.checkbox_label');
-					const id = `rf_${p.field}_${i}_${Math.random().toString(36).slice(2, 7)}`;
-					input.id = id;
-					input.setAttribute('fs-list-field', p.field);
-					input.setAttribute('fs-list-value', p.val);
-					label.setAttribute('for', id);
-					label.textContent = p.val;
-
-					node.addEventListener('click', (e) => {
-						if (e.target !== input) { input.checked = !input.checked; e.preventDefault(); }
-						node.classList.toggle('is-list-active', input.checked);
-					});
-
-					frag.appendChild(node);
-				});
-				target.appendChild(frag);
-
-				// bind search (rebind safe)
-				btn.onclick = (e) => {
-					e.preventDefault();
-					const form = document.querySelector(sel.form);
-					if (!form) return warn('no filters form to apply to');
-
-					// clear existing
-					const clearBtn = form.querySelector(sel.clear);
-					if (clearBtn) clearBtn.click();
-					else form.querySelectorAll(sel.uiCb).forEach(i => {
-						i.checked = false;
-						i.closest('label')?.classList.remove('is-list-active');
-						i.dispatchEvent(new Event('change', { bubbles: true }));
-					});
-
-					// apply selections
-					target.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]:checked')
-						.forEach(inp => {
-							const f = inp.getAttribute('fs-list-field');
-							const v = inp.getAttribute('fs-list-value');
-							const real = state.byField.get(f)?.get(v);
-							if (!real) return;
-							real.checked = true;
-							real.closest('label')?.classList.add('is-list-active');
-							real.dispatchEvent(new Event('input', { bubbles: true }));
-							real.dispatchEvent(new Event('change', { bubbles: true }));
-						});
-				};
-
-				parent.__rfCleanup = () => { btn.onclick = null; };
 			});
-
-			state.builtForPath = currentPath();
-			log('built for', state.builtForPath);
-		};
-
-		// — events — //
-		document.addEventListener('ddg:ajax-home-ready', () => {
-			if (indexFilterUi() && state.wantBuild) {
-				log('home ready → running deferred build');
-				renderRelated();
-				state.wantBuild = false;
+			if (found) {
+				console.log('[relatedFilters] path match:', found);
 			} else {
-				log('home ready');
+				console.log('[relatedFilters] no match for path');
 			}
+		}
+		function matchSlug(list, urlString) {
+			const u = urlString ? new URL(urlString, window.location.origin) : window.location;
+			const slug = u.pathname.split('/').filter(Boolean).pop() || '';
+			console.log('[relatedFilters] current slug:', slug);
+			if (!slug) return;
+			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
+			const found = items.find(item => {
+				const itemSlug = (
+					typeof item.slug === 'string' ? item.slug :
+						typeof item.fields?.slug?.value === 'string' ? item.fields.slug.value : ''
+				);
+				return itemSlug && itemSlug.toLowerCase() === slug.toLowerCase();
+			});
+			if (found) {
+				console.log('[relatedFilters] matched item:', found);
+			}
+		}
+		ddg.fs.whenReady().then(list => {
+			// First, try path match and log result
+			matchPath(list);
+			// Then, run slug match as before
+			matchSlug(list);
+			// Update on explicit story-open with URL
+			document.addEventListener('ddg:story-opened', (e) => {
+				const url = e.detail?.url || '';
+				console.log('[relatedFilters] story-opened:', url);
+				matchPath(list, url);
+				matchSlug(list, url);
+			});
+			console.log('[relatedFilters] initialized');
+		}).catch(err => {
+			console.warn('[relatedFilters] Finsweet list not ready', err);
 		});
-
-		document.addEventListener('ddg:modal-opened', (ev) => {
-			if (ev.detail?.id !== 'story') return;
-			log('modal opened → build');
-			renderRelated();
-		});
-
-		document.addEventListener('ddg:modal-closed', (ev) => {
-			if (ev.detail?.id !== 'story') return;
-			log('modal closed → cleanup');
-			document.querySelectorAll(sel.parent).forEach(p => p.__rfCleanup?.());
-			state.builtForPath = null;
-		});
-
-		log('ready (event-driven)');
-	}
+	}, { once: true });
+}
 
 	ddg.boot = initSite;
 })();
