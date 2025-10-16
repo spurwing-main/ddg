@@ -12,89 +12,382 @@
 	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 
 	ddg.fs = (() => {
+		// Memoized promise so we only subscribe once
+		let _promise = null;
+
 		function whenReady() {
-			return new Promise((resolve, reject) => {
-				const t = setTimeout(() => reject(new Error('Finsweet list not ready (timeout)')), 10000);
+			if (_promise) return _promise;
 
-				// Initialize FinsweetAttributes if needed
-				window.FinsweetAttributes ||= []; // Initialize if not present
+			_promise = new Promise((resolve) => {
+				// Ensure FA queue exists
+				window.FinsweetAttributes ||= [];
 
-				// Check if list module is already loaded
+				let done = false;
+					const finish = (instances, label) => {
+						if (done) return;
+						const inst = Array.isArray(instances) ? instances[0] : instances;
+						if (inst && inst.items) {
+							done = true;
+							console.log(`[ddg.fs] list instance ready (${label})`, inst);
+							try { document.dispatchEvent(new CustomEvent('ddg:list-ready', { detail: { list: inst, via: label } })); } catch {}
+							resolve(inst);
+						}
+					};
+
+				// 1) Subscribe FIRST so we never miss late inits
+				try {
+					window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]);
+				} catch (e) {
+					console.warn('[ddg.fs] push subscription failed', e);
+				}
+
+				// 2) If a module exists, hook its loading promise (safe even if already resolved)
 				const mod = window.FinsweetAttributes?.modules?.list;
 				console.log('[ddg.fs] whenReady called, module exists:', !!mod, 'has loading:', !!(mod?.loading));
-
 				if (mod?.loading && typeof mod.loading.then === 'function') {
-					// Module exists and has a loading promise - use it
-					console.log('[ddg.fs] using existing module loading promise');
-					mod.loading.then((instances) => {
-						clearTimeout(t);
-						const inst = Array.isArray(instances) ? instances[0] : instances;
-						if (inst?.items) {
-							console.log('[ddg.fs] Finsweet list instance ready (from existing module):', inst);
-							resolve(inst);
-						} else {
-							console.warn('[ddg.fs] no valid instance in existing module:', instances);
-							reject(new Error('No valid Finsweet list instance found'));
+					mod.loading
+						.then((instances) => finish(instances, 'module.loading'))
+						.catch((err) => console.warn('[ddg.fs] module.loading rejected', err));
+				}
+
+					// 3) Nudge FA to scan (covers ajax-injected DOM) and hook returned promise
+					try {
+						const loadResult = window.FinsweetAttributes.load?.('list');
+						if (loadResult && typeof loadResult.then === 'function') {
+							loadResult.then((instances) => finish(instances, 'load()')).catch(() => {});
 						}
-					}).catch((err) => {
-						clearTimeout(t);
-						reject(err);
+					} catch {}
+					try { window.FinsweetAttributes.modules?.list?.restart?.(); } catch {}
+
+					// 4) Microtask re-check in case module attaches synchronously after load()
+					queueMicrotask(() => {
+						if (done) return;
+						const m = window.FinsweetAttributes?.modules?.list;
+						if (m?.loading && typeof m.loading.then === 'function') {
+							m.loading.then((instances) => finish(instances, 'module.loading (microtask)')).catch(() => {});
+						}
 					});
-					return;
-				}
 
-				// Try to load the list attribute if not already loaded
-				try {
-					const loadResult = window.FinsweetAttributes?.load?.('list');
-					if (loadResult && typeof loadResult.then === 'function') {
-						console.log('[ddg.fs] called load(), waiting for result');
-						loadResult.then(() => {
-							// After load completes, check if module now exists
-							const mod = window.FinsweetAttributes?.modules?.list;
-							if (mod?.loading && typeof mod.loading.then === 'function') {
-								mod.loading.then((instances) => {
-									clearTimeout(t);
-									const inst = Array.isArray(instances) ? instances[0] : instances;
-									if (inst?.items) {
-										console.log('[ddg.fs] Finsweet list instance ready (from load):', inst);
-										resolve(inst);
-									} else {
-										reject(new Error('No valid Finsweet list instance found'));
-									}
-								}).catch(reject);
+					// 5) Patch FA.load so any later load('list') calls also resolve this promise
+					try {
+						const fa = window.FinsweetAttributes;
+						if (fa && !fa.__ddgLoadPatched && typeof fa.load === 'function') {
+							const _origLoad = fa.load.bind(fa);
+							fa.load = function(name, ...args) {
+								const ret = _origLoad(name, ...args);
+								if (name === 'list' && ret && typeof ret.then === 'function') {
+									ret.then((instances) => finish(instances, 'load(patched)')).catch(() => {});
+								}
+								return ret;
+							};
+							fa.__ddgLoadPatched = true;
+						}
+					} catch {}
+
+					// 6) If ajax-home later injects the list, hook that signal as a resolver too
+					try {
+						document.addEventListener('ddg:ajax-home-ready', () => {
+							if (done) return;
+							const m = window.FinsweetAttributes?.modules?.list;
+							if (m?.loading && typeof m.loading.then === 'function') {
+								m.loading.then((instances) => finish(instances, 'module.loading (ajax-home)')).catch(() => {});
 							} else {
-								clearTimeout(t);
-								reject(new Error('No list module after load'));
+								const r = window.FinsweetAttributes.load?.('list');
+								if (r && typeof r.then === 'function') r.then((instances) => finish(instances, 'load(ddg:ajax-home-ready)')).catch(() => {});
 							}
-						}).catch((err) => {
-							clearTimeout(t);
-							reject(err);
-						});
-						return;
-					}
-				} catch (err) {
-					console.warn('[ddg.fs] load() failed:', err);
-				}
-
-				// Fallback: Use the official Finsweet push API for new loads
-				console.log('[ddg.fs] using push API as fallback');
-				window.FinsweetAttributes.push(['list', (instances) => {
-					clearTimeout(t);
-					const inst = Array.isArray(instances) ? instances[0] : instances;
-					if (inst?.items) {
-						console.log('[ddg.fs] Finsweet list instance ready (from push):', inst);
-						resolve(inst);
-					} else {
-						console.warn('[ddg.fs] no valid instance from push:', instances);
-						reject(new Error('No valid Finsweet list instance found'));
-					}
-				}]);
+						}, { once: true });
+					} catch {}
 			});
+
+			return _promise;
 		}
+
 		const restart = () => window.FinsweetAttributes?.modules?.list?.restart?.();
-		const onRender = fn => whenReady().then(list => list.addHook?.('afterRender', fn));
-		const watchItems = fn => whenReady().then(list => list.watch?.(() => list.items.value, fn));
-		return { whenReady, restart, onRender, watchItems };
+		const onRender = fn => whenReady().then(list => list.addHook?.('afterRender', fn)).catch(() => {});
+		const watchItems = fn => whenReady().then(list => list.watch?.(() => list.items.value, fn)).catch(() => {});
+
+		// --- KISS helpers (kept; used across modules) ---
+		const items = (list) => {
+			const v = list?.items;
+			return Array.isArray(v?.value) ? v.value : (Array.isArray(v) ? v : []);
+		};
+
+			const valuesForItem = (item) => {
+				const names = Object.keys(item?.fields || {}).length
+					? Object.keys(item.fields)
+					: Object.keys(item?.fieldElements || {});
+				const out = {};
+				for (const n of names) {
+					const f = item?.fields?.[n];
+					let v = f?.value ?? f?.rawValue ?? [];
+					if (typeof v === 'string') {
+						// Split comma-separated strings into arrays and trim tokens
+						v = v.split(',').map(s => s.trim()).filter(Boolean);
+					}
+					out[n] = Array.isArray(v) ? v : (v == null ? [] : [v]);
+				}
+				return out;
+			};
+
+		async function applyCheckboxFilters(
+			valuesByField,
+			{ formSel='[fs-list-element="filters"]', clearSel='[fs-list-element="clear"]', maxFields=4 } = {}
+		) {
+			const form = document.querySelector(formSel);
+			if (!form) { console.warn('[filters] no form'); return; }
+
+			// Build UI map: field -> (value -> input)
+			const inputs = [...form.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]')]
+				.filter(i => !i.closest('label')?.classList.contains('is-list-emptyfacet'));
+			const byField = new Map();
+			for (const i of inputs) {
+				const f = i.getAttribute('fs-list-field');
+				const v = i.getAttribute('fs-list-value');
+				if (!f || !v) continue;
+				if (!byField.has(f)) byField.set(f, new Map());
+				byField.get(f).set(v, i);
+			}
+
+			// Choose up to maxFields that exist in both the item and UI
+			const picks = [];
+			for (const [field, vals] of Object.entries(valuesByField || {})) {
+				if (picks.length >= maxFields) break;
+				const map = byField.get(field);
+				if (!map) continue;
+				const match = (vals || []).find(v => map.has(v));
+				if (match) picks.push([field, match]);
+			}
+			if (!picks.length) { console.warn('[filters] no matching values to apply'); return; }
+
+			// Clear existing — prefer the clear button, otherwise clear manually
+			const clearBtn = form.querySelector(clearSel);
+			if (clearBtn) {
+				clearBtn.click();
+			} else {
+				for (const i of inputs) {
+					if (i.checked) i.checked = false;
+					i.closest('label')?.classList.remove('is-list-active');
+					i.dispatchEvent(new Event('input',  { bubbles: true }));
+					i.dispatchEvent(new Event('change', { bubbles: true }));
+				}
+			}
+
+			// Click each candidate and mirror UI state
+			for (const [f, v] of picks) {
+				const input = byField.get(f)?.get(v);
+				if (!input) continue;
+				if (!input.checked) input.checked = true;
+				input.closest('label')?.classList.add('is-list-active');
+				input.dispatchEvent(new Event('input',  { bubbles: true }));
+				input.dispatchEvent(new Event('change', { bubbles: true }));
+			}
+
+			// Ask Finsweet to recompute if available
+			try {
+				const list = await whenReady();
+				list.triggerHook?.('filter');
+				list.render?.();
+			} catch {}
+
+			console.log('[filters] applied:', picks.map(([f, v]) => `${f}:${v}`).join(' | '));
+		}
+
+		return { whenReady, restart, onRender, watchItems, items, valuesForItem, applyCheckboxFilters };
+	})();
+
+	// --- Debug helpers (console friendly) ---
+	ddg.debug = (() => {
+		const log = (...a) => console.log('[ddg.debug]', ...a);
+		const sel = {
+			list: '[fs-list-element="list"]',
+			filters: '[fs-list-element="filters"]',
+			clear: '[fs-list-element="clear"]',
+			rfParent: '[data-relatedfilters="parent"]'
+		};
+		const fa = () => window.FinsweetAttributes || [];
+		const mod = () => fa()?.modules?.list;
+
+		function fsStatus() {
+			const m = mod();
+			const listEl = document.querySelector(sel.list);
+			const filtersEl = document.querySelector(sel.filters);
+			const clearEl = document.querySelector(sel.clear);
+			const status = {
+				hasFAArray: Array.isArray(fa()),
+				hasModule: !!m,
+				hasLoadingPromise: !!(m?.loading && typeof m.loading.then === 'function'),
+				hasListElementInDOM: !!listEl,
+				hasFiltersFormInDOM: !!filtersEl,
+				hasClearBtnInDOM: !!clearEl
+			};
+			log('fsStatus:', status, 'module=', m);
+			return status;
+		}
+
+		function fsNudge(times = 3, delay = 150) {
+			let i = 0;
+			log('fsNudge start', { times, delay });
+			const tick = () => {
+				try { mod()?.restart?.(); log('restart() called'); } catch (e) { log('restart() error', e); }
+				try { fa()?.load?.('list'); log('load("list") called'); } catch (e) { log('load("list") error', e); }
+				if (++i < times) setTimeout(tick, delay);
+			};
+			tick();
+		}
+
+		function withTimeout(p, ms = 8000, label = 'wait') {
+			return Promise.race([
+				p,
+				new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' timed out in ' + ms + 'ms')), ms))
+			]);
+		}
+
+		async function waitFs(timeout = 8000) {
+			log('waitFs: awaiting ddg.fs.whenReady with timeout', timeout);
+			try {
+				const list = await withTimeout(ddg.fs.whenReady(), timeout, 'whenReady');
+				log('waitFs: resolved', list);
+				return list;
+			} catch (e) {
+				log('waitFs: FAILED', e);
+				throw e;
+			}
+		}
+
+		async function waitSignals(names = [], timeout = 8000) {
+			log('waitSignals:', names, 'timeout=', timeout);
+			try {
+				const out = await ddg.signals.waitAll(names, timeout);
+				log('waitSignals: resolved', out);
+				return out;
+			} catch (e) {
+				log('waitSignals: FAILED', e);
+				throw e;
+			}
+		}
+
+		async function dumpList(limit = 30) {
+			const list = await ddg.fs.whenReady().catch(() => null);
+			if (!list) { log('dumpList: no list'); return []; }
+			const arr = ddg.fs.items(list).map(it => ({
+				id: it?.id,
+				pathname: it?.url?.pathname,
+				href: it?.url?.href || it?.href,
+				slug: (typeof it?.slug === 'string' ? it.slug : (it?.fields?.slug?.value || null))
+			}));
+			log('dumpList: count=', arr.length, arr.slice(0, limit));
+			return arr.slice(0, limit);
+		}
+
+		async function findByPath(path = window.location.pathname) {
+			const list = await ddg.fs.whenReady().catch(() => null);
+			if (!list) { log('findByPath: no list'); return null; }
+			const p = path.startsWith('/') ? path : '/' + path;
+			const slug = p.split('/').filter(Boolean).pop();
+			const it = ddg.fs.items(list).find(i =>
+				i?.url?.pathname === p ||
+				(typeof i?.slug === 'string' ? i.slug : (i?.fields?.slug?.value || '')).toLowerCase() === slug?.toLowerCase()
+			);
+			log('findByPath:', p, '→', it);
+			return it || null;
+		}
+
+		function watchEvents() {
+			if (ddg.debug._unwatch) { log('watchEvents: already watching'); return ddg.debug._unwatch; }
+			const on = (type, fn, opts) => (document.addEventListener(type, fn, opts), () => document.removeEventListener(type, fn, opts));
+			const offs = [];
+			offs.push(on('ddg:ajax-home-ready', () => log('evt ddg:ajax-home-ready')));
+			offs.push(on('ddg:story-opened', e => log('evt ddg:story-opened', e.detail)));
+			offs.push(on('ddg:current-item-changed', e => log('evt ddg:current-item-changed', { slug: e.detail?.item?.fields?.slug?.value || e.detail?.item?.slug, url: e.detail?.url })));
+			offs.push(on('ddg:modal-opened', e => log('evt ddg:modal-opened', e.detail)));
+			offs.push(on('ddg:modal-closed', e => log('evt ddg:modal-closed', e.detail)));
+			offs.push(on('ddg:ajax-home-injected', () => log('evt ddg:ajax-home-injected')));
+			offs.push(on('ddg:list-ready', e => log('evt ddg:list-ready', !!e.detail?.list)));
+			offs.push(on('ddg:list-rendered', e => log('evt ddg:list-rendered', !!e.detail?.list)));
+			offs.push(on('ddg:signal', e => log('evt ddg:signal', e.detail)));
+
+			log('watchEvents: ON');
+			ddg.debug._unwatch = () => { offs.forEach(off => off()); ddg.debug._unwatch = null; log('watchEvents: OFF'); };
+			return ddg.debug._unwatch;
+		}
+
+		function logSelectors() {
+			const listEl = document.querySelector(sel.list);
+			const filtersEl = document.querySelector(sel.filters);
+			const clearEl = document.querySelector(sel.clear);
+			const info = { hasList: !!listEl, hasFilters: !!filtersEl, hasClear: !!clearEl, listEl, filtersEl, clearEl };
+			log('selectors:', info);
+			return info;
+		}
+
+		async function applySelectedRelated(parentSelector = sel.rfParent) {
+			const parent = document.querySelector(parentSelector);
+			if (!parent) { log('applySelectedRelated: no parent'); return; }
+			const selected = parent.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]:checked');
+			const map = {};
+			selected.forEach((el) => {
+				const f = el.getAttribute('fs-list-field');
+				const v = el.getAttribute('fs-list-value');
+				if (!f || !v) return;
+				(map[f] ||= []).push(v);
+			});
+			log('applySelectedRelated: selections', map);
+			if (!Object.keys(map).length) { log('applySelectedRelated: nothing selected'); return; }
+			await ddg.fs.applyCheckboxFilters(map);
+			log('applySelectedRelated: applied');
+		}
+
+		function buildRelatedNow() {
+			const detail = ddg.currentItem || {};
+			log('buildRelatedNow: dispatching ddg:current-item-changed with', detail);
+			document.dispatchEvent(new CustomEvent('ddg:current-item-changed', { detail }));
+		}
+
+		function clickRandom() {
+			log('clickRandom: clicking [data-randomfilters]');
+			document.querySelector('[data-randomfilters]')?.click();
+		}
+
+		function traceFA() {
+			const faObj = fa();
+			if (!faObj) { log('traceFA: no FA object'); return; }
+			if (!faObj.__traced) {
+				const origLoad = faObj.load?.bind(faObj);
+				if (origLoad) {
+					faObj.load = function(...args) {
+						log('FA.load called', args);
+						try { return origLoad(...args).then(r => (log('FA.load resolved', args), r)).catch(e => (log('FA.load rejected', e), Promise.reject(e))); }
+						catch (e) { log('FA.load threw', e); throw e; }
+					};
+				}
+				try {
+					const m = mod();
+					if (m?.restart) {
+						const origRestart = m.restart.bind(m);
+						m.restart = function(...args) { log('FA.modules.list.restart called', args); return origRestart(...args); };
+					}
+				} catch {}
+				faObj.__traced = true;
+				log('traceFA: enabled');
+			} else {
+				log('traceFA: already enabled');
+			}
+		}
+
+		return {
+			fsStatus,
+			fsNudge,
+			waitFs,
+			waitSignals,
+			dumpList,
+			findByPath,
+			watchEvents,
+			logSelectors,
+			applySelectedRelated,
+			buildRelatedNow,
+			clickRandom,
+			traceFA
+		};
 	})();
 
 	// Site boot
@@ -106,15 +399,15 @@
 		requestAnimationFrame(() => {
 			initNavigation();
 			initModals();
+			// Ensure listeners are ready before ajaxModal emits events
+			initCurrentItemTracker();
+			initRelatedFilters();
 			initAjaxModal();
 			initAjaxHome();
 			initMarquee();
 			initComingSoon();
 			initShare();
 			initRandomiseFilters();
-			initCurrentItemTracker();
-			initRelatedFilters();
-
 		});
 	}
 
@@ -667,6 +960,10 @@
 		const originalTitle = document.title;
 		const homeUrl = '/';
 
+		const dispatchStoryOpened = (url) => queueMicrotask(() => {
+			try { document.dispatchEvent(new CustomEvent('ddg:story-opened', { detail: { url } })); } catch { }
+		});
+
 		let storyModal = ddg.modals?.[storyModalId] || null;
 		const storyCache = new Map();
 		let lock = false;
@@ -700,10 +997,10 @@
 				afterOpen: () => {
 					if (title) document.title = title;
 					try { history.pushState({ modal: true }, '', url); } catch { }
-					// Local event for listeners that care about the opened story URL
-					document.dispatchEvent(new CustomEvent('ddg:story-opened', {
-						detail: { url }
-					}));
+					// Emit once the FA list is ready so currentItem resolves deterministically.
+					ddg.fs.whenReady()
+						.then(() => dispatchStoryOpened(url))
+						.catch(() => dispatchStoryOpened(url));
 					console.log('[ajaxModal] openStory -> updated history', url);
 				}
 			});
@@ -791,7 +1088,9 @@
 			const url = window.location.href;
 			const after = () => {
 				try { history.replaceState({ modal: true }, '', url); } catch { }
-				document.dispatchEvent(new CustomEvent('ddg:story-opened', { detail: { url } }));
+				ddg.fs.whenReady()
+					.then(() => dispatchStoryOpened(url))
+					.catch(() => dispatchStoryOpened(url));
 			};
 
 			if (modal.isOpen()) {
@@ -809,7 +1108,7 @@
 					modal.open({ skipAnimation: true, afterOpen: after });
 				}
 			}, 500);
-		};
+			};
 
 		// If modals are already initialized, run immediately; otherwise, wait.
 		if (ddg.__createModal || (ddg.modals && Object.keys(ddg.modals).length)) {
@@ -838,149 +1137,73 @@
 
 				console.log('[ajaxHome] injected home list');
 
-				// Wait for DOM to settle, then load Finsweet
+				// Let the DOM settle, then nudge FA scan. whenReady() will resolve once FA emits the list instance.
 				requestAnimationFrame(() => {
-					// Initialize FinsweetAttributes if needed
-					window.FinsweetAttributes ||= []; // Initialize if not present
-
-					// Load the list attribute
-					const loadResult = window.FinsweetAttributes?.load?.('list');
-
-					if (loadResult && typeof loadResult.then === 'function') {
-						// Wait for load to complete, then wait for the module's loading promise
-						loadResult.then(() => {
-							const mod = window.FinsweetAttributes?.modules?.list;
-							if (mod?.loading && typeof mod.loading.then === 'function') {
-								// Wait for the actual list instances to load
-								mod.loading.then((instances) => {
-									console.log('[ajaxHome] Finsweet list instances loaded:', instances?.length || 0);
-									document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
-								}).catch((err) => {
-									console.warn('[ajaxHome] Finsweet loading promise failed', err);
-									document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
-								});
-							} else {
-								console.log('[ajaxHome] Finsweet load completed, dispatching ready');
-								document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
-							}
-						}).catch((err) => {
-							console.warn('[ajaxHome] Finsweet load failed', err);
-							document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
-						});
-					} else {
-						// Otherwise dispatch immediately
-						console.log('[ajaxHome] dispatching ready event immediately');
-						document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
-					}
+					window.FinsweetAttributes ||= [];
+					try { window.FinsweetAttributes.load?.('list'); } catch {}
+					try { window.FinsweetAttributes.modules?.list?.restart?.(); } catch {}
+					try { document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready')); } catch {}
 				});
 			}
 		});
 	}
 
 	function initRandomiseFilters() {
-		const selectors = {
-			list: '[fs-list-element="list"]',
-			form: '[fs-list-element="filters"]',
-			inputs: 'input[type="checkbox"][fs-list-field][fs-list-value]',
-			clear: '[fs-list-element="clear"]',
-			trigger: '[data-randomfilters]'
+		const TRIGGER = '[data-randomfilters]';
+
+		// session-scoped shuffle-bag so each click gets a new item (no repeats until we cycle)
+		const state = (ddg._randomFilters ||= { bag: [] });
+
+		const keyOf = (it) => (
+			(it?.url?.pathname) ||
+			(typeof it?.slug === 'string' ? it.slug : (typeof it?.fields?.slug?.value === 'string' ? it.fields.slug.value : null)) ||
+			it?.id || null
+		);
+
+		const rebuildBag = (all, excludeKey) => {
+			const idxs = all.map((_, i) => i).filter(i => keyOf(all[i]) !== excludeKey);
+			// Fisher–Yates shuffle
+			for (let i = idxs.length - 1; i > 0; i--) {
+				const j = Math.floor(Math.random() * (i + 1));
+				[idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+			}
+			state.bag = idxs;
 		};
 
-		const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
-
-		const apply = (list) => {
-			console.log('[randomfilters] applying...');
-			const listEl = document.querySelector(selectors.list);
-			const formEl = document.querySelector(selectors.form);
-			if (!listEl || !formEl) return console.warn('[randomfilters] no form/list');
-
-			const checkboxes = [...formEl.querySelectorAll(selectors.inputs)]
-				.filter(i => !i.closest('label')?.classList.contains('is-list-emptyfacet'));
-			if (!checkboxes.length) return console.warn('[randomfilters] no checkboxes');
-
-			const byField = new Map();
-			for (const input of checkboxes) {
-				const field = input.getAttribute('fs-list-field');
-				const value = input.getAttribute('fs-list-value');
-				if (!field || !value) continue;
-				if (!byField.has(field)) byField.set(field, new Map());
-				byField.get(field).set(value, input);
-			}
-
-			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
-			if (!items.length) return;
-
-			const item = items[rand(0, items.length - 1)];
-			const fields = Object.entries(item.fields || []);
-			const cands = [];
-			for (const [key, f] of fields) {
-				const map = byField.get(key);
-				if (!map) continue;
-				const vals = String(f?.value ?? '').split(',').map(v => v.trim()).filter(v => map.has(v));
-				if (!vals.length) continue;
-				const val = vals[rand(0, vals.length - 1)];
-				cands.push({ key, val, input: map.get(val) });
-			}
-			if (!cands.length) return console.warn('[randomfilters] no candidates');
-
-			const chosen = cands.slice(0, rand(2, Math.min(5, cands.length)));
-			const clearBtn = formEl.querySelector(selectors.clear);
-			if (clearBtn) clearBtn.click();
-			else for (const input of checkboxes) {
-				input.checked = false;
-				input.closest('label')?.classList.remove('is-list-active');
-				input.dispatchEvent(new Event('change', { bubbles: true }));
-			}
-
-			const filters = list.filters?.value || list.filters;
-			if (!filters) return console.warn('[randomfilters] no filters obj');
-			filters.groupsMatch = 'and';
-			filters.groups = [{
-				id: 'random',
-				conditionsMatch: 'and',
-				conditions: chosen.map(({ key, val }, i) => ({
-					id: `rf-${key}-${i}`,
-					type: 'checkbox',
-					fieldKey: key,
-					op: 'equal',
-					value: val,
-					interacted: true
-				}))
-			}];
-
-			list.triggerHook?.('filter');
-			list.render?.();
-
-			for (const { input } of chosen) {
-				input.checked = true;
-				input.closest('label')?.classList.add('is-list-active');
-				input.dispatchEvent(new Event('input', { bubbles: true }));
-				input.dispatchEvent(new Event('change', { bubbles: true }));
-			}
-
-			console.log('[randomfilters] done');
+		const nextIndex = (all) => {
+			const excludeKey = ddg.currentItem?.item ? keyOf(ddg.currentItem.item) : null;
+			if (!Array.isArray(state.bag) || state.bag.length === 0) rebuildBag(all, excludeKey);
+			// if everything was excluded (e.g., only one item), allow all
+			if (state.bag.length === 0) rebuildBag(all, null);
+			return state.bag.shift();
 		};
 
-		document.addEventListener('click', (e) => {
-			const btn = e.target.closest(selectors.trigger);
+		document.addEventListener('click', async (e) => {
+			const btn = e.target.closest(TRIGGER);
 			if (!btn) return;
 			e.preventDefault();
+
+			// simple lock to avoid double fire
 			if (btn.__rfLock) return;
 			btn.__rfLock = true;
-			setTimeout(() => (btn.__rfLock = false), 250);
+			setTimeout(() => { btn.__rfLock = false; }, 250);
+
 			console.log('[randomfilters] trigger clicked');
-			console.log('[randomfilters] waiting for list...');
-			// Try once, and if it fails, forcibly reload and retry once more
-			ddg.fs.whenReady().then(list => {
-				console.log('[randomfilters] list ready, applying random filters');
-				apply(list);
-			}).catch(err => {
-				console.warn('[randomfilters] list not ready', err, '→ forcing reload and retrying once');
-				try { window.FinsweetAttributes?.load?.('list'); } catch { }
-				setTimeout(() => {
-					ddg.fs.whenReady().then(apply);
-				}, 250);
-			});
+
+			try {
+				const list = await ddg.fs.whenReady();
+				const all = ddg.fs.items(list);
+				if (!all.length) return console.warn('[randomfilters] no items');
+
+				const idx = nextIndex(all);
+				const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
+				const values = ddg.fs.valuesForItem(item);
+
+				await ddg.fs.applyCheckboxFilters(values); // find matching checkboxes → clear → click
+				console.log('[randomfilters] picked index', idx, '→ done');
+			} catch (err) {
+				console.warn('[randomfilters] failed', err);
+			}
 		}, true);
 	}
 
@@ -1106,7 +1329,13 @@
 		ddg.currentItem = ddg.currentItem || { item: null, url: null, list: null };
 
 		let lastKey = null;
-		let pendingUrl = null; // last seen story url (can arrive before list is ready)
+		let pendingUrl = null;   // last seen story url (can arrive before list is ready)
+		let hooksBound = false;
+
+		// Reset so a re-open of the same slug re-emits
+		document.addEventListener('ddg:modal-closed', (e) => {
+			if (e.detail?.id === 'story') lastKey = null;
+		});
 
 		// ---- helpers ----
 		function keyFor(item) {
@@ -1148,111 +1377,239 @@
 		}
 
 		function setCurrent(item, url) {
-					const k = keyFor(item);
-					if (!k) {
-						console.log(`${logPrefix} no match for`, url);
-						return;
-					}
-					if (k === lastKey) return; // no change
-		
-					lastKey = k;
-					ddg.currentItem.item = item;
-					ddg.currentItem.url = url;
-		
-					console.log(`${logPrefix} current item changed →`, k, item);
-					document.dispatchEvent(new CustomEvent('ddg:current-item-changed', {
-						detail: { item, url }
-					}));
-				}
-		function resolve(srcUrl) {
-			const list = ddg.currentItem.list;
-			const url = srcUrl || pendingUrl || window.location.href;
-			if (!list) {
-				console.log(`${logPrefix} list not ready yet — waiting...`);
+			const k = keyFor(item);
+			if (!k) {
+				console.log(`${logPrefix} no match for`, url);
 				return;
 			}
-			const item = findItem(list, url);
-			if (item) {
-				console.log(`${logPrefix} match found for`, new URL(url, window.location.origin).pathname);
-				setCurrent(item, url);
-			} else {
-				console.log(`${logPrefix} no match yet for`, new URL(url, window.location.origin).pathname, '— will retry after render');
-			}
+			if (k === lastKey) return; // no change
+
+			lastKey = k;
+			ddg.currentItem.item = item;
+			ddg.currentItem.url = url;
+
+			console.log(`${logPrefix} current item changed →`, k, item);
+			document.dispatchEvent(new CustomEvent('ddg:current-item-changed', {
+				detail: { item, url }
+			}));
+		}
+
+		function bindListHooks(list) {
+			if (hooksBound) return;
+			hooksBound = true;
+			if (typeof list.addHook === 'function') list.addHook('afterRender', () => tryResolve());
+			if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => tryResolve());
+		}
+
+		async function ensureList() {
+			if (ddg.currentItem.list) return ddg.currentItem.list;
+			const list = await ddg.fs.whenReady();
+			ddg.currentItem.list = list;
+			console.log(`${logPrefix} list ready`, list);
+			bindListHooks(list);
+			return list;
+		}
+
+		async function tryResolve(url) {
+			pendingUrl = url || pendingUrl || window.location.href;
+			const list = ddg.currentItem.list || await ensureList();
+			const item = findItem(list, pendingUrl);
+			if (item) setCurrent(item, pendingUrl);
+			else console.log(`${logPrefix} no match yet for`, new URL(pendingUrl, window.location.origin).pathname, '— will retry after render');
 		}
 
 		// capture early story-opened (can fire before list exists)
 		document.addEventListener('ddg:story-opened', (e) => {
 			pendingUrl = e.detail?.url || window.location.href;
 			console.log(`${logPrefix} story-opened (global):`, pendingUrl);
-			resolve(pendingUrl);
+			tryResolve(pendingUrl);
 		});
 
-		// On story pages, the list comes from ajax-home injection
-		// Set up the listener FIRST to avoid race condition
 		if (window.location.pathname.startsWith('/stories/')) {
-			console.log(`${logPrefix} story page detected, setting up ajax-home-ready listener`);
-			document.addEventListener('ddg:ajax-home-ready', () => {
-				console.log(`${logPrefix} ajax-home-ready received, calling whenReady...`);
-				ddg.fs.whenReady().then(list => {
-					ddg.currentItem.list = list;
-					console.log(`${logPrefix} Finsweet list ready after ajax-home`, list);
-					if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
-					if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
-					resolve();
-				}).catch(err => {
-					console.warn(`${logPrefix} Finsweet list not ready after ajax-home`, err);
-				});
-			}, { once: true });
+			console.log(`${logPrefix} story page detected`);
+			// On direct story load: kick both sides; whichever resolves last triggers tryResolve
+			ensureList().then(() => tryResolve());
 		} else {
-			// On home page, try to grab the list
 			console.log(`${logPrefix} home page, attempting to get list`);
-			ddg.fs.whenReady().then(list => {
-				ddg.currentItem.list = list;
-				console.log(`${logPrefix} Finsweet list ready on home`);
-				// re-resolve whenever items render/update
-				if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
-				if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
-				resolve();
-			}).catch(err => {
-				// On home page, list might not exist or be needed - that's ok
-				console.log(`${logPrefix} no list on home page (expected if no list element exists)`);
-			});
+			ensureList().then(() => tryResolve('/'));
 		}
 
 		console.log(`${logPrefix} initialized`);
 	}
 
 	function initRelatedFilters() {
-		console.log('[relatedFilters] initialized');
-
-		const getNames = (item) => {
-			const f = item?.fields || {};
-			const byFields = Reflect.ownKeys(f).filter(k => typeof k === 'string');
-			const byEls = item?.fieldElements ? Object.keys(item.fieldElements) : [];
-			return [...new Set([...byFields, ...byEls])];
+		const SEL = {
+			parent: '[data-relatedfilters="parent"]',
+			target: '[data-relatedfilters="target"]',
+			search: '[data-relatedfilters="search"]',
+			label: 'label[fs-list-emptyfacet]',
+			input: 'input[type="checkbox"][fs-list-field][fs-list-value]',
+			span: '.checkbox_label'
 		};
 
-		const print = (item) => {
-			console.log('--- Related Filter Fields ---');
-			for (const n of getNames(item)) {
-				const v = item.fields?.[n]?.value ?? item.fields?.[n]?.rawValue;
-				if (v == null) continue;
-				console.log('field:', n, 'value:', Array.isArray(v) ? v.join(', ') : v);
+		const EXCLUDE_FIELDS = new Set(['slug', 'name', 'title']);
+
+		console.log('[relatedFilters] ready');
+
+		function hasAnyUsableValues(values) {
+			if (!values) return false;
+			for (const [k, arr] of Object.entries(values)) {
+				if (EXCLUDE_FIELDS.has(k)) continue;
+				if (Array.isArray(arr) && arr.length) return true;
 			}
-			console.log('--------------------------');
-		};
+			return false;
+		}
 
-		const waitAndPrint = (item, tries = 20) => {
-			const has = getNames(item).length > 0;
-			if (has) return print(item);
-			if (tries <= 0) return console.log('[relatedFilters] no field names (after retries)');
-			requestAnimationFrame(() => waitAndPrint(item, tries - 1));
-		};
+		function buildAllWithRetry(item, tries = 20) {
+			const values = ddg.fs.valuesForItem(item);
+			if (hasAnyUsableValues(values)) {
+				document.querySelectorAll(SEL.parent).forEach((parent) => {
+					renderListForItem(parent, values);
+					wireSearch(parent);
+				});
+				return;
+			}
+			if (tries <= 0) {
+				console.warn('[relatedFilters] no usable field values yet (giving up)');
+				return;
+			}
+			requestAnimationFrame(() => buildAllWithRetry(item, tries - 1));
+		}
+
+		function createLabelTemplate() {
+			const label = document.createElement('label');
+			label.className = 'checkbox_field';
+			label.setAttribute('fs-list-emptyfacet', 'add-class');
+			const input = document.createElement('input');
+			input.type = 'checkbox';
+			input.className = 'u-display-none';
+			input.setAttribute('fs-list-field', '');
+			input.setAttribute('fs-list-value', '');
+			const span = document.createElement('span');
+			span.className = 'checkbox_label';
+			label.appendChild(input);
+			label.appendChild(span);
+			return label;
+		}
+
+		function clearTarget(target) {
+			while (target.firstChild) target.removeChild(target.firstChild);
+		}
+
+		function renderListForItem(parent, itemValues) {
+			const target = parent.querySelector(SEL.target);
+			if (!target) return;
+
+			// get a template label if present in DOM, else build one
+			const tpl = target.querySelector(SEL.label) || createLabelTemplate();
+			clearTarget(target);
+
+			let count = 0;
+			for (const [field, arr] of Object.entries(itemValues || {})) {
+				if (!arr || !arr.length) continue;
+				if (EXCLUDE_FIELDS.has(field)) continue;
+				for (const val of Array.from(new Set(arr))) {
+					const clone = tpl.cloneNode(true);
+					const input = clone.querySelector(SEL.input);
+					const span = clone.querySelector(SEL.span);
+					if (!input || !span) continue;
+
+					const id = `rf-${field}-${count++}`;
+					input.id = id;
+					input.name = `rf-${field}`;
+					input.setAttribute('fs-list-field', field);
+					input.setAttribute('fs-list-value', String(val));
+					span.textContent = String(val);
+
+					target.appendChild(clone);
+				}
+			}
+			// ensure selection wiring and initial active classes
+			wireSelectable(parent);
+			const inputs = parent.querySelectorAll(`${SEL.target} ${SEL.input}`);
+			inputs.forEach((i) => {
+				const label = i.closest('label');
+				if (!label) return;
+				label.classList.toggle('is-list-active', i.checked);
+			});
+		}
+
+		function collectSelections(parent) {
+			const selected = parent.querySelectorAll(`${SEL.target} ${SEL.input}:checked`);
+			const map = {};
+			selected.forEach((el) => {
+				const f = el.getAttribute('fs-list-field');
+				const v = el.getAttribute('fs-list-value');
+				if (!f || !v) return;
+				(map[f] ||= []).push(v);
+			});
+			return map;
+		}
+
+		function wireSelectable(parent) {
+			if (parent.__rfSelectableBound) return;
+			parent.__rfSelectableBound = true;
+
+			// Toggle active class when a checkbox changes
+			parent.addEventListener('change', (e) => {
+				const input = e.target;
+				if (!input || !input.matches(SEL.input)) return;
+				const label = input.closest('label');
+				if (!label) return;
+				label.classList.toggle('is-list-active', input.checked);
+			});
+
+			// Initialize current active states (in case of SSR or restored DOM)
+			const inputs = parent.querySelectorAll(`${SEL.target} ${SEL.input}`);
+			inputs.forEach((i) => {
+				const label = i.closest('label');
+				if (!label) return;
+				label.classList.toggle('is-list-active', i.checked);
+			});
+		}
+
+		function wireSearch(parent) {
+			const btn = parent.querySelector(SEL.search);
+			if (!btn || btn.__rfBound) return;
+			btn.__rfBound = true;
+			btn.addEventListener('click', async (e) => {
+				e.preventDefault();
+				const values = collectSelections(parent);
+				if (!Object.keys(values).length) {
+					console.warn('[relatedFilters] nothing selected to apply');
+					return;
+				}
+				try {
+					await ddg.fs.applyCheckboxFilters(values); // this clears then applies
+					// keep local UI in sync (active classes already reflect checked state)
+					const inputs = parent.querySelectorAll(`${SEL.target} ${SEL.input}`);
+					inputs.forEach(i => {
+						const label = i.closest('label');
+						if (!label) return;
+						label.classList.toggle('is-list-active', i.checked);
+					});
+					console.log('[relatedFilters] applied to main filters', values);
+				} catch (err) {
+					console.warn('[relatedFilters] failed to apply', err);
+				}
+			});
+		}
+
+		function buildAll(item) {
+			buildAllWithRetry(item);
+		}
+
+		// Also rebuild when the Finsweet list re-renders (ensures values exist)
+		try {
+			ddg.fs.onRender(() => {
+				if (ddg.currentItem?.item) buildAllWithRetry(ddg.currentItem.item, 8);
+			});
+		} catch {}
 
 		document.addEventListener('ddg:current-item-changed', (e) => {
 			const item = e.detail?.item;
 			if (!item) return console.log('[relatedFilters] no item found');
-			waitAndPrint(item);
+			buildAllWithRetry(item);
 		});
 	}
 
