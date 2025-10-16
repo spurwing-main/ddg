@@ -12,131 +12,138 @@
 	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 
 	ddg.fs = (() => {
-		// Memoized promise so we only subscribe once
-		let _promise = null;
+		let readyPromise = null;
 
 		function whenReady() {
-			if (_promise) return _promise;
+			if (readyPromise) return readyPromise;
 
-			_promise = new Promise((resolve) => {
-				// Ensure FA queue exists
+			readyPromise = new Promise((resolve) => {
 				window.FinsweetAttributes ||= [];
 
 				let done = false;
-					const finish = (instances, label) => {
-						if (done) return;
-						const inst = Array.isArray(instances) ? instances[0] : instances;
-						if (inst && inst.items) {
-							done = true;
-							console.log(`[ddg.fs] list instance ready (${label})`, inst);
-							try { document.dispatchEvent(new CustomEvent('ddg:list-ready', { detail: { list: inst, via: label } })); } catch {}
-							resolve(inst);
-						}
-					};
+				const finish = (instances, label) => {
+					if (done) return;
+					const inst = Array.isArray(instances) ? instances[0] : instances;
+					if (inst && inst.items) {
+						done = true;
+						console.log(`[ddg.fs] list instance ready (${label})`, inst);
+						document.dispatchEvent(new CustomEvent('ddg:list-ready', { detail: { list: inst, via: label } }));
+						resolve(inst);
+					}
+				};
 
-				// 1) Subscribe FIRST so we never miss late inits
-				try {
-					window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]);
-				} catch (e) {
-					console.warn('[ddg.fs] push subscription failed', e);
-				}
+				// (1) Early subscription — never miss push init
+				try { window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]); } catch {}
 
-				// 2) If a module exists, hook its loading promise (safe even if already resolved)
+				// (2) Hook existing module loading
 				const mod = window.FinsweetAttributes?.modules?.list;
-				console.log('[ddg.fs] whenReady called, module exists:', !!mod, 'has loading:', !!(mod?.loading));
-				if (mod?.loading && typeof mod.loading.then === 'function') {
-					mod.loading
-						.then((instances) => finish(instances, 'module.loading'))
-						.catch((err) => console.warn('[ddg.fs] module.loading rejected', err));
-				}
+				if (mod?.loading?.then) mod.loading.then((i) => finish(i, 'module.loading')).catch(() => {});
 
-					// 3) Nudge FA to scan (covers ajax-injected DOM) and hook returned promise
-					try {
-						const loadResult = window.FinsweetAttributes.load?.('list');
-						if (loadResult && typeof loadResult.then === 'function') {
-							loadResult.then((instances) => finish(instances, 'load()')).catch(() => {});
-						}
-					} catch {}
-					try { window.FinsweetAttributes.modules?.list?.restart?.(); } catch {}
+				// (3) Trigger FA load and hook
+				try {
+					const res = window.FinsweetAttributes.load?.('list');
+					if (res?.then) res.then((i) => finish(i, 'load()')).catch(() => {});
+				} catch {}
+				try { window.FinsweetAttributes.modules?.list?.restart?.(); } catch {}
 
-					// 4) Microtask re-check in case module attaches synchronously after load()
-					queueMicrotask(() => {
-						if (done) return;
-						const m = window.FinsweetAttributes?.modules?.list;
-						if (m?.loading && typeof m.loading.then === 'function') {
-							m.loading.then((instances) => finish(instances, 'module.loading (microtask)')).catch(() => {});
-						}
-					});
+				// (4) Patch FA.load for future loads
+				try {
+					const fa = window.FinsweetAttributes;
+					if (fa && !fa.ddgLoadPatched && typeof fa.load === 'function') {
+						const orig = fa.load.bind(fa);
+						fa.load = function(name, ...args) {
+							const ret = orig(name, ...args);
+							if (name === 'list' && ret?.then) ret.then((i) => finish(i, 'load(patched)')).catch(() => {});
+							return ret;
+						};
+						fa.ddgLoadPatched = true;
+					}
+				} catch {}
 
-					// 5) Patch FA.load so any later load('list') calls also resolve this promise
-					try {
-						const fa = window.FinsweetAttributes;
-						if (fa && !fa.__ddgLoadPatched && typeof fa.load === 'function') {
-							const _origLoad = fa.load.bind(fa);
-							fa.load = function(name, ...args) {
-								const ret = _origLoad(name, ...args);
-								if (name === 'list' && ret && typeof ret.then === 'function') {
-									ret.then((instances) => finish(instances, 'load(patched)')).catch(() => {});
-								}
-								return ret;
-							};
-							fa.__ddgLoadPatched = true;
-						}
-					} catch {}
+				// (5) Fallback: detect late-appearing list container (for /stories/ pages)
+				const observer = new MutationObserver(() => {
+					if (done) return observer.disconnect();
+					const listEl = document.querySelector('[fs-list-element="list"]');
+					if (listEl && window.FinsweetAttributes?.modules?.list) {
+						console.log('[ddg.fs] detected late list container → reloading');
+						try {
+							const r = window.FinsweetAttributes.load?.('list');
+							if (r?.then) r.then((i) => finish(i, 'observer')).catch(() => {});
+						} catch {}
+					}
+				});
+				observer.observe(document.body, { childList: true, subtree: true });
 
-					// 6) If ajax-home later injects the list, hook that signal as a resolver too
-					try {
-						document.addEventListener('ddg:ajax-home-ready', () => {
-							if (done) return;
-							const m = window.FinsweetAttributes?.modules?.list;
-							if (m?.loading && typeof m.loading.then === 'function') {
-								m.loading.then((instances) => finish(instances, 'module.loading (ajax-home)')).catch(() => {});
-							} else {
-								const r = window.FinsweetAttributes.load?.('list');
-								if (r && typeof r.then === 'function') r.then((instances) => finish(instances, 'load(ddg:ajax-home-ready)')).catch(() => {});
-							}
-						}, { once: true });
-					} catch {}
+				// (6) React on ajax-home ready
+				document.addEventListener('ddg:ajax-home-ready', () => {
+					const m = window.FinsweetAttributes?.modules?.list;
+					if (m?.loading?.then) m.loading.then((i) => finish(i, 'module.loading (ajax-home)')).catch(() => {});
+					else {
+						const r = window.FinsweetAttributes.load?.('list');
+						if (r?.then) r.then((i) => finish(i, 'load(ddg:ajax-home-ready)')).catch(() => {});
+					}
+				}, { once: true });
 			});
 
-			return _promise;
+			return readyPromise;
 		}
 
-		const restart = () => window.FinsweetAttributes?.modules?.list?.restart?.();
-		const onRender = fn => whenReady().then(list => list.addHook?.('afterRender', fn)).catch(() => {});
-		const watchItems = fn => whenReady().then(list => list.watch?.(() => list.items.value, fn)).catch(() => {});
-
-		// --- KISS helpers (kept; used across modules) ---
 		const items = (list) => {
 			const v = list?.items;
 			return Array.isArray(v?.value) ? v.value : (Array.isArray(v) ? v : []);
 		};
 
-			const valuesForItem = (item) => {
-				const names = Object.keys(item?.fields || {}).length
-					? Object.keys(item.fields)
-					: Object.keys(item?.fieldElements || {});
-				const out = {};
-				for (const n of names) {
-					const f = item?.fields?.[n];
+		const valuesForItem = (item) => {
+			const names = Object.keys(item?.fields || {}).length
+				? Object.keys(item.fields)
+				: Object.keys(item?.fieldElements || {});
+			const out = {};
+			for (const n of names) {
+				const f = item?.fields?.[n];
+				let v = f?.value ?? f?.rawValue ?? [];
+				if (typeof v === 'string') {
+					v = v.split(',').map(s => s.trim()).filter(Boolean);
+				}
+				out[n] = Array.isArray(v) ? v : (v == null ? [] : [v]);
+			}
+			return out;
+		};
+
+		const valuesForItemSafe = (item) => {
+			const out = {};
+
+			// v1: Finsweet's old structure (item.fields with nested value objects)
+			if (item?.fields && Object.keys(item.fields).length) {
+				for (const [n, f] of Object.entries(item.fields)) {
 					let v = f?.value ?? f?.rawValue ?? [];
-					if (typeof v === 'string') {
-						// Split comma-separated strings into arrays and trim tokens
-						v = v.split(',').map(s => s.trim()).filter(Boolean);
-					}
+					if (typeof v === 'string') v = v.split(',').map(s => s.trim()).filter(Boolean);
+					out[n] = Array.isArray(v) ? v : [v];
+				}
+			}
+
+			// v2: fieldData or meta-level values (newer Finsweet versions)
+			else if (item?.fieldData && typeof item.fieldData === 'object') {
+				for (const [n, v] of Object.entries(item.fieldData)) {
 					out[n] = Array.isArray(v) ? v : (v == null ? [] : [v]);
 				}
-				return out;
-			};
+			}
 
-		async function applyCheckboxFilters(
-			valuesByField,
-			{ formSel='[fs-list-element="filters"]', clearSel='[fs-list-element="clear"]', maxFields=4 } = {}
-		) {
+			// v3: fieldElements (Webflow attributes fallback)
+			else if (item?.fieldElements && typeof item.fieldElements === 'object') {
+				for (const [n, el] of Object.entries(item.fieldElements)) {
+					const text = el?.textContent?.trim?.() || '';
+					if (text) out[n] = [text];
+				}
+			}
+
+			return out;
+		};
+
+		async function applyCheckboxFilters(valuesByField, opts = {}) {
+			const { formSel = '[fs-list-element="filters"]', clearSel = '[fs-list-element="clear"]', maxFields = 4, merge = false } = opts;
 			const form = document.querySelector(formSel);
-			if (!form) { console.warn('[filters] no form'); return; }
+			if (!form) return console.warn('[filters] no form found');
 
-			// Build UI map: field -> (value -> input)
 			const inputs = [...form.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]')]
 				.filter(i => !i.closest('label')?.classList.contains('is-list-emptyfacet'));
 			const byField = new Map();
@@ -148,246 +155,73 @@
 				byField.get(f).set(v, i);
 			}
 
-			// Choose up to maxFields that exist in both the item and UI
 			const picks = [];
-			for (const [field, vals] of Object.entries(valuesByField || {})) {
+			for (const [f, vals] of Object.entries(valuesByField || {})) {
 				if (picks.length >= maxFields) break;
-				const map = byField.get(field);
+				const map = byField.get(f);
 				if (!map) continue;
-				const match = (vals || []).find(v => map.has(v));
-				if (match) picks.push([field, match]);
+				const matches = (vals || []).filter(v => map.has(v));
+				for (const m of matches) picks.push([f, m]);
 			}
-			if (!picks.length) { console.warn('[filters] no matching values to apply'); return; }
+			if (!picks.length) return console.warn('[filters] nothing to apply');
 
-			// Clear existing — prefer the clear button, otherwise clear manually
 			const clearBtn = form.querySelector(clearSel);
-			if (clearBtn) {
-				clearBtn.click();
-			} else {
-				for (const i of inputs) {
+			if (!merge) {
+				if (clearBtn) clearBtn.click();
+				else for (const i of inputs) {
 					if (i.checked) i.checked = false;
 					i.closest('label')?.classList.remove('is-list-active');
-					i.dispatchEvent(new Event('input',  { bubbles: true }));
 					i.dispatchEvent(new Event('change', { bubbles: true }));
 				}
 			}
 
-			// Click each candidate and mirror UI state
 			for (const [f, v] of picks) {
 				const input = byField.get(f)?.get(v);
 				if (!input) continue;
-				if (!input.checked) input.checked = true;
+				input.checked = true;
 				input.closest('label')?.classList.add('is-list-active');
-				input.dispatchEvent(new Event('input',  { bubbles: true }));
 				input.dispatchEvent(new Event('change', { bubbles: true }));
 			}
 
-			// Ask Finsweet to recompute if available
 			try {
 				const list = await whenReady();
-				list.triggerHook?.('filter');
-				list.render?.();
-			} catch {}
 
-			console.log('[filters] applied:', picks.map(([f, v]) => `${f}:${v}`).join(' | '));
-		}
+				// ✅ Proper FA v2 structure: one group per field, multiple conditions inside
+				const fieldGroups = Object.entries(valuesByField).map(([field, vals]) => ({
+					id: `auto-${field}`,
+					conditionsMatch: 'or',
+					conditions: vals.map((v, i) => ({
+						id: `auto-${field}-${i}`,
+						type: 'checkbox',
+						fieldKey: field,
+						value: v,
+						op: 'equal',
+						interacted: true,
+					})),
+				}));
 
-		return { whenReady, restart, onRender, watchItems, items, valuesForItem, applyCheckboxFilters };
-	})();
+				list.filters.value = {
+					groupsMatch: 'and',
+					groups: fieldGroups,
+				};
 
-	// --- Debug helpers (console friendly) ---
-	ddg.debug = (() => {
-		const log = (...a) => console.log('[ddg.debug]', ...a);
-		const sel = {
-			list: '[fs-list-element="list"]',
-			filters: '[fs-list-element="filters"]',
-			clear: '[fs-list-element="clear"]',
-			rfParent: '[data-relatedfilters="parent"]'
-		};
-		const fa = () => window.FinsweetAttributes || [];
-		const mod = () => fa()?.modules?.list;
+				await list.triggerHook('filter');
+				list.addHook('afterRender', () => {
+					console.log('[filters] afterRender → items:', list.items.value.length);
+				});
 
-		function fsStatus() {
-			const m = mod();
-			const listEl = document.querySelector(sel.list);
-			const filtersEl = document.querySelector(sel.filters);
-			const clearEl = document.querySelector(sel.clear);
-			const status = {
-				hasFAArray: Array.isArray(fa()),
-				hasModule: !!m,
-				hasLoadingPromise: !!(m?.loading && typeof m.loading.then === 'function'),
-				hasListElementInDOM: !!listEl,
-				hasFiltersFormInDOM: !!filtersEl,
-				hasClearBtnInDOM: !!clearEl
-			};
-			log('fsStatus:', status, 'module=', m);
-			return status;
-		}
-
-		function fsNudge(times = 3, delay = 150) {
-			let i = 0;
-			log('fsNudge start', { times, delay });
-			const tick = () => {
-				try { mod()?.restart?.(); log('restart() called'); } catch (e) { log('restart() error', e); }
-				try { fa()?.load?.('list'); log('load("list") called'); } catch (e) { log('load("list") error', e); }
-				if (++i < times) setTimeout(tick, delay);
-			};
-			tick();
-		}
-
-		function withTimeout(p, ms = 8000, label = 'wait') {
-			return Promise.race([
-				p,
-				new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' timed out in ' + ms + 'ms')), ms))
-			]);
-		}
-
-		async function waitFs(timeout = 8000) {
-			log('waitFs: awaiting ddg.fs.whenReady with timeout', timeout);
-			try {
-				const list = await withTimeout(ddg.fs.whenReady(), timeout, 'whenReady');
-				log('waitFs: resolved', list);
-				return list;
-			} catch (e) {
-				log('waitFs: FAILED', e);
-				throw e;
+				console.log('[filters] applied and data synced with API', list.filters.value);
+			} catch (err) {
+				console.warn('[filters] failed', err);
 			}
+
+			const flat = Object.entries(valuesByField)
+				.map(([f, v]) => `${f}:${v.join(', ')}`)
+				.join(' | ');
+			console.log('[filters] applied:', flat);
 		}
 
-		async function waitSignals(names = [], timeout = 8000) {
-			log('waitSignals:', names, 'timeout=', timeout);
-			try {
-				const out = await ddg.signals.waitAll(names, timeout);
-				log('waitSignals: resolved', out);
-				return out;
-			} catch (e) {
-				log('waitSignals: FAILED', e);
-				throw e;
-			}
-		}
-
-		async function dumpList(limit = 30) {
-			const list = await ddg.fs.whenReady().catch(() => null);
-			if (!list) { log('dumpList: no list'); return []; }
-			const arr = ddg.fs.items(list).map(it => ({
-				id: it?.id,
-				pathname: it?.url?.pathname,
-				href: it?.url?.href || it?.href,
-				slug: (typeof it?.slug === 'string' ? it.slug : (it?.fields?.slug?.value || null))
-			}));
-			log('dumpList: count=', arr.length, arr.slice(0, limit));
-			return arr.slice(0, limit);
-		}
-
-		async function findByPath(path = window.location.pathname) {
-			const list = await ddg.fs.whenReady().catch(() => null);
-			if (!list) { log('findByPath: no list'); return null; }
-			const p = path.startsWith('/') ? path : '/' + path;
-			const slug = p.split('/').filter(Boolean).pop();
-			const it = ddg.fs.items(list).find(i =>
-				i?.url?.pathname === p ||
-				(typeof i?.slug === 'string' ? i.slug : (i?.fields?.slug?.value || '')).toLowerCase() === slug?.toLowerCase()
-			);
-			log('findByPath:', p, '→', it);
-			return it || null;
-		}
-
-		function watchEvents() {
-			if (ddg.debug._unwatch) { log('watchEvents: already watching'); return ddg.debug._unwatch; }
-			const on = (type, fn, opts) => (document.addEventListener(type, fn, opts), () => document.removeEventListener(type, fn, opts));
-			const offs = [];
-			offs.push(on('ddg:ajax-home-ready', () => log('evt ddg:ajax-home-ready')));
-			offs.push(on('ddg:story-opened', e => log('evt ddg:story-opened', e.detail)));
-			offs.push(on('ddg:current-item-changed', e => log('evt ddg:current-item-changed', { slug: e.detail?.item?.fields?.slug?.value || e.detail?.item?.slug, url: e.detail?.url })));
-			offs.push(on('ddg:modal-opened', e => log('evt ddg:modal-opened', e.detail)));
-			offs.push(on('ddg:modal-closed', e => log('evt ddg:modal-closed', e.detail)));
-			offs.push(on('ddg:ajax-home-injected', () => log('evt ddg:ajax-home-injected')));
-			offs.push(on('ddg:list-ready', e => log('evt ddg:list-ready', !!e.detail?.list)));
-			offs.push(on('ddg:list-rendered', e => log('evt ddg:list-rendered', !!e.detail?.list)));
-			offs.push(on('ddg:signal', e => log('evt ddg:signal', e.detail)));
-
-			log('watchEvents: ON');
-			ddg.debug._unwatch = () => { offs.forEach(off => off()); ddg.debug._unwatch = null; log('watchEvents: OFF'); };
-			return ddg.debug._unwatch;
-		}
-
-		function logSelectors() {
-			const listEl = document.querySelector(sel.list);
-			const filtersEl = document.querySelector(sel.filters);
-			const clearEl = document.querySelector(sel.clear);
-			const info = { hasList: !!listEl, hasFilters: !!filtersEl, hasClear: !!clearEl, listEl, filtersEl, clearEl };
-			log('selectors:', info);
-			return info;
-		}
-
-		async function applySelectedRelated(parentSelector = sel.rfParent) {
-			const parent = document.querySelector(parentSelector);
-			if (!parent) { log('applySelectedRelated: no parent'); return; }
-			const selected = parent.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]:checked');
-			const map = {};
-			selected.forEach((el) => {
-				const f = el.getAttribute('fs-list-field');
-				const v = el.getAttribute('fs-list-value');
-				if (!f || !v) return;
-				(map[f] ||= []).push(v);
-			});
-			log('applySelectedRelated: selections', map);
-			if (!Object.keys(map).length) { log('applySelectedRelated: nothing selected'); return; }
-			await ddg.fs.applyCheckboxFilters(map);
-			log('applySelectedRelated: applied');
-		}
-
-		function buildRelatedNow() {
-			const detail = ddg.currentItem || {};
-			log('buildRelatedNow: dispatching ddg:current-item-changed with', detail);
-			document.dispatchEvent(new CustomEvent('ddg:current-item-changed', { detail }));
-		}
-
-		function clickRandom() {
-			log('clickRandom: clicking [data-randomfilters]');
-			document.querySelector('[data-randomfilters]')?.click();
-		}
-
-		function traceFA() {
-			const faObj = fa();
-			if (!faObj) { log('traceFA: no FA object'); return; }
-			if (!faObj.__traced) {
-				const origLoad = faObj.load?.bind(faObj);
-				if (origLoad) {
-					faObj.load = function(...args) {
-						log('FA.load called', args);
-						try { return origLoad(...args).then(r => (log('FA.load resolved', args), r)).catch(e => (log('FA.load rejected', e), Promise.reject(e))); }
-						catch (e) { log('FA.load threw', e); throw e; }
-					};
-				}
-				try {
-					const m = mod();
-					if (m?.restart) {
-						const origRestart = m.restart.bind(m);
-						m.restart = function(...args) { log('FA.modules.list.restart called', args); return origRestart(...args); };
-					}
-				} catch {}
-				faObj.__traced = true;
-				log('traceFA: enabled');
-			} else {
-				log('traceFA: already enabled');
-			}
-		}
-
-		return {
-			fsStatus,
-			fsNudge,
-			waitFs,
-			waitSignals,
-			dumpList,
-			findByPath,
-			watchEvents,
-			logSelectors,
-			applySelectedRelated,
-			buildRelatedNow,
-			clickRandom,
-			traceFA
-		};
+		return { whenReady, items, valuesForItem, valuesForItemSafe, applyCheckboxFilters };
 	})();
 
 	// Site boot
@@ -395,6 +229,17 @@
 		if (data.siteBooted) return;
 		data.siteBooted = true;
 		console.log('[ddg] booting site');
+
+		// Optional: Event sequence logger (helpful for debugging)
+		if (typeof window !== 'undefined' && window.location.hostname === 'localhost' || window.location.search.includes('debug')) {
+			const events = ['ddg:ajax-home-ready', 'ddg:list-ready', 'ddg:story-opened', 'ddg:current-item-changed', 'ddg:modal-opened', 'ddg:modal-closed'];
+			events.forEach(name => {
+				document.addEventListener(name, (e) => {
+					console.log(`🔔 ${name}`, e.detail || '');
+				});
+			});
+			console.log('[ddg] event logger active for:', events.join(', '));
+		}
 
 		requestAnimationFrame(() => {
 			initNavigation();
@@ -407,13 +252,13 @@
 			initMarquee();
 			initComingSoon();
 			initShare();
-			initRandomiseFilters();
+			initRandomizeFilters();
 		});
 	}
 
 	function initNavigation() {
-		if (ddg.__navInitialized) return;
-		ddg.__navInitialized = true;
+		if (ddg.navInitialized) return;
+		ddg.navInitialized = true;
 
 		const navEl = document.querySelector('.nav');
 		if (!navEl) return console.warn('[nav] no .nav element found');
@@ -465,8 +310,8 @@
 		console.log('[nav] ScrollTrigger active');
 
 		// Cleanup for dynamic environments
-		if (!ddg.__navCleanup) {
-			ddg.__navCleanup = () => {
+		if (!ddg.navCleanup) {
+			ddg.navCleanup = () => {
 				console.log('[nav] cleanup triggered');
 				ScrollTrigger.getAll().forEach(st => {
 					if (st.trigger === document.body) st.kill();
@@ -476,17 +321,17 @@
 	}
 
 	function initComingSoon() {
-		if (ddg.__comingSoonInitialized) return;
-		ddg.__comingSoonInitialized = true;
+		if (ddg.comingSoonInitialized) return;
+		ddg.comingSoonInitialized = true;
 
 		console.log('[comingSoon] initialized');
 
-		const splitSet = (ddg.__comingSoonSplitEls ||= new Set());
+		const splitSet = (ddg.comingSoonSplitEls ||= new Set());
 		const lineSel = '.home-list_split-line';
 		const tapeSpeed = 5000;
 
 		function getSplit(el) {
-			if (el.__ddgSplit) return el.__ddgSplit;
+			if (el.ddgSplit) return el.ddgSplit;
 			try {
 				const split = SplitText.create(el, {
 					type: 'lines',
@@ -495,7 +340,7 @@
 					tag: 'span',
 					linesClass: 'home-list_split-line'
 				});
-				el.__ddgSplit = split;
+				el.ddgSplit = split;
 				splitSet.add(el);
 				console.log('[comingSoon] split created for', `"${el.textContent.trim()}"`);
 				return split;
@@ -506,7 +351,7 @@
 		}
 
 		function animate(el, offset) {
-			const split = el.__ddgSplit || getSplit(el);
+			const split = el.ddgSplit || getSplit(el);
 			if (!split) return;
 			const lines = el.querySelectorAll(lineSel);
 			if (!lines.length) return;
@@ -551,8 +396,8 @@
 			resizeTimer = setTimeout(() => {
 				console.log('[comingSoon] resize → clear splits');
 				for (const el of splitSet) {
-					try { el.__ddgSplit?.revert(); } catch (_) { }
-					delete el.__ddgSplit;
+					try { el.ddgSplit?.revert(); } catch (_) { }
+					delete el.ddgSplit;
 				}
 				splitSet.clear();
 			}, 200);
@@ -560,8 +405,8 @@
 	}
 
 	function initShare() {
-		if (ddg.__shareInitialized) return;
-		ddg.__shareInitialized = true;
+		if (ddg.shareInitialized) return;
+		ddg.shareInitialized = true;
 
 		const selectors = { btn: '[data-share]' };
 		const shareWebhookUrl = 'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
@@ -641,9 +486,9 @@
 			event.preventDefault();
 
 			// simple per-button lock
-			if (el.__shareLock) return;
-			el.__shareLock = true;
-			setTimeout(() => { el.__shareLock = false; }, 400);
+			if (el.shareLock) return;
+			el.shareLock = true;
+			setTimeout(() => { el.shareLock = false; }, 400);
 
 			const platform = (el.getAttribute('data-share') || '').toLowerCase();
 			const shareUrl = el.getAttribute('data-share-url') || window.location.href;
@@ -687,7 +532,7 @@
 
 	function initModals() {
 		ddg.modals = ddg.modals || {};
-		ddg._modalsKeydownBound = Boolean(ddg._modalsKeydownBound);
+		ddg.modalsKeydownBound = Boolean(ddg.modalsKeydownBound);
 		console.log('[modals] initializing');
 
 		const selectors = {
@@ -906,7 +751,7 @@
 			return modal;
 		};
 
-		ddg.__createModal = createModal;
+		ddg.createModal = createModal;
 
 		$(document).on('click.modal', selectors.trigger, (e) => {
 			const node = e.currentTarget;
@@ -930,8 +775,8 @@
 			(ddg.modals[id] || createModal(id))?.close();
 		});
 
-		if (!ddg._modalsKeydownBound) {
-			ddg._modalsKeydownBound = true;
+		if (!ddg.modalsKeydownBound) {
+			ddg.modalsKeydownBound = true;
 			$(document).on('keydown.modal', (e) => {
 				if (e.key === 'Escape') Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
 			});
@@ -950,8 +795,8 @@
 	}
 
 	function initAjaxModal() {
-		if (ddg._ajaxModalInitialized) return;
-		ddg._ajaxModalInitialized = true;
+		if (ddg.ajaxModalInitialized) return;
+		ddg.ajaxModalInitialized = true;
 
 		console.log('[ajaxModal] init called');
 
@@ -984,7 +829,7 @@
 
 		const ensureModal = () => {
 			if (storyModal && storyModal.$modal?.length) return storyModal;
-			if (ddg.__createModal) storyModal = ddg.__createModal(storyModalId) || storyModal;
+			if (ddg.createModal) storyModal = ddg.createModal(storyModalId) || storyModal;
 			return storyModal;
 		};
 
@@ -1111,7 +956,7 @@
 			};
 
 		// If modals are already initialized, run immediately; otherwise, wait.
-		if (ddg.__createModal || (ddg.modals && Object.keys(ddg.modals).length)) {
+		if (ddg.createModal || (ddg.modals && Object.keys(ddg.modals).length)) {
 			tryOpenDirectStory();
 		} else {
 			document.addEventListener('ddg:modals-ready', tryOpenDirectStory, { once: true });
@@ -1148,59 +993,55 @@
 		});
 	}
 
-	function initRandomiseFilters() {
-		const TRIGGER = '[data-randomfilters]';
-
-		// session-scoped shuffle-bag so each click gets a new item (no repeats until we cycle)
-		const state = (ddg._randomFilters ||= { bag: [] });
+	function initRandomizeFilters() {
+		const selectors = { trigger: '[data-randomfilters]' };
+		const state = (ddg.randomFilters ||= { bag: [] });
 
 		const keyOf = (it) => (
-			(it?.url?.pathname) ||
-			(typeof it?.slug === 'string' ? it.slug : (typeof it?.fields?.slug?.value === 'string' ? it.fields.slug.value : null)) ||
+			it?.url?.pathname ||
+			it?.slug ||
+			it?.fields?.slug?.value ||
 			it?.id || null
 		);
 
 		const rebuildBag = (all, excludeKey) => {
-			const idxs = all.map((_, i) => i).filter(i => keyOf(all[i]) !== excludeKey);
-			// Fisher–Yates shuffle
-			for (let i = idxs.length - 1; i > 0; i--) {
+			const ids = all.map((_, i) => i).filter(i => keyOf(all[i]) !== excludeKey);
+			for (let i = ids.length - 1; i > 0; i--) {
 				const j = Math.floor(Math.random() * (i + 1));
-				[idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+				[ids[i], ids[j]] = [ids[j], ids[i]];
 			}
-			state.bag = idxs;
+			state.bag = ids;
 		};
 
 		const nextIndex = (all) => {
 			const excludeKey = ddg.currentItem?.item ? keyOf(ddg.currentItem.item) : null;
-			if (!Array.isArray(state.bag) || state.bag.length === 0) rebuildBag(all, excludeKey);
-			// if everything was excluded (e.g., only one item), allow all
-			if (state.bag.length === 0) rebuildBag(all, null);
+			if (!Array.isArray(state.bag) || !state.bag.length) rebuildBag(all, excludeKey);
+			if (!state.bag.length) rebuildBag(all, null);
 			return state.bag.shift();
 		};
 
 		document.addEventListener('click', async (e) => {
-			const btn = e.target.closest(TRIGGER);
+			const btn = e.target.closest(selectors.trigger);
 			if (!btn) return;
 			e.preventDefault();
 
-			// simple lock to avoid double fire
-			if (btn.__rfLock) return;
-			btn.__rfLock = true;
-			setTimeout(() => { btn.__rfLock = false; }, 250);
+			if (btn.rfLock) return;
+			btn.rfLock = true;
+			setTimeout(() => (btn.rfLock = false), 250);
 
 			console.log('[randomfilters] trigger clicked');
 
 			try {
 				const list = await ddg.fs.whenReady();
 				const all = ddg.fs.items(list);
-				if (!all.length) return console.warn('[randomfilters] no items');
+				if (!all.length) return console.warn('[randomfilters] no items found');
 
 				const idx = nextIndex(all);
 				const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
-				const values = ddg.fs.valuesForItem(item);
+				const values = ddg.fs.valuesForItemSafe(item);
 
-				await ddg.fs.applyCheckboxFilters(values); // find matching checkboxes → clear → click
-				console.log('[randomfilters] picked index', idx, '→ done');
+				await ddg.fs.applyCheckboxFilters(values, { merge: false });
+				console.log('[randomfilters] picked index', idx, '→ applied');
 			} catch (err) {
 				console.warn('[randomfilters] failed', err);
 			}
@@ -1434,6 +1275,14 @@
 			ensureList().then(() => tryResolve('/'));
 		}
 
+		// Force reconciliation after list becomes ready (critical for /stories/ pages)
+		document.addEventListener('ddg:list-ready', () => {
+			if (window.location.pathname.startsWith('/stories/')) {
+				console.log(`${logPrefix} forcing resolve after list-ready`);
+				tryResolve(window.location.href);
+			}
+		});
+
 		console.log(`${logPrefix} initialized`);
 	}
 
@@ -1460,20 +1309,18 @@
 			return false;
 		}
 
-		function buildAllWithRetry(item, tries = 20) {
-			const values = ddg.fs.valuesForItem(item);
-			if (hasAnyUsableValues(values)) {
-				document.querySelectorAll(SEL.parent).forEach((parent) => {
-					renderListForItem(parent, values);
-					wireSearch(parent);
-				});
+		function buildAll(item) {
+			const values = ddg.fs.valuesForItemSafe(item);
+
+			if (!hasAnyUsableValues(values)) {
+				console.warn('[relatedFilters] no usable field values');
 				return;
 			}
-			if (tries <= 0) {
-				console.warn('[relatedFilters] no usable field values yet (giving up)');
-				return;
-			}
-			requestAnimationFrame(() => buildAllWithRetry(item, tries - 1));
+
+			document.querySelectorAll(SEL.parent).forEach((parent) => {
+				renderListForItem(parent, values);
+				wireSearch(parent);
+			});
 		}
 
 		function createLabelTemplate() {
@@ -1547,8 +1394,8 @@
 		}
 
 		function wireSelectable(parent) {
-			if (parent.__rfSelectableBound) return;
-			parent.__rfSelectableBound = true;
+			if (parent.rfSelectableBound) return;
+			parent.rfSelectableBound = true;
 
 			// Toggle active class when a checkbox changes
 			parent.addEventListener('change', (e) => {
@@ -1570,8 +1417,8 @@
 
 		function wireSearch(parent) {
 			const btn = parent.querySelector(SEL.search);
-			if (!btn || btn.__rfBound) return;
-			btn.__rfBound = true;
+			if (!btn || btn.rfBound) return;
+			btn.rfBound = true;
 			btn.addEventListener('click', async (e) => {
 				e.preventDefault();
 				const values = collectSelections(parent);
@@ -1580,14 +1427,7 @@
 					return;
 				}
 				try {
-					await ddg.fs.applyCheckboxFilters(values); // this clears then applies
-					// keep local UI in sync (active classes already reflect checked state)
-					const inputs = parent.querySelectorAll(`${SEL.target} ${SEL.input}`);
-					inputs.forEach(i => {
-						const label = i.closest('label');
-						if (!label) return;
-						label.classList.toggle('is-list-active', i.checked);
-					});
+					await ddg.fs.applyCheckboxFilters(values, { merge: true });
 					console.log('[relatedFilters] applied to main filters', values);
 				} catch (err) {
 					console.warn('[relatedFilters] failed to apply', err);
@@ -1595,22 +1435,38 @@
 			});
 		}
 
-		function buildAll(item) {
-			buildAllWithRetry(item);
+		function buildAllWithRetry(item, tries = 20) {
+			const values = ddg.fs.valuesForItemSafe(item);
+			if (Object.keys(values).length && Object.values(values).some(v => Array.isArray(v) && v.length)) {
+				document.querySelectorAll(SEL.parent).forEach(parent => {
+					renderListForItem(parent, values);
+					wireSearch(parent);
+				});
+				return;
+			}
+			if (tries <= 0) {
+				console.warn('[relatedFilters] no usable field values yet (giving up)');
+				return;
+			}
+			requestAnimationFrame(() => buildAllWithRetry(item, tries - 1));
 		}
-
-		// Also rebuild when the Finsweet list re-renders (ensures values exist)
-		try {
-			ddg.fs.onRender(() => {
-				if (ddg.currentItem?.item) buildAllWithRetry(ddg.currentItem.item, 8);
-			});
-		} catch {}
 
 		document.addEventListener('ddg:current-item-changed', (e) => {
 			const item = e.detail?.item;
 			if (!item) return console.log('[relatedFilters] no item found');
 			buildAllWithRetry(item);
 		});
+
+		// Rebuild after Finsweet render (ensures fields are hydrated)
+		try {
+			ddg.fs.whenReady().then(list => {
+				if (typeof list.addHook === 'function') {
+					list.addHook('afterRender', () => {
+						if (ddg.currentItem?.item) buildAllWithRetry(ddg.currentItem.item, 8);
+					});
+				}
+			});
+		} catch {}
 	}
 
 	ddg.boot = initSite;
