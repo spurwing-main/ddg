@@ -50,27 +50,24 @@
 		console.log('[ddg] booting site');
 
 
-		// Use whenReady to log the list instance and ensure readiness
-		ddg.fs.whenReady().then(list => {
-			console.log('[ddg] Finsweet list ready:', list);
-			const fire = () => document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
-			const hasItems = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
-			if (hasItems) {
-				console.log('[ddg] dispatching finsweet-ready (home/immediate)');
-				fire();
-			} else if (typeof list.addHook === 'function') {
-				console.log('[ddg] list empty — waiting for afterRender to dispatch finsweet-ready');
-				list.addHook('afterRender', () => {
-					const ok = Array.isArray(list.items?.value) ? list.items.value.length : (list.items?.length || 0);
-					if (ok) {
-						console.log('[ddg] list populated after render — dispatching finsweet-ready (home)');
-						fire();
-					}
+		// --- Wait for Finsweet readiness based on context ---
+		if (data.truePath.startsWith('/stories/')) {
+			document.addEventListener('ddg:ajax-home-ready', () => {
+				ddg.fs.whenReady().then(list => {
+					console.log('[ddg] Finsweet list ready (post-ajax-home):', list);
+					document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
+				}).catch(err => {
+					console.warn('[ddg] Finsweet list not ready after ajax-home', err);
 				});
-			}
-		}).catch(err => {
-			console.warn('[ddg] Finsweet list not ready', err);
-		});
+			}, { once: true });
+		} else {
+			ddg.fs.whenReady().then(list => {
+				console.log('[ddg] Finsweet list ready (home):', list);
+				document.dispatchEvent(new CustomEvent('ddg:finsweet-ready', { detail: list }));
+			}).catch(err => {
+				console.warn('[ddg] Finsweet list not ready (home)', err);
+			});
+		}
 
 		requestAnimationFrame(() => {
 			initNavigation();
@@ -81,7 +78,7 @@
 			initComingSoon();
 			initShare();
 			initRandomiseFilters();
-			initRelatedFilters();
+			initGetCurrentItem();
 
 		});
 	}
@@ -977,7 +974,7 @@
 	}
 
 	function initMarquee(root = document) {
-		console.log('[marquee] init', root);
+		console.log('[marquee] init');
 
 		const els = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
 		if (!els.length) return;
@@ -1091,61 +1088,133 @@
 		});
 	}
 
-function initRelatedFilters() {
-	// Wait for the ddg:finsweet-ready event before running Finsweet-related logic
-	document.addEventListener('ddg:finsweet-ready', function handler() {
-		console.log('[relatedFilters] running after finsweet-ready');
-		function matchPath(list, urlString) {
-			const u = urlString ? new URL(urlString, window.location.origin) : window.location;
-			const currentPath = u.pathname;
-			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
-			const found = items.find(item => {
-				try {
-					return item.url && item.url.pathname === currentPath;
-				} catch {
-					return false;
-				}
-			});
-			if (found) {
-				console.log('[relatedFilters] path match:', found);
-			} else {
-				console.log('[relatedFilters] no match for path');
-			}
-		}
-		function matchSlug(list, urlString) {
-			const u = urlString ? new URL(urlString, window.location.origin) : window.location;
-			const slug = u.pathname.split('/').filter(Boolean).pop() || '';
-			console.log('[relatedFilters] current slug:', slug);
-			if (!slug) return;
-			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
-			const found = items.find(item => {
-				const itemSlug = (
-					typeof item.slug === 'string' ? item.slug :
-						typeof item.fields?.slug?.value === 'string' ? item.fields.slug.value : ''
-				);
-				return itemSlug && itemSlug.toLowerCase() === slug.toLowerCase();
-			});
-			if (found) {
-				console.log('[relatedFilters] matched item:', found);
-			}
-		}
-		ddg.fs.whenReady().then(list => {
-			// First, try path match and log result
-			matchPath(list);
-			// Then, run slug match as before
-			matchSlug(list);
-			// Update on explicit story-open with URL
-			document.addEventListener('ddg:story-opened', (e) => {
-				const url = e.detail?.url || '';
-				console.log('[relatedFilters] story-opened:', url);
-				matchPath(list, url);
-				matchSlug(list, url);
-			});
-			console.log('[relatedFilters] initialized');
-		}).catch(err => {
-			console.warn('[relatedFilters] Finsweet list not ready', err);
+function initGetCurrentItem() {
+	const TAG = '[getCurrentItem]';
+
+	// exported handle
+	ddg.getCurrentItem = ddg.getCurrentItem || { item: null, url: null, list: null };
+
+	let lastKey = null;
+	let pendingUrl = null; // last seen story url (can arrive before list is ready)
+
+	// ---- helpers ----
+	function keyFor(item) {
+		return (
+			(item?.slug) ||
+			(item?.fields?.slug?.value) ||
+			(item?.url?.pathname) ||
+			(item?.id) ||
+			''
+		);
+	}
+
+	function findItem(list, urlString) {
+		if (!list) return null;
+		const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
+		if (!items.length) return null;
+
+		const u = new URL(urlString || window.location.href, window.location.origin);
+		const pathname = u.pathname;
+		const slug = pathname.split('/').filter(Boolean).pop() || '';
+
+		// 1) strict pathname match
+		let found = items.find(it => {
+			try { return it?.url?.pathname === pathname; }
+			catch { return false; }
 		});
-	}, { once: true });
+		if (found) return found;
+
+		// 2) fallback slug match (case-insensitive)
+		if (slug) {
+			const lower = slug.toLowerCase();
+			found = items.find(it => {
+				const s = (typeof it?.slug === 'string' ? it.slug :
+					typeof it?.fields?.slug?.value === 'string' ? it.fields.slug.value : '');
+				return s && s.toLowerCase() === lower;
+			});
+		}
+		return found || null;
+	}
+
+	function setCurrent(item, url) {
+		const k = keyFor(item);
+		if (!k) {
+			console.log(`${TAG} no match for`, url);
+			return;
+		}
+		if (k === lastKey) return; // no change
+
+		lastKey = k;
+		ddg.getCurrentItem.item = item;
+		ddg.getCurrentItem.url = url;
+
+		console.log(`${TAG} current item changed →`, k, item);
+		document.dispatchEvent(new CustomEvent('ddg:current-item-changed', {
+			detail: { item, url }
+		}));
+	}
+
+	function resolve(srcUrl) {
+		const list = ddg.getCurrentItem.list;
+		const url = srcUrl || pendingUrl || window.location.href;
+		if (!list) {
+			console.log(`${TAG} list not ready yet — waiting...`);
+			return;
+		}
+		const item = findItem(list, url);
+		if (item) {
+			console.log(`${TAG} match found for`, new URL(url, window.location.origin).pathname);
+			setCurrent(item, url);
+		} else {
+			console.log(`${TAG} no match yet for`, new URL(url, window.location.origin).pathname, '— will retry after render');
+		}
+	}
+
+	// capture early story-opened (can fire before list exists)
+	document.addEventListener('ddg:story-opened', (e) => {
+		pendingUrl = e.detail?.url || window.location.href;
+		console.log(`${TAG} story-opened (global):`, pendingUrl);
+		resolve(pendingUrl);
+	});
+
+	// try to grab the list immediately
+	ddg.fs.whenReady().then(list => {
+		ddg.getCurrentItem.list = list;
+		console.log(`${TAG} Finsweet list ready immediately`);
+		// re-resolve whenever items render/update
+		if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
+		if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
+		resolve();
+	}).catch(err => {
+		// On direct story pages, the list appears only after ajax-home injects the markup
+		if (window.location.pathname.startsWith('/stories/')) {
+			document.addEventListener('ddg:ajax-home-ready', () => {
+				ddg.fs.whenReady().then(list => {
+					ddg.getCurrentItem.list = list;
+					console.log(`${TAG} Finsweet list ready after ajax-home`);
+					if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
+					if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
+					resolve();
+				}).catch(err2 => {
+					console.warn(`${TAG} Finsweet list not ready after ajax-home`, err2, '→ forcing reload and retrying once');
+					try { window.FinsweetAttributes?.load?.('list'); } catch {}
+					setTimeout(() => {
+						ddg.fs.whenReady().then(list => {
+							ddg.getCurrentItem.list = list;
+							console.log(`${TAG} Finsweet list ready after forced load`);
+							if (typeof list.addHook === 'function') list.addHook('afterRender', () => resolve());
+							if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => resolve());
+							resolve();
+						}).catch(err3 => console.warn(`${TAG} still no Finsweet list`, err3));
+					}, 250);
+				});
+			}, { once: true });
+		} else {
+			console.warn(`${TAG} Finsweet list not ready (home)`, err);
+		}
+	});
+
+	console.log(`${TAG} initialized`);
 }
 
 	ddg.boot = initSite;
