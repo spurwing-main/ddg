@@ -113,6 +113,7 @@
 			initShare();
 			initRandomiseFilters();
 			initCurrentItemTracker();
+			initRelatedFilters();
 
 		});
 	}
@@ -1147,23 +1148,22 @@
 		}
 
 		function setCurrent(item, url) {
-			const k = keyFor(item);
-			if (!k) {
-				console.log(`${logPrefix} no match for`, url);
-				return;
-			}
-			if (k === lastKey) return; // no change
-
-			lastKey = k;
-			ddg.currentItem.item = item;
-			ddg.currentItem.url = url;
-
-			console.log(`${logPrefix} current item changed →`, k, item);
-			document.dispatchEvent(new CustomEvent('ddg:current-item-changed', {
-				detail: { item, url }
-			}));
-		}
-
+					const k = keyFor(item);
+					if (!k) {
+						console.log(`${logPrefix} no match for`, url);
+						return;
+					}
+					if (k === lastKey) return; // no change
+		
+					lastKey = k;
+					ddg.currentItem.item = item;
+					ddg.currentItem.url = url;
+		
+					console.log(`${logPrefix} current item changed →`, k, item);
+					document.dispatchEvent(new CustomEvent('ddg:current-item-changed', {
+						detail: { item, url }
+					}));
+				}
 		function resolve(srcUrl) {
 			const list = ddg.currentItem.list;
 			const url = srcUrl || pendingUrl || window.location.href;
@@ -1220,6 +1220,40 @@
 		}
 
 		console.log(`${logPrefix} initialized`);
+	}
+
+	function initRelatedFilters() {
+		console.log('[relatedFilters] initialized');
+
+		const getNames = (item) => {
+			const f = item?.fields || {};
+			const byFields = Reflect.ownKeys(f).filter(k => typeof k === 'string');
+			const byEls = item?.fieldElements ? Object.keys(item.fieldElements) : [];
+			return [...new Set([...byFields, ...byEls])];
+		};
+
+		const print = (item) => {
+			console.log('--- Related Filter Fields ---');
+			for (const n of getNames(item)) {
+				const v = item.fields?.[n]?.value ?? item.fields?.[n]?.rawValue;
+				if (v == null) continue;
+				console.log('field:', n, 'value:', Array.isArray(v) ? v.join(', ') : v);
+			}
+			console.log('--------------------------');
+		};
+
+		const waitAndPrint = (item, tries = 20) => {
+			const has = getNames(item).length > 0;
+			if (has) return print(item);
+			if (tries <= 0) return console.log('[relatedFilters] no field names (after retries)');
+			requestAnimationFrame(() => waitAndPrint(item, tries - 1));
+		};
+
+		document.addEventListener('ddg:current-item-changed', (e) => {
+			const item = e.detail?.item;
+			if (!item) return console.log('[relatedFilters] no item found');
+			waitAndPrint(item);
+		});
 	}
 
 	ddg.boot = initSite;
