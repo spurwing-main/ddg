@@ -46,11 +46,35 @@
 				const mod = window.FinsweetAttributes?.modules?.list;
 				if (mod?.loading?.then) mod.loading.then((i) => finish(i, 'module.loading')).catch(() => {});
 
-				// (3) Trigger FA load and hook
+				// (3) Trigger FA load and hook — proactive then wait for registration if needed
 				try {
-					const res = window.FinsweetAttributes.load?.('list');
-					if (res?.then) res.then((i) => finish(i, 'load()')).catch(() => {});
-				} catch {}
+					const fa = window.FinsweetAttributes;
+					const attemptLoad = () => {
+						try {
+							const res = fa.load?.('list');
+							if (res?.then) res.then(i => finish(i, 'load()')).catch(() => {});
+						} catch (err) {
+							console.warn('[ddg.fs] early load(list) failed', err);
+						}
+					};
+
+					// Always attempt to load once — registers the module if not yet ready
+					attemptLoad();
+
+					// If module not registered, observe DOM until it appears
+					if (!fa?.modules?.list) {
+						console.warn('[ddg.fs] list module not yet registered, waiting for registration');
+						const wait = new MutationObserver(() => {
+							if (window.FinsweetAttributes?.modules?.list) {
+								wait.disconnect();
+								attemptLoad();
+							}
+						});
+						wait.observe(document.documentElement, { childList: true, subtree: true });
+					}
+				} catch (err) {
+					console.warn('[ddg.fs] load(list) failed early', err);
+				}
 
 				// (4) Fallback: detect late-appearing list container (for /stories/ pages)
 				const observer = new MutationObserver(() => {
@@ -251,9 +275,9 @@
 	function initSite() {
 		if (data.siteBooted) return;
 		data.siteBooted = true;
+
 		console.log('[ddg] booting site');
 
-		// Optional: Event sequence logger (helpful for debugging)
 		if (typeof window !== 'undefined' && window.location.hostname === 'localhost' || window.location.search.includes('debug')) {
 			const events = ['ddg:ajax-home-ready', 'ddg:list-ready', 'ddg:story-opened', 'ddg:current-item-changed', 'ddg:modal-opened', 'ddg:modal-closed'];
 			events.forEach(name => {
@@ -267,7 +291,6 @@
 		requestAnimationFrame(() => {
 			initNavigation();
 			initModals();
-			// Ensure listeners are ready before ajaxModal emits events
 			initCurrentItemTracker();
 			initRelatedFilters();
 			initAjaxModal();
@@ -999,9 +1022,9 @@
 
 				// Let the DOM settle, then nudge FA scan. whenReady() will resolve once FA emits the list instance.
 				requestAnimationFrame(() => {
-					window.FinsweetAttributes ||= [];
-					try { window.FinsweetAttributes.load?.('list'); } catch {}
-					try { document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready')); } catch {}
+					ddg.fs.whenReady().then(() => {
+						document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
+					});
 				});
 			}
 		});
@@ -1180,7 +1203,6 @@
 	function initCurrentItemTracker() {
 		const logPrefix = '[currentItem]';
 
-		// exported handle
 		ddg.currentItem = ddg.currentItem || { item: null, url: null, list: null };
 
 		let lastKey = null;
@@ -1456,36 +1478,20 @@
 			});
 		}
 
-		function buildAllWithRetry(item, tries = 20) {
-			const values = ddg.fs.valuesForItemSafe(item);
-			if (Object.keys(values).length && Object.values(values).some(v => Array.isArray(v) && v.length)) {
-				document.querySelectorAll(SEL.parent).forEach(parent => {
-					renderListForItem(parent, values);
-					wireSearch(parent);
-				});
-				return;
-			}
-			if (tries <= 0) {
-				console.warn('[relatedFilters] no usable field values yet (giving up)');
-				return;
-			}
-			requestAnimationFrame(() => buildAllWithRetry(item, tries - 1));
-		}
-
 		document.addEventListener('ddg:current-item-changed', (e) => {
 			const item = e.detail?.item;
-			if (!item) return console.log('[relatedFilters] no item found');
-			buildAllWithRetry(item);
+			if (!item) return;
+			buildAll(item);
 		});
 
 		// Rebuild after Finsweet render (ensures fields are hydrated)
 		try {
 			ddg.fs.whenReady().then(list => {
-				if (typeof list.addHook === 'function') {
-					list.addHook('afterRender', () => {
-						if (ddg.currentItem?.item) buildAllWithRetry(ddg.currentItem.item, 8);
-					});
-				}
+				const rebuild = () => {
+					if (ddg.currentItem?.item) buildAll(ddg.currentItem.item);
+				};
+				document.addEventListener('ddg:list-ready', rebuild);
+				if (typeof list.addHook === 'function') list.addHook('afterRender', rebuild);
 			});
 		} catch {}
 	}
