@@ -51,23 +51,8 @@
 					const res = window.FinsweetAttributes.load?.('list');
 					if (res?.then) res.then((i) => finish(i, 'load()')).catch(() => {});
 				} catch {}
-				try { window.FinsweetAttributes.modules?.list?.restart?.(); } catch {}
 
-				// (4) Patch FA.load for future loads
-				try {
-					const fa = window.FinsweetAttributes;
-					if (fa && !fa.ddgLoadPatched && typeof fa.load === 'function') {
-						const orig = fa.load.bind(fa);
-						fa.load = function(name, ...args) {
-							const ret = orig(name, ...args);
-							if (name === 'list' && ret?.then) ret.then((i) => finish(i, 'load(patched)')).catch(() => {});
-							return ret;
-						};
-						fa.ddgLoadPatched = true;
-					}
-				} catch {}
-
-				// (5) Fallback: detect late-appearing list container (for /stories/ pages)
+				// (4) Fallback: detect late-appearing list container (for /stories/ pages)
 				const observer = new MutationObserver(() => {
 					// keep watching until we've seen an instance at least once
 					const listEl = document.querySelector('[fs-list-element="list"]');
@@ -259,7 +244,7 @@
 			}
 		}
 
-		return { whenReady, items, valuesForItem, valuesForItemSafe, applyCheckboxFilters, afterNextRender };
+		return { whenReady, items, valuesForItemSafe, applyCheckboxFilters, afterNextRender };
 	})();
 
 	// Site boot
@@ -983,15 +968,7 @@
 				console.log('[ajaxModal] direct story detected — opening modal (skipAnimation)');
 				modal.open({ skipAnimation: true, afterOpen: after });
 			}
-
-			// Safety recheck in case some other script closes it right after load
-			setTimeout(() => {
-				if (!modal.isOpen()) {
-					console.log('[ajaxModal] re-opening story modal after initial close');
-					modal.open({ skipAnimation: true, afterOpen: after });
-				}
-			}, 500);
-			};
+		};
 
 		// If modals are already initialized, run immediately; otherwise, wait.
 		if (ddg.createModal || (ddg.modals && Object.keys(ddg.modals).length)) {
@@ -1024,7 +1001,6 @@
 				requestAnimationFrame(() => {
 					window.FinsweetAttributes ||= [];
 					try { window.FinsweetAttributes.load?.('list'); } catch {}
-					try { window.FinsweetAttributes.modules?.list?.restart?.(); } catch {}
 					try { document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready')); } catch {}
 				});
 			}
@@ -1227,44 +1203,6 @@
 			);
 		}
 
-		function buildVirtualItemFromDOM(urlString) {
-			const root =
-				document.querySelector('[data-ajax-modal="embed"]') ||
-				document.querySelector('[data-ajax-modal="content"]') ||
-				document;
-
-			// Collect facets from generic hooks.
-			// Prefer explicit data-field / data-value, then fallback to fs-list-field/value anywhere in the story.
-			const fieldData = {};
-
-			root.querySelectorAll('[data-field]').forEach(el => {
-				const k = el.getAttribute('data-field')?.trim();
-				const v = (el.getAttribute('data-value') || el.textContent || '').trim();
-				if (!k || !v) return;
-				(fieldData[k] ||= []).push(v);
-			});
-
-			root.querySelectorAll('[fs-list-field][fs-list-value]').forEach(el => {
-				const k = el.getAttribute('fs-list-field')?.trim();
-				const v = el.getAttribute('fs-list-value')?.trim();
-				if (!k || !v) return;
-				(fieldData[k] ||= []).push(v);
-			});
-
-			// Deduplicate & stringify
-			for (const k in fieldData) fieldData[k] = Array.from(new Set(fieldData[k].map(String)));
-
-			// Build a minimal, clone-safe item the rest of the code can use
-			const u = new URL(urlString || window.location.href, window.location.origin);
-			const slug = u.pathname.split('/').filter(Boolean).pop() || '';
-
-			return {
-				slug,                 // so keyFor(item) works
-				url: { pathname: u.pathname }, // harmless convenience
-				fieldData,            // compatible with valuesForItemSafe()
-			};
-		}
-
 		function findItem(list, urlString) {
 			if (!list) return null;
 			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
@@ -1327,32 +1265,13 @@
 			return list;
 		}
 
-		let misses = 0;
-		const MAX_MISSES_BEFORE_FALLBACK = 2;
-
 		async function tryResolve(url) {
 			pendingUrl = url || pendingUrl || window.location.href;
 			const list = ddg.currentItem.list || await ensureList();
 			const item = findItem(list, pendingUrl);
-
-			if (item) {
-				misses = 0;
-				setCurrent(item, pendingUrl);
-				return;
-			}
+			if (item) { setCurrent(item, pendingUrl); return; }
 
 			console.log(`${logPrefix} no match yet for`, new URL(pendingUrl, window.location.origin).pathname, '— will retry after render');
-
-			if (++misses >= MAX_MISSES_BEFORE_FALLBACK) {
-				const virt = buildVirtualItemFromDOM(pendingUrl);
-				if (virt && (Object.keys(virt.fieldData).length || virt.slug)) {
-					console.log(`${logPrefix} using virtual item from DOM`);
-					misses = 0;
-					setCurrent(virt, pendingUrl);
-					return;
-				}
-			}
-			// otherwise we wait for the next afterRender/watch tick and try again
 		}
 
 		// capture early story-opened (can fire before list exists)
