@@ -110,49 +110,19 @@
 			return Array.isArray(v?.value) ? v.value : (Array.isArray(v) ? v : []);
 		};
 
-		const valuesForItem = (item) => {
-			const names = Object.keys(item?.fields || {}).length
-				? Object.keys(item.fields)
-				: Object.keys(item?.fieldElements || {});
-			const out = {};
-			for (const n of names) {
-				const f = item?.fields?.[n];
-				let v = f?.value ?? f?.rawValue ?? [];
-				if (typeof v === 'string') {
-					v = v.split(',').map(s => s.trim()).filter(Boolean);
-				}
-				out[n] = Array.isArray(v) ? v : (v == null ? [] : [v]);
-			}
-			return out;
-		};
-
 		const valuesForItemSafe = (item) => {
 			const out = {};
-
-			// v1: Finsweet's old structure (item.fields with nested value objects)
 			if (item?.fields && Object.keys(item.fields).length) {
 				for (const [n, f] of Object.entries(item.fields)) {
 					let v = f?.value ?? f?.rawValue ?? [];
 					if (typeof v === 'string') v = v.split(',').map(s => s.trim()).filter(Boolean);
 					out[n] = Array.isArray(v) ? v.map(String) : (v == null ? [] : [String(v)]);
 				}
-			}
-
-			// v2: fieldData or meta-level values (newer Finsweet versions)
-			else if (item?.fieldData && typeof item.fieldData === 'object') {
+			} else if (item?.fieldData && typeof item.fieldData === 'object') {
 				for (const [n, v] of Object.entries(item.fieldData)) {
 					out[n] = Array.isArray(v) ? v.map(String) : (v == null ? [] : [String(v)]);
 				}
 			}
-
-			// v3: fieldElements (Webflow attributes fallback)
-			else if (item?.fieldElements && typeof item.fieldElements === 'object') {
-				for (const [n, el] of Object.entries(item.fieldElements)) {
-					const text = el?.textContent?.trim?.() || '';
-					if (text) out[n] = [text];
-				}
-			}
-
 			return out;
 		};
 
