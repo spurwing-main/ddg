@@ -24,19 +24,21 @@
 			readyPromise = new Promise((resolve) => {
 				window.FinsweetAttributes ||= [];
 
-				let lastInst = null;
 				const finish = (instances, label) => {
-					const inst = Array.isArray(instances) ? instances[0] : instances;
-					if (!inst || !inst.items) return;
-					// Update latest ref and (re-)emit whenever the instance changes
-					if (inst !== lastInst) {
-						lastInst = inst;
+					const instArray = Array.isArray(instances) ? instances : [instances];
+					const inst = instArray.find(i => i?.items);
+					if (!inst) return;
+
+					if (inst !== currentList) {
 						currentList = inst;
 						console.log(`[ddg.fs] list instance ready (${label})`, inst);
 						document.dispatchEvent(new CustomEvent('ddg:list-ready', { detail: { list: inst, via: label } }));
 					}
-					// Resolve the promise only once
-					if (!firstResolved) { firstResolved = true; resolve(inst); }
+
+					if (!firstResolved) {
+						firstResolved = true;
+						resolve(inst);
+					}
 				};
 
 				// (1) Early subscription — never miss push init
