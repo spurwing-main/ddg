@@ -13,23 +13,30 @@
 
 	ddg.fs = (() => {
 		let readyPromise = null;
+		let firstResolved = false;
+		let currentList = null; // always the latest instance we've seen
 
 		function whenReady() {
+			// If we've already resolved once, always return the latest instance.
+			if (firstResolved && currentList) return Promise.resolve(currentList);
 			if (readyPromise) return readyPromise;
 
 			readyPromise = new Promise((resolve) => {
 				window.FinsweetAttributes ||= [];
 
-				let done = false;
+				let lastInst = null;
 				const finish = (instances, label) => {
-					if (done) return;
 					const inst = Array.isArray(instances) ? instances[0] : instances;
-					if (inst && inst.items) {
-						done = true;
+					if (!inst || !inst.items) return;
+					// Update latest ref and (re-)emit whenever the instance changes
+					if (inst !== lastInst) {
+						lastInst = inst;
+						currentList = inst;
 						console.log(`[ddg.fs] list instance ready (${label})`, inst);
 						document.dispatchEvent(new CustomEvent('ddg:list-ready', { detail: { list: inst, via: label } }));
-						resolve(inst);
 					}
+					// Resolve the promise only once
+					if (!firstResolved) { firstResolved = true; resolve(inst); }
 				};
 
 				// (1) Early subscription — never miss push init
@@ -62,7 +69,7 @@
 
 				// (5) Fallback: detect late-appearing list container (for /stories/ pages)
 				const observer = new MutationObserver(() => {
-					if (done) return observer.disconnect();
+					// keep watching until we've seen an instance at least once
 					const listEl = document.querySelector('[fs-list-element="list"]');
 					if (listEl && window.FinsweetAttributes?.modules?.list) {
 						console.log('[ddg.fs] detected late list container → reloading');
@@ -70,6 +77,7 @@
 							const r = window.FinsweetAttributes.load?.('list');
 							if (r?.then) r.then((i) => finish(i, 'observer')).catch(() => {});
 						} catch {}
+						if (firstResolved) observer.disconnect();
 					}
 				});
 				observer.observe(document.body, { childList: true, subtree: true });
@@ -117,14 +125,14 @@
 				for (const [n, f] of Object.entries(item.fields)) {
 					let v = f?.value ?? f?.rawValue ?? [];
 					if (typeof v === 'string') v = v.split(',').map(s => s.trim()).filter(Boolean);
-					out[n] = Array.isArray(v) ? v : [v];
+					out[n] = Array.isArray(v) ? v.map(String) : (v == null ? [] : [String(v)]);
 				}
 			}
 
 			// v2: fieldData or meta-level values (newer Finsweet versions)
 			else if (item?.fieldData && typeof item.fieldData === 'object') {
 				for (const [n, v] of Object.entries(item.fieldData)) {
-					out[n] = Array.isArray(v) ? v : (v == null ? [] : [v]);
+					out[n] = Array.isArray(v) ? v.map(String) : (v == null ? [] : [String(v)]);
 				}
 			}
 
@@ -139,89 +147,119 @@
 			return out;
 		};
 
+		// one-shot "next render" helper
+		function afterNextRender(list) {
+			return new Promise((resolve) => {
+				if (typeof list?.addHook !== 'function') return resolve();
+				let done = false;
+				list.addHook('afterRender', () => {
+					if (done) return; done = true; resolve();
+				});
+			});
+		}
+
+		// Helpers: force plain, cloneable shapes
+		function toPlainCondition(c = {}) {
+			return {
+				id: String(c.id ?? ''),
+				type: String(c.type ?? 'checkbox'),
+				fieldKey: String(c.fieldKey ?? ''),
+				value: String(c.value ?? ''),
+				op: String(c.op ?? 'equal'),
+				interacted: Boolean(c.interacted ?? true),
+			};
+		}
+
+		function toPlainGroup(g = {}) {
+			const conditions = Array.isArray(g.conditions) ? g.conditions.map(toPlainCondition) : [];
+			return {
+				id: String(g.id ?? ''),
+				conditionsMatch: String(g.conditionsMatch ?? 'or'),
+				conditions,
+			};
+		}
+
+		function firstFieldKey(g = {}) {
+			return g?.conditions?.[0]?.fieldKey || '';
+		}
+
 		async function applyCheckboxFilters(valuesByField, opts = {}) {
-			const { formSel = '[fs-list-element="filters"]', clearSel = '[fs-list-element="clear"]', maxFields = 4, merge = false } = opts;
-			const form = document.querySelector(formSel);
-			if (!form) return console.warn('[filters] no form found');
-
-			const inputs = [...form.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]')]
-				.filter(i => !i.closest('label')?.classList.contains('is-list-emptyfacet'));
-			const byField = new Map();
-			for (const i of inputs) {
-				const f = i.getAttribute('fs-list-field');
-				const v = i.getAttribute('fs-list-value');
-				if (!f || !v) continue;
-				if (!byField.has(f)) byField.set(f, new Map());
-				byField.get(f).set(v, i);
-			}
-
-			const picks = [];
-			for (const [f, vals] of Object.entries(valuesByField || {})) {
-				if (picks.length >= maxFields) break;
-				const map = byField.get(f);
-				if (!map) continue;
-				const matches = (vals || []).filter(v => map.has(v));
-				for (const m of matches) picks.push([f, m]);
-			}
-			if (!picks.length) return console.warn('[filters] nothing to apply');
-
-			const clearBtn = form.querySelector(clearSel);
-			if (!merge) {
-				if (clearBtn) clearBtn.click();
-				else for (const i of inputs) {
-					if (i.checked) i.checked = false;
-					i.closest('label')?.classList.remove('is-list-active');
-					i.dispatchEvent(new Event('change', { bubbles: true }));
-				}
-			}
-
-			for (const [f, v] of picks) {
-				const input = byField.get(f)?.get(v);
-				if (!input) continue;
-				input.checked = true;
-				input.closest('label')?.classList.add('is-list-active');
-				input.dispatchEvent(new Event('change', { bubbles: true }));
-			}
+			const {
+				formSel = '[fs-list-element="filters"]',
+				merge = false,
+				reflectUi = true
+			} = opts;
 
 			try {
 				const list = await whenReady();
 
-				// ✅ Proper FA v2 structure: one group per field, multiple conditions inside
-				const fieldGroups = Object.entries(valuesByField).map(([field, vals]) => ({
-					id: `auto-${field}`,
-					conditionsMatch: 'or',
-					conditions: vals.map((v, i) => ({
+				// create NEW groups as plain objects
+				const newGroups = Object.entries(valuesByField || {}).map(([field, vals = []]) => {
+					const conditions = vals.map((v, i) => ({
 						id: `auto-${field}-${i}`,
 						type: 'checkbox',
-						fieldKey: field,
-						value: v,
+						fieldKey: String(field),
+						value: String(v),
 						op: 'equal',
 						interacted: true,
-					})),
-				}));
-
-				list.filters.value = {
-					groupsMatch: 'and',
-					groups: fieldGroups,
-				};
-
-				await list.triggerHook('filter');
-				list.addHook('afterRender', () => {
-					console.log('[filters] afterRender → items:', list.items.value.length);
+					}));
+					return { id: `auto-${field}`, conditionsMatch: 'or', conditions };
 				});
 
-				console.log('[filters] applied and data synced with API', list.filters.value);
-			} catch (err) {
-				console.warn('[filters] failed', err);
-			}
+				const current = list.filters.value || { groupsMatch: 'and', groups: [] };
 
-			const flat = Object.entries(valuesByField)
-				.map(([f, v]) => `${f}:${v.join(', ')}`)
-				.join(' | ');
-			console.log('[filters] applied:', flat);
+				let nextGroups;
+				if (merge) {
+					// ✨ sanitize any existing groups before merging
+					const existingPlain = (current.groups || []).map(toPlainGroup);
+					const newPlain = newGroups.map(toPlainGroup);
+
+					// keep existing groups whose fieldKey doesn't collide
+					const keep = existingPlain.filter(
+						g => !newPlain.some(ng => firstFieldKey(ng) === firstFieldKey(g))
+					);
+
+					nextGroups = [...keep, ...newPlain];
+				} else {
+					nextGroups = newGroups.map(toPlainGroup);
+				}
+
+				// assign only plain JSON
+				list.filters.value = { groupsMatch: 'and', groups: nextGroups };
+
+				await list.triggerHook('filter');
+				await afterNextRender(list); // ← ensure callers await the render
+
+				// Reflect in UI without firing change events (avoid double-driving)
+				if (reflectUi && formSel) {
+					const form = document.querySelector(formSel);
+					if (form) {
+						const inputs = form.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]');
+						const wantedByField = {};
+						for (const [f, arr] of Object.entries(valuesByField || {})) {
+							wantedByField[f] = new Set((arr || []).map(String));
+						}
+						inputs.forEach((input) => {
+							const f = input.getAttribute('fs-list-field');
+							const v = input.getAttribute('fs-list-value');
+							const on = !!wantedByField[f]?.has(v);
+							input.checked = on;
+							input.closest('label')?.classList.toggle('is-list-active', on);
+						});
+					}
+				}
+
+				const flat = Object.entries(valuesByField)
+					.map(([f, v]) => `${f}:${v.join(', ')}`)
+					.join(' | ');
+				console.log('[filters] applied:', flat);
+			} catch (err) {
+				console.error('[filters] applyCheckboxFilters error:', err);
+				throw err;
+			}
 		}
 
-		return { whenReady, items, valuesForItem, valuesForItemSafe, applyCheckboxFilters };
+		return { whenReady, items, valuesForItem, valuesForItemSafe, applyCheckboxFilters, afterNextRender };
 	})();
 
 	// Site boot
@@ -1189,6 +1227,44 @@
 			);
 		}
 
+		function buildVirtualItemFromDOM(urlString) {
+			const root =
+				document.querySelector('[data-ajax-modal="embed"]') ||
+				document.querySelector('[data-ajax-modal="content"]') ||
+				document;
+
+			// Collect facets from generic hooks.
+			// Prefer explicit data-field / data-value, then fallback to fs-list-field/value anywhere in the story.
+			const fieldData = {};
+
+			root.querySelectorAll('[data-field]').forEach(el => {
+				const k = el.getAttribute('data-field')?.trim();
+				const v = (el.getAttribute('data-value') || el.textContent || '').trim();
+				if (!k || !v) return;
+				(fieldData[k] ||= []).push(v);
+			});
+
+			root.querySelectorAll('[fs-list-field][fs-list-value]').forEach(el => {
+				const k = el.getAttribute('fs-list-field')?.trim();
+				const v = el.getAttribute('fs-list-value')?.trim();
+				if (!k || !v) return;
+				(fieldData[k] ||= []).push(v);
+			});
+
+			// Deduplicate & stringify
+			for (const k in fieldData) fieldData[k] = Array.from(new Set(fieldData[k].map(String)));
+
+			// Build a minimal, clone-safe item the rest of the code can use
+			const u = new URL(urlString || window.location.href, window.location.origin);
+			const slug = u.pathname.split('/').filter(Boolean).pop() || '';
+
+			return {
+				slug,                 // so keyFor(item) works
+				url: { pathname: u.pathname }, // harmless convenience
+				fieldData,            // compatible with valuesForItemSafe()
+			};
+		}
+
 		function findItem(list, urlString) {
 			if (!list) return null;
 			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
@@ -1251,12 +1327,32 @@
 			return list;
 		}
 
+		let misses = 0;
+		const MAX_MISSES_BEFORE_FALLBACK = 2;
+
 		async function tryResolve(url) {
 			pendingUrl = url || pendingUrl || window.location.href;
 			const list = ddg.currentItem.list || await ensureList();
 			const item = findItem(list, pendingUrl);
-			if (item) setCurrent(item, pendingUrl);
-			else console.log(`${logPrefix} no match yet for`, new URL(pendingUrl, window.location.origin).pathname, '— will retry after render');
+
+			if (item) {
+				misses = 0;
+				setCurrent(item, pendingUrl);
+				return;
+			}
+
+			console.log(`${logPrefix} no match yet for`, new URL(pendingUrl, window.location.origin).pathname, '— will retry after render');
+
+			if (++misses >= MAX_MISSES_BEFORE_FALLBACK) {
+				const virt = buildVirtualItemFromDOM(pendingUrl);
+				if (virt && (Object.keys(virt.fieldData).length || virt.slug)) {
+					console.log(`${logPrefix} using virtual item from DOM`);
+					misses = 0;
+					setCurrent(virt, pendingUrl);
+					return;
+				}
+			}
+			// otherwise we wait for the next afterRender/watch tick and try again
 		}
 
 		// capture early story-opened (can fire before list exists)
@@ -1276,7 +1372,13 @@
 		}
 
 		// Force reconciliation after list becomes ready (critical for /stories/ pages)
-		document.addEventListener('ddg:list-ready', () => {
+		document.addEventListener('ddg:list-ready', (e) => {
+			const newList = e.detail?.list;
+			if (newList && newList !== ddg.currentItem.list) {
+				ddg.currentItem.list = newList;
+				hooksBound = false;          // allow rebinding on the new instance
+				bindListHooks(newList);
+			}
 			if (window.location.pathname.startsWith('/stories/')) {
 				console.log(`${logPrefix} forcing resolve after list-ready`);
 				tryResolve(window.location.href);
