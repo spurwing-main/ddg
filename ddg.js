@@ -266,7 +266,6 @@
 			initCurrentItemTracker();
 			initRelatedFilters();
 			initAjaxModal();
-			initAjaxHome();
 			initMarquee();
 			initComingSoon();
 			initShare();
@@ -860,6 +859,19 @@
 				afterOpen: () => {
 					if (title) document.title = title;
 					try { history.pushState({ modal: true }, '', url); } catch { }
+					// Notify parent of new URL if in iframe
+					if (window !== window.parent) {
+						try {
+							window.parent.postMessage({
+								type: 'iframe:url-change',
+								url,
+								title: document.title
+							}, '*');
+							console.log('[ajaxModal] posted url to parent:', url);
+						} catch (err) {
+							console.warn('[ajaxModal] failed to post url to parent', err);
+						}
+					}
 					// Emit once the FA list is ready so currentItem resolves deterministically.
 					ddg.fs.whenReady()
 						.then(() => dispatchStoryOpened(url))
@@ -873,6 +885,19 @@
 			if (ev.detail?.id !== storyModalId) return;
 			document.title = originalTitle;
 			try { history.pushState({}, '', homeUrl); } catch { }
+			// Notify parent of home URL if in iframe
+			if (window !== window.parent) {
+				try {
+					window.parent.postMessage({
+						type: 'iframe:url-change',
+						url: homeUrl,
+						title: originalTitle
+					}, '*');
+					console.log('[ajaxModal] posted home url to parent:', homeUrl);
+				} catch (err) {
+					console.warn('[ajaxModal] failed to post home url to parent', err);
+				}
+			}
 			console.log('[ajaxModal] modal closed -> restored home URL/title');
 		});
 
@@ -972,34 +997,6 @@
 			document.addEventListener('ddg:modals-ready', tryOpenDirectStory, { once: true });
 			console.log('[ajaxModal] waiting for ddg:modals-ready');
 		}
-	}
-
-	function initAjaxHome() {
-		if (data.ajaxHomeLoaded || !data.truePath.startsWith('/stories/')) return;
-
-		const $target = $('[data-ajax-home="target"]');
-		if (!$target.length) return;
-
-		$.ajax({
-			url: '/',
-			success: (response) => {
-				const $html = $('<div>').append($.parseHTML(response));
-				const $source = $html.find('[data-ajax-home="source"]');
-				if (!$source.length) return;
-
-				$target.empty().append($source.html());
-				data.ajaxHomeLoaded = true;
-
-				console.log('[ajaxHome] injected home list');
-
-				// Let the DOM settle, then nudge FA scan. whenReady() will resolve once FA emits the list instance.
-				requestAnimationFrame(() => {
-					ddg.fs.whenReady().then(() => {
-						document.dispatchEvent(new CustomEvent('ddg:ajax-home-ready'));
-					});
-				});
-			}
-		});
 	}
 
 	function initRandomizeFilters() {
@@ -1315,6 +1312,11 @@
 
 		console.log('[relatedFilters] ready');
 
+		// Ensure targets start empty on load (before data is available)
+		try {
+			Array.from(document.querySelectorAll(SEL.target)).forEach((el) => clearTarget(el));
+		} catch {}
+
 		function hasAnyUsableValues(values) {
 			if (!values) return false;
 			for (const [k, arr] of Object.entries(values)) {
@@ -1327,12 +1329,19 @@
 		function buildAll(item) {
 			const values = ddg.fs.valuesForItemSafe(item);
 
+			// Always clear targets first; if no usable values, leave empty
+			const parents = Array.from(document.querySelectorAll(SEL.parent));
+			parents.forEach((parent) => {
+				const target = parent.querySelector(SEL.target);
+				if (target) clearTarget(target);
+			});
+
 			if (!hasAnyUsableValues(values)) {
 				console.warn('[relatedFilters] no usable field values');
-				return;
+				return; // Targets already emptied above
 			}
 
-			document.querySelectorAll(SEL.parent).forEach((parent) => {
+			parents.forEach((parent) => {
 				renderListForItem(parent, values);
 				wireSearch(parent);
 			});
