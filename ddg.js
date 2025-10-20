@@ -42,11 +42,11 @@
 				};
 
 				// (1) Early subscription — never miss push init
-				try { window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]); } catch {}
+				try { window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]); } catch { }
 
 				// (2) Hook existing module loading
 				const mod = window.FinsweetAttributes?.modules?.list;
-				if (mod?.loading?.then) mod.loading.then((i) => finish(i, 'module.loading')).catch(() => {});
+				if (mod?.loading?.then) mod.loading.then((i) => finish(i, 'module.loading')).catch(() => { });
 
 				// (3) Trigger FA load and hook — proactive then wait for registration if needed
 				try {
@@ -54,7 +54,7 @@
 					const attemptLoad = () => {
 						try {
 							const res = fa.load?.('list');
-							if (res?.then) res.then(i => finish(i, 'load()')).catch(() => {});
+							if (res?.then) res.then(i => finish(i, 'load()')).catch(() => { });
 						} catch (err) {
 							console.warn('[ddg.fs] early load(list) failed', err);
 						}
@@ -86,8 +86,8 @@
 						console.log('[ddg.fs] detected late list container → reloading');
 						try {
 							const r = window.FinsweetAttributes.load?.('list');
-							if (r?.then) r.then((i) => finish(i, 'observer')).catch(() => {});
-						} catch {}
+							if (r?.then) r.then((i) => finish(i, 'observer')).catch(() => { });
+						} catch { }
 						if (firstResolved) observer.disconnect();
 					}
 				});
@@ -96,10 +96,10 @@
 				// (6) React on ajax-home ready
 				document.addEventListener('ddg:ajax-home-ready', () => {
 					const m = window.FinsweetAttributes?.modules?.list;
-					if (m?.loading?.then) m.loading.then((i) => finish(i, 'module.loading (ajax-home)')).catch(() => {});
+					if (m?.loading?.then) m.loading.then((i) => finish(i, 'module.loading (ajax-home)')).catch(() => { });
 					else {
 						const r = window.FinsweetAttributes.load?.('list');
-						if (r?.then) r.then((i) => finish(i, 'load(ddg:ajax-home-ready)')).catch(() => {});
+						if (r?.then) r.then((i) => finish(i, 'load(ddg:ajax-home-ready)')).catch(() => { });
 					}
 				}, { once: true });
 			});
@@ -261,19 +261,19 @@
 		}
 
 		requestAnimationFrame(() => {
-			initNavigation();
-			initModals();
-			initCurrentItemTracker();
-			initRelatedFilters();
-			initAjaxModal();
-			initMarquee();
-			initComingSoon();
-			initShare();
-			initRandomizeFilters();
+			nav();
+			modals();
+			currentItem();
+			relatedFilters();
+			ajaxStories();
+			marquee();
+			homelistSplit();
+			share();
+			randomFilters();
 		});
 	}
 
-	function initNavigation() {
+	function nav() {
 		if (ddg.navInitialized) return;
 		ddg.navInitialized = true;
 
@@ -337,91 +337,101 @@
 		}
 	}
 
-	function initComingSoon() {
-		if (ddg.comingSoonInitialized) return;
-		ddg.comingSoonInitialized = true;
-
-		console.log('[comingSoon] initialized');
-
-		const splitSet = (ddg.comingSoonSplitEls ||= new Set());
-		const lineSel = '.home-list_split-line';
+	function homelistSplit() {
+		const wraps = gsap.utils.toArray('.home-list_item-wrap');
 		const tapeSpeed = 5000;
 
-		function getSplit(el) {
-			if (el.ddgSplit) return el.ddgSplit;
-			try {
-				const split = SplitText.create(el, {
-					type: 'lines',
-					autoSplit: true,
-					reduceWhiteSpace: true,
-					tag: 'span',
-					linesClass: 'home-list_split-line'
-				});
-				el.ddgSplit = split;
-				splitSet.add(el);
-				console.log('[comingSoon] split created for', `"${el.textContent.trim()}"`);
-				return split;
-			} catch (e) {
-				console.warn('[comingSoon] split failed', e);
-				return null;
+		wraps.forEach(wrap => {
+			const item = wrap.querySelector('.home-list_item');
+			if (!item || item.dataset.splitInit) return;
+
+			// ✅ Create SplitText with autoSplit (VALID in v3.13.0)
+			const split = new SplitText(item, {
+				type: 'lines',
+				linesClass: 'home-list_split-line',
+				autoSplit: true  // ✅ Official feature (line 246 in source)
+			});
+
+			// Store instance for cleanup
+			item.split = split;
+
+			// ✅ Use gsap.set() for batched style updates
+			gsap.set(split.lines, {
+				display: 'inline-block'
+			});
+
+			// Detect coming-soon flag
+			if (wrap.querySelector('[data-coming-soon]')) {
+				wrap.dataset.comingSoon = 'true';
+			} else {
+				delete wrap.dataset.comingSoon;
 			}
-		}
 
-		function animate(el, offset) {
-			const split = el.ddgSplit || getSplit(el);
-			if (!split) return;
-			const lines = el.querySelectorAll(lineSel);
-			if (!lines.length) return;
+			item.dataset.splitInit = 'true';
+		});
 
-			console.log('[comingSoon] animate', `"${el.textContent.trim()}"`, '→', offset);
-			gsap.killTweensOf(lines);
-			const widths = Array.from(lines, l => l.offsetWidth);
-			gsap.set(lines, { willChange: 'transform' });
+		// ✅ Batch DOM reads/writes to prevent layout thrashing
+		function setTapeDurations() {
+			requestAnimationFrame(() => {
+				const lines = gsap.utils.toArray('.home-list_split-line');
 
-			gsap.to(lines, {
-				'--home-list--tape-r': offset,
-				duration: i => widths[i] / tapeSpeed,
-				ease: 'none',
-				overwrite: 'auto',
-				onComplete: () => gsap.set(lines, { clearProps: 'will-change' })
+				// Read all widths first
+				const measurements = lines.map(line => ({
+					line,
+					width: line.offsetWidth
+				}));
+
+				// Then write all durations (prevents layout thrashing)
+				measurements.forEach(({ line, width }) => {
+					const dur = gsap.utils.clamp(0.3, 2, width / tapeSpeed);
+					line.style.setProperty('--tape-dur', `${dur}s`);
+				});
 			});
 		}
 
-		$(document)
-			.off('.ddgComingSoon')
-			.on('mouseenter.ddgComingSoon', '.home-list_item-wrap', function () {
-				if (!this.querySelector('[data-coming-soon]')) return;
-				const link = this.querySelector('.home-list_item');
-				if (!link) return;
+		setTapeDurations();
 
-				if (!link.__ddgCSInit) {
-					link.__ddgCSInit = true;
-					if (link.tagName === 'A') $(link).one('click.ddgComingSoon', e => e.preventDefault());
-					console.log('[comingSoon] marked as coming soon:', `"${link.textContent.trim()}"`);
-				}
-				animate(link, 0);
-			})
-			.on('mouseleave.ddgComingSoon', '.home-list_item-wrap', function () {
-				if (!this.querySelector('[data-coming-soon]')) return;
-				const link = this.querySelector('.home-list_item');
-				if (link) animate(link, '100%');
-			});
-
+		// ✅ Proper resize handling with debounce
 		let resizeTimer;
-		$(window).on('resize.ddgComingSoon', () => {
+		const handleResize = () => {
 			clearTimeout(resizeTimer);
 			resizeTimer = setTimeout(() => {
-				console.log('[comingSoon] resize → clear splits');
-				for (const el of splitSet) {
-					try { el.ddgSplit?.revert(); } catch (_) { }
-					delete el.ddgSplit;
-				}
-				splitSet.clear();
-			}, 200);
-		});
+				console.log('[homelistSplit] responsive reflow');
+
+				wraps.forEach(wrap => {
+					const item = wrap.querySelector('.home-list_item');
+					if (!item?.split) return;
+
+					// Official cleanup method
+					item.split.revert();
+					delete item.split;
+					delete item.dataset.splitInit;
+				});
+
+				homelistSplit();
+			}, 300);
+		};
+
+		window.addEventListener('resize', handleResize, { passive: true });
 	}
 
-	function initShare() {
+	// Cleanup on resize
+	let resizeTimer;
+	window.addEventListener('resize', () => {
+		clearTimeout(resizeTimer);
+		resizeTimer = setTimeout(() => {
+			document.querySelectorAll('.home-list_item').forEach(item => {
+				if (item.ddgSplit) {
+					try {
+						item.ddgSplit.revert();
+					} catch (_) { }
+					delete item.ddgSplit;
+				}
+			});
+		}, 200);
+	});
+
+	function share() {
 		if (ddg.shareInitialized) return;
 		ddg.shareInitialized = true;
 
@@ -547,7 +557,7 @@
 		console.log('[share] ready (minimal)');
 	}
 
-	function initModals() {
+	function modals() {
 		ddg.modals = ddg.modals || {};
 		ddg.modalsKeydownBound = Boolean(ddg.modalsKeydownBound);
 		console.log('[modals] initializing');
@@ -811,7 +821,7 @@
 		document.dispatchEvent(new CustomEvent('ddg:modals-ready'));
 	}
 
-	function initAjaxModal() {
+	function ajaxStories() {
 		if (ddg.ajaxModalInitialized) return;
 		ddg.ajaxModalInitialized = true;
 
@@ -929,7 +939,7 @@
 					if (!parsed.$content) parsed.$content = $("<div class='modal-error'>Failed to load content.</div>");
 					storyCache.set(linkUrl, parsed);
 					openStory(linkUrl, parsed.title, parsed.$content);
-					if (parsed.$content?.[0]) { try { initMarquee(parsed.$content[0]); } catch { } }
+					if (parsed.$content?.[0]) { try { marquee(parsed.$content[0]); } catch { } }
 				},
 				error: () => {
 					console.warn('[ajaxModal] load failed');
@@ -999,7 +1009,7 @@
 		}
 	}
 
-	function initRandomizeFilters() {
+	function randomFilters() {
 		const selectors = { trigger: '[data-randomfilters]' };
 		const state = (ddg.randomFilters ||= { bag: [] });
 
@@ -1054,7 +1064,7 @@
 		}, true);
 	}
 
-	function initMarquee(root = document) {
+	function marquee(root = document) {
 		console.log('[marquee] init');
 
 		const els = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
@@ -1156,7 +1166,7 @@
 		// modal lifecycle integration
 		document.addEventListener('ddg:modal-opened', e => {
 			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
-			if (modal) initMarquee(modal);
+			if (modal) marquee(modal);
 		});
 
 		document.addEventListener('ddg:modal-closed', e => {
@@ -1169,7 +1179,7 @@
 		});
 	}
 
-	function initCurrentItemTracker() {
+	function currentItem() {
 		const logPrefix = '[currentItem]';
 
 		ddg.currentItem = ddg.currentItem || { item: null, url: null, list: null };
@@ -1298,7 +1308,7 @@
 		console.log(`${logPrefix} initialized`);
 	}
 
-	function initRelatedFilters() {
+	function relatedFilters() {
 		const SEL = {
 			parent: '[data-relatedfilters="parent"]',
 			target: '[data-relatedfilters="target"]',
@@ -1315,7 +1325,7 @@
 		// Ensure targets start empty on load (before data is available)
 		try {
 			Array.from(document.querySelectorAll(SEL.target)).forEach((el) => clearTarget(el));
-		} catch {}
+		} catch { }
 
 		function hasAnyUsableValues(values) {
 			if (!values) return false;
@@ -1474,7 +1484,7 @@
 				document.addEventListener('ddg:list-ready', rebuild);
 				if (typeof list.addHook === 'function') list.addHook('afterRender', rebuild);
 			});
-		} catch {}
+		} catch { }
 	}
 
 	ddg.boot = initSite;
