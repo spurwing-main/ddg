@@ -802,6 +802,57 @@
 			(ddg.modals[id] || createModal(id))?.close();
 		});
 
+		// Allow iframes to request closing the modal via postMessage
+		window.addEventListener('message', (ev) => {
+			const data = ev?.data;
+			if (!data) return;
+			const type = data.type || data.event;
+			if (type === 'ddg:modal-close' || type === 'iframe:close-modal') {
+				const id = data.id || data.modalId || 'story';
+				(ddg.modals[id] || createModal(id))?.close();
+			}
+		});
+
+		// If a close button exists inside a same-origin iframe within the modal,
+		// delegate its click to the parent close logic.
+		document.addEventListener('ddg:modal-opened', (ev) => {
+			const id = ev.detail?.id;
+			if (!id) return;
+			const modalEl = document.querySelector(`[data-modal-el="${id}"]`);
+			if (!modalEl) return;
+			modalEl.querySelectorAll('iframe').forEach((frame) => {
+				try {
+					const doc = frame.contentDocument || frame.contentWindow?.document;
+					if (!doc) return;
+					const handler = (e) => {
+						const target = e.target && (e.target.closest ? e.target.closest('[data-modal-close]') : null);
+						if (target) {
+							try { e.preventDefault?.(); } catch { }
+							(ddg.modals[id] || createModal(id))?.close();
+						}
+					};
+					doc.addEventListener('click', handler);
+					frame.__ddgIframeCloseHandler = handler;
+				} catch { /* cross-origin — ignore */ }
+			});
+		});
+
+		document.addEventListener('ddg:modal-closed', (ev) => {
+			const id = ev.detail?.id;
+			if (!id) return;
+			const modalEl = document.querySelector(`[data-modal-el="${id}"]`);
+			if (!modalEl) return;
+			modalEl.querySelectorAll('iframe').forEach((frame) => {
+				try {
+					const doc = frame.contentDocument || frame.contentWindow?.document;
+					if (doc && frame.__ddgIframeCloseHandler) {
+						doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
+						delete frame.__ddgIframeCloseHandler;
+					}
+				} catch { }
+			});
+		});
+
 		if (!ddg.modalsKeydownBound) {
 			ddg.modalsKeydownBound = true;
 			$(document).on('keydown.modal', (e) => {
@@ -912,8 +963,22 @@
 		});
 
 		$(document).on('click.ajax', '[data-ajax-modal="link"]', (e) => {
-			const $link = $(e.currentTarget);
-			const linkUrl = $link.attr('href');
+			// Respect standard link interactions (new tab/window, middle/right click)
+			if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1 || e.button === 2) return;
+
+			const root = e.currentTarget;
+			let linkUrl = root.getAttribute('href') || '';
+			// Support wrapper elements (e.g., div) containing an <a href>
+			if (!linkUrl) {
+				// Prefer closest anchor from the actual click target within the wrapper
+				const candidate = (e.target && e.target.closest) ? e.target.closest('a[href]') : null;
+				if (candidate && root.contains(candidate)) linkUrl = candidate.getAttribute('href') || '';
+			}
+			if (!linkUrl) {
+				// Fallback: first anchor within the wrapper
+				const a = root.querySelector ? root.querySelector('a[href]') : null;
+				if (a) linkUrl = a.getAttribute('href') || '';
+			}
 			if (!linkUrl) return;
 
 			e.preventDefault();
@@ -953,7 +1018,16 @@
 		let prefetchTimer = null;
 		$(document).on('mouseenter.ajax touchstart.ajax', '[data-ajax-modal="link"]', (e) => {
 			if (!prefetchEnabled) return; // 🔒 skip until 2s have passed
-			const url = e.currentTarget.getAttribute('href');
+			const root = e.currentTarget;
+			let url = root.getAttribute('href') || '';
+			if (!url) {
+				const candidate = (e.target && e.target.closest) ? e.target.closest('a[href]') : null;
+				if (candidate && root.contains(candidate)) url = candidate.getAttribute('href') || '';
+			}
+			if (!url) {
+				const a = root.querySelector ? root.querySelector('a[href]') : null;
+				if (a) url = a.getAttribute('href') || '';
+			}
 			if (!url || storyCache.has(url)) return;
 			clearTimeout(prefetchTimer);
 			prefetchTimer = setTimeout(() => {
