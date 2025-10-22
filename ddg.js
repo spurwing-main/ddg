@@ -11,44 +11,24 @@
 	gsap.ticker.lagSmoothing(500, 33);
 	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 
-	ddg.ws = ddg.ws || (() => {
-		let wsPromise = null;
+	const debounce = (fn, ms = 150) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
-		async function loadWaveSurfer(opts = {}) {
-			const { withRecord = false, version = '7' } = opts;
-
-			if (!window.WaveSurfer) {
-				if (!wsPromise) {
-					wsPromise = new Promise((resolve, reject) => {
-						const s = document.createElement('script');
-						s.src = `https://unpkg.com/wavesurfer.js@${version}/dist/wavesurfer.min.js`;
-						s.async = true;
-						s.onload = () => resolve(true);
-						s.onerror = () => reject(new Error('wavesurfer core failed to load'));
-						document.head.appendChild(s);
-					});
-				}
-				await wsPromise;
-			}
-
-			if (!window.WaveSurfer) throw new Error('WaveSurfer unavailable after load');
-
-			if (withRecord && !window.WaveSurfer.Record) {
-				await new Promise((resolve, reject) => {
-					const s = document.createElement('script');
-					s.src = `https://unpkg.com/wavesurfer.js@${version}/dist/plugins/record.min.js`;
-					s.async = true;
-					s.onload = resolve;
-					s.onerror = () => reject(new Error('wavesurfer record plugin failed to load'));
-					document.head.appendChild(s);
-				});
-			}
-
-			if (withRecord && !window.WaveSurfer.Record) throw new Error('WaveSurfer.Record unavailable after load');
-			return window.WaveSurfer;
+	ddg.resizeEvent = ddg.resizeEvent || (() => {
+		const emit = () => document.dispatchEvent(new CustomEvent('ddg:resize', { detail: { width: window.innerWidth, height: window.innerHeight } }));
+		const updateAndEmit = debounce(() => emit(), 180);
+		let ticking = false;
+		function onWinResize() {
+			if (ticking) return; ticking = true;
+			requestAnimationFrame(() => { ticking = false; updateAndEmit(); });
 		}
-
-		return { loadWaveSurfer };
+		window.addEventListener('resize', onWinResize, { passive: true });
+		const on = (fn) => {
+			if (typeof fn !== 'function') return () => {};
+			const handler = (e) => fn(e.detail || { width: window.innerWidth, height: window.innerHeight });
+			document.addEventListener('ddg:resize', handler);
+			return () => document.removeEventListener('ddg:resize', handler);
+		};
+		return { on };
 	})();
 
 	ddg.fs = (() => {
@@ -423,28 +403,20 @@
 
 		setTapeDurations();
 
-		// ✅ Proper resize handling with debounce
-		let resizeTimer;
+		// ✅ Hook into global ddg:resize (debounced centrally)
 		const handleResize = () => {
-			clearTimeout(resizeTimer);
-			resizeTimer = setTimeout(() => {
-				console.log('[homelistSplit] responsive reflow');
-
-				wraps.forEach(wrap => {
-					const item = wrap.querySelector('.home-list_item');
-					if (!item?.split) return;
-
-					// Official cleanup method
-					item.split.revert();
-					delete item.split;
-					delete item.dataset.splitInit;
-				});
-
-				homelistSplit();
-			}, 300);
+			gsap.utils.toArray('.home-list_item-wrap').forEach(wrap => {
+				const item = wrap.querySelector('.home-list_item');
+				if (!item?.split) return;
+				item.split.revert();
+				delete item.split;
+				delete item.dataset.splitInit;
+			});
+			homelistSplit();
 		};
-
-		window.addEventListener('resize', handleResize, { passive: true });
+		if (!ddg.homelistResizeUnsub) {
+			ddg.homelistResizeUnsub = ddg.resizeEvent.on(() => handleResize());
+		}
 	}
 
 	function share() {
@@ -1224,16 +1196,10 @@
 				willChange: 'transform'
 			});
 
-			let resizeTimer;
-			function handleResize() {
-				clearTimeout(resizeTimer);
-				resizeTimer = setTimeout(() => build(el), 200);
-			}
-
-			window.addEventListener('resize', handleResize);
+			const unsubResize = ddg.resizeEvent.on(() => build(el));
 			el.__ddgMarqueeCleanup = () => {
 				el.__ddgMarqueeTween?.kill();
-				window.removeEventListener('resize', handleResize);
+				if (typeof unsubResize === 'function') unsubResize();
 				delete el.__ddgMarqueeTween;
 				delete el.__ddgMarqueeConfig;
 			};
@@ -1275,8 +1241,6 @@
 		const scope = root;
 		const players = scope.querySelectorAll('.story-player:not([data-audio-init])');
 		if (!players.length) return;
-
-		const wsReady = ddg.ws.loadWaveSurfer();
 
 		players.forEach((playerEl) => {
 			// Ensure a single active player per modal/document root
@@ -1443,8 +1407,8 @@
 			cleanupHandlers.push(() => muteButton.removeEventListener('click', onMute));
 			cleanupHandlers.push(() => shareButton.removeEventListener('click', onShare));
 
-			// Build after WaveSurfer is available
-			wsReady.then(() => createWaveSurfer());
+			// Build immediately; WaveSurfer is assumed available
+			createWaveSurfer();
 
 			// Expose a per-player cleanup method
 			playerEl.__ddgAudioCleanup = cleanup;
@@ -1744,7 +1708,7 @@
 				});
 
 				addSounds();
-				ddg.ws.loadWaveSurfer({ withRecord: true }).then(createWaveSurfer);
+				createWaveSurfer();
 			}
 
 			const { ddgId, isTestMode } = loadData();
@@ -1887,7 +1851,7 @@
 	}
 
 	function relatedFilters() {
-		const SEL = {
+		const selectors = {
 			parent: '[data-relatedfilters="parent"]',
 			target: '[data-relatedfilters="target"]',
 			search: '[data-relatedfilters="search"]',
@@ -1896,19 +1860,19 @@
 			span: '.checkbox_label'
 		};
 
-		const EXCLUDE_FIELDS = new Set(['slug', 'name', 'title']);
+		const excludeFields = new Set(['slug', 'name', 'title']);
 
 		console.log('[relatedFilters] ready');
 
 		// Ensure targets start empty on load (before data is available)
 		try {
-			Array.from(document.querySelectorAll(SEL.target)).forEach((el) => clearTarget(el));
+			Array.from(document.querySelectorAll(selectors.target)).forEach((el) => clearTarget(el));
 		} catch { }
 
 		function hasAnyUsableValues(values) {
 			if (!values) return false;
 			for (const [k, arr] of Object.entries(values)) {
-				if (EXCLUDE_FIELDS.has(k)) continue;
+				if (excludeFields.has(k)) continue;
 				if (Array.isArray(arr) && arr.length) return true;
 			}
 			return false;
@@ -1918,9 +1882,9 @@
 			const values = ddg.fs.valuesForItemSafe(item);
 
 			// Always clear targets first; if no usable values, leave empty
-			const parents = Array.from(document.querySelectorAll(SEL.parent));
+			const parents = Array.from(document.querySelectorAll(selectors.parent));
 			parents.forEach((parent) => {
-				const target = parent.querySelector(SEL.target);
+				const target = parent.querySelector(selectors.target);
 				if (target) clearTarget(target);
 			});
 
@@ -1956,21 +1920,21 @@
 		}
 
 		function renderListForItem(parent, itemValues) {
-			const target = parent.querySelector(SEL.target);
+			const target = parent.querySelector(selectors.target);
 			if (!target) return;
 
 			// get a template label if present in DOM, else build one
-			const tpl = target.querySelector(SEL.label) || createLabelTemplate();
+			const tpl = target.querySelector(selectors.label) || createLabelTemplate();
 			clearTarget(target);
 
 			let count = 0;
 			for (const [field, arr] of Object.entries(itemValues || {})) {
 				if (!arr || !arr.length) continue;
-				if (EXCLUDE_FIELDS.has(field)) continue;
+				if (excludeFields.has(field)) continue;
 				for (const val of Array.from(new Set(arr))) {
 					const clone = tpl.cloneNode(true);
-					const input = clone.querySelector(SEL.input);
-					const span = clone.querySelector(SEL.span);
+					const input = clone.querySelector(selectors.input);
+					const span = clone.querySelector(selectors.span);
 					if (!input || !span) continue;
 
 					const id = `rf-${field}-${count++}`;
@@ -1985,7 +1949,7 @@
 			}
 			// ensure selection wiring and initial active classes
 			wireSelectable(parent);
-			const inputs = parent.querySelectorAll(`${SEL.target} ${SEL.input}`);
+			const inputs = parent.querySelectorAll(`${selectors.target} ${selectors.input}`);
 			inputs.forEach((i) => {
 				const label = i.closest('label');
 				if (!label) return;
@@ -1994,7 +1958,7 @@
 		}
 
 		function collectSelections(parent) {
-			const selected = parent.querySelectorAll(`${SEL.target} ${SEL.input}:checked`);
+			const selected = parent.querySelectorAll(`${selectors.target} ${selectors.input}:checked`);
 			const map = {};
 			selected.forEach((el) => {
 				const f = el.getAttribute('fs-list-field');
@@ -2012,14 +1976,14 @@
 			// Toggle active class when a checkbox changes
 			parent.addEventListener('change', (e) => {
 				const input = e.target;
-				if (!input || !input.matches(SEL.input)) return;
+				if (!input || !input.matches(selectors.input)) return;
 				const label = input.closest('label');
 				if (!label) return;
 				label.classList.toggle('is-list-active', input.checked);
 			});
 
 			// Initialize current active states (in case of SSR or restored DOM)
-			const inputs = parent.querySelectorAll(`${SEL.target} ${SEL.input}`);
+			const inputs = parent.querySelectorAll(`${selectors.target} ${selectors.input}`);
 			inputs.forEach((i) => {
 				const label = i.closest('label');
 				if (!label) return;
@@ -2028,7 +1992,7 @@
 		}
 
 		function wireSearch(parent) {
-			const btn = parent.querySelector(SEL.search);
+			const btn = parent.querySelector(selectors.search);
 			if (!btn || btn.rfBound) return;
 			btn.rfBound = true;
 			btn.addEventListener('click', async (e) => {
