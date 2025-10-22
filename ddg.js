@@ -11,6 +11,46 @@
 	gsap.ticker.lagSmoothing(500, 33);
 	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
 
+	ddg.ws = ddg.ws || (() => {
+		let wsPromise = null;
+
+		async function loadWaveSurfer(opts = {}) {
+			const { withRecord = false, version = '7' } = opts;
+
+			if (!window.WaveSurfer) {
+				if (!wsPromise) {
+					wsPromise = new Promise((resolve, reject) => {
+						const s = document.createElement('script');
+						s.src = `https://unpkg.com/wavesurfer.js@${version}/dist/wavesurfer.min.js`;
+						s.async = true;
+						s.onload = () => resolve(true);
+						s.onerror = () => reject(new Error('wavesurfer core failed to load'));
+						document.head.appendChild(s);
+					});
+				}
+				await wsPromise;
+			}
+
+			if (!window.WaveSurfer) throw new Error('WaveSurfer unavailable after load');
+
+			if (withRecord && !window.WaveSurfer.Record) {
+				await new Promise((resolve, reject) => {
+					const s = document.createElement('script');
+					s.src = `https://unpkg.com/wavesurfer.js@${version}/dist/plugins/record.min.js`;
+					s.async = true;
+					s.onload = resolve;
+					s.onerror = () => reject(new Error('wavesurfer record plugin failed to load'));
+					document.head.appendChild(s);
+				});
+			}
+
+			if (withRecord && !window.WaveSurfer.Record) throw new Error('WaveSurfer.Record unavailable after load');
+			return window.WaveSurfer;
+		}
+
+		return { loadWaveSurfer };
+	})();
+
 	ddg.fs = (() => {
 		let readyPromise = null;
 		let firstResolved = false;
@@ -250,16 +290,6 @@
 
 		console.log('[ddg] booting site');
 
-		if (typeof window !== 'undefined' && window.location.hostname === 'localhost' || window.location.search.includes('debug')) {
-			const events = ['ddg:ajax-home-ready', 'ddg:list-ready', 'ddg:story-opened', 'ddg:current-item-changed', 'ddg:modal-opened', 'ddg:modal-closed'];
-			events.forEach(name => {
-				document.addEventListener(name, (e) => {
-					console.log(`🔔 ${name}`, e.detail || '');
-				});
-			});
-			console.log('[ddg] event logger active for:', events.join(', '));
-		}
-
 		requestAnimationFrame(() => {
 			nav();
 			modals();
@@ -268,6 +298,8 @@
 			ajaxStories();
 			marquee();
 			homelistSplit();
+			outreach();
+			storiesAudioPlayer();
 			share();
 			randomFilters();
 		});
@@ -414,22 +446,6 @@
 
 		window.addEventListener('resize', handleResize, { passive: true });
 	}
-
-	// Cleanup on resize
-	let resizeTimer;
-	window.addEventListener('resize', () => {
-		clearTimeout(resizeTimer);
-		resizeTimer = setTimeout(() => {
-			document.querySelectorAll('.home-list_item').forEach(item => {
-				if (item.ddgSplit) {
-					try {
-						item.ddgSplit.revert();
-					} catch (_) { }
-					delete item.ddgSplit;
-				}
-			});
-		}, 200);
-	});
 
 	function share() {
 		if (ddg.shareInitialized) return;
@@ -1250,6 +1266,494 @@
 				try { el.__ddgMarqueeCleanup?.(); } catch { }
 				el.removeAttribute('data-marquee-init');
 			});
+		});
+	}
+
+	function storiesAudioPlayer(root = document) {
+		if (!root || !root.querySelectorAll) return;
+
+		const scope = root;
+		const players = scope.querySelectorAll('.story-player:not([data-audio-init])');
+		if (!players.length) return;
+
+		const wsReady = ddg.ws.loadWaveSurfer();
+
+		players.forEach((playerEl) => {
+			// Ensure a single active player per modal/document root
+			const ownerRoot = playerEl.closest('[data-modal-el]') || document.body;
+			if (ownerRoot.hasAttribute('data-audio-active')) return;
+
+			const audioFileUrl = playerEl?.dataset?.audioUrl || '';
+			if (!audioFileUrl) return;
+
+			const waveformContainer = playerEl.querySelector('.story-player_waveform');
+			const playButton = playerEl.querySelector("button[data-player='play']");
+			const muteButton = playerEl.querySelector("button[data-player='mute']");
+			const shareButton = playerEl.querySelector("button[data-player='share']");
+
+			if (!waveformContainer || !playButton || !muteButton || !shareButton) return;
+
+			const playIcon = playButton.querySelector('.circle-btn_icon.is-play');
+			const pauseIcon = playButton.querySelector('.circle-btn_icon.is-pause');
+			const muteIcon = muteButton.querySelector('.circle-btn_icon.is-mute');
+			const unmuteIcon = muteButton.querySelector('.circle-btn_icon.is-unmute');
+
+			// Find the scrolling panel within the story modal if present
+			const modalRoot = playerEl.closest('[data-modal-el]') || document;
+			const scroller = (modalRoot.querySelector('.lightbox_panel') || document.querySelector('.lightbox_panel'));
+			if (!scroller) return;
+
+			// Guard this root and mark this player as initialized
+			ownerRoot.setAttribute('data-audio-active', '');
+			playerEl.setAttribute('data-audio-init', '');
+
+			let wavesurfer = null;
+			let isMuted = false;
+			let isPlaying = false;
+			let status = 'not ready';
+			let hasPlayedOnce = false;
+			let flipInstance = null;
+			let cleanupHandlers = [];
+			let originalParent = playerEl.parentNode;
+			let originalNext = playerEl.nextSibling;
+
+			const prefersReduced = () => window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+
+			const setBtnDisabled = (btn, on) => { try { btn.disabled = !!on; } catch { } };
+
+			function updatePlayButton() {
+				if (isPlaying) {
+					playButton.setAttribute('data-state', 'playing');
+					playButton.setAttribute('aria-label', 'Pause');
+					if (playIcon) playIcon.style.display = 'none';
+					if (pauseIcon) pauseIcon.style.display = 'grid';
+				} else {
+					playButton.setAttribute('data-state', 'paused');
+					playButton.setAttribute('aria-label', 'Play');
+					if (playIcon) playIcon.style.display = 'block';
+					if (pauseIcon) pauseIcon.style.display = 'none';
+				}
+			}
+
+			function updateMuteButton() {
+				if (isMuted) {
+					muteButton.setAttribute('aria-label', 'Unmute');
+					muteButton.setAttribute('data-state', 'muted');
+					if (muteIcon) muteIcon.style.display = 'none';
+					if (unmuteIcon) unmuteIcon.style.display = 'block';
+				} else {
+					muteButton.setAttribute('aria-label', 'Mute');
+					muteButton.setAttribute('data-state', 'unmuted');
+					if (muteIcon) muteIcon.style.display = 'block';
+					if (unmuteIcon) unmuteIcon.style.display = 'none';
+				}
+			}
+
+			function scrollToSel(sel) {
+				const target = (modalRoot || document).querySelector(sel);
+				if (!target) return;
+				gsap.to(scroller, { duration: prefersReduced() ? 0 : 1.2, scrollTo: sel, ease: 'power2.out' });
+			}
+
+			function initPlayerFlip() {
+				const topBar = modalRoot.querySelector('.lightbox_top-bar');
+				const topNumber = modalRoot.querySelector('.lightbox_top-number');
+				if (!topBar || !topNumber) return;
+				const state = Flip.getState(playerEl);
+				topNumber.insertAdjacentElement('afterend', playerEl);
+				flipInstance = Flip.from(state, { duration: prefersReduced() ? 0 : 0.8, ease: 'power2.out', scale: true });
+			}
+
+			function createWaveSurfer() {
+				if (wavesurfer) return;
+				if (typeof WaveSurfer === 'undefined') throw new Error('audio: WaveSurfer not available');
+
+				wavesurfer = WaveSurfer.create({
+					container: waveformContainer,
+					height: 42,
+					waveColor: '#b6b83bff',
+					progressColor: '#2C2C2C',
+					cursorColor: '#2C2C2C',
+					normalize: true,
+					barWidth: 2,
+					barGap: 1,
+					dragToSeek: true,
+					url: audioFileUrl,
+					interact: true
+				});
+
+				wavesurfer.once('ready', () => {
+					status = 'ready';
+					setBtnDisabled(playButton, false);
+					setBtnDisabled(muteButton, false);
+					console.log('[audio] waveform ready');
+				});
+
+				wavesurfer.on('play', () => { isPlaying = true; status = 'playing'; updatePlayButton(); });
+				wavesurfer.on('pause', () => { isPlaying = false; status = 'paused'; updatePlayButton(); });
+				wavesurfer.on('finish', () => { isPlaying = false; status = 'finished'; updatePlayButton(); });
+			}
+
+			function cleanup() {
+				cleanupHandlers.forEach((off) => off());
+				cleanupHandlers = [];
+				if (flipInstance) flipInstance.kill();
+				flipInstance = null;
+				if (wavesurfer) wavesurfer.destroy();
+				wavesurfer = null;
+				if (originalParent) originalParent.insertBefore(playerEl, originalNext || null);
+				playerEl.removeAttribute('data-audio-init');
+				ownerRoot.removeAttribute('data-audio-active');
+				console.log('[audio] cleaned up');
+			}
+
+			// Initial UI state
+			setBtnDisabled(playButton, true);
+			setBtnDisabled(muteButton, true);
+			updatePlayButton();
+			updateMuteButton();
+
+			// Wire controls
+			const onPlay = (e) => {
+				if (!wavesurfer) return;
+				if (!hasPlayedOnce && (status === 'ready' || status === 'not ready')) {
+					hasPlayedOnce = true;
+					try { wavesurfer.play(); } catch { }
+					// Scroll to main content
+					try { scrollToSel('.story_main'); } catch { }
+					// Defer the FLIP move slightly to avoid jank
+					setTimeout(() => { try { initPlayerFlip(); } catch { } }, 100);
+				} else {
+					try { wavesurfer.playPause(); } catch { }
+				}
+			};
+			const onMute = (e) => {
+				if (!wavesurfer) return;
+				isMuted = !isMuted;
+				try { wavesurfer.setMuted(isMuted); } catch { }
+				updateMuteButton();
+			};
+			const onShare = (e) => { e?.preventDefault?.(); scrollToSel('.story_share'); };
+
+			playButton.addEventListener('click', onPlay);
+			muteButton.addEventListener('click', onMute);
+			shareButton.addEventListener('click', onShare);
+
+			cleanupHandlers.push(() => playButton.removeEventListener('click', onPlay));
+			cleanupHandlers.push(() => muteButton.removeEventListener('click', onMute));
+			cleanupHandlers.push(() => shareButton.removeEventListener('click', onShare));
+
+			// Build after WaveSurfer is available
+			wsReady.then(() => createWaveSurfer());
+
+			// Expose a per-player cleanup method
+			playerEl.__ddgAudioCleanup = cleanup;
+		});
+	}
+
+	// modal lifecycle integration for audio player
+	document.addEventListener('ddg:modal-opened', e => {
+		const id = e.detail?.id;
+		const modal = document.querySelector(`[data-modal-el="${id}"]`);
+		if (modal) storiesAudioPlayer(modal);
+	});
+
+	document.addEventListener('ddg:modal-closed', e => {
+		const id = e.detail?.id;
+		const modal = document.querySelector(`[data-modal-el="${id}"]`);
+		if (!modal) return;
+		modal.querySelectorAll('.story-player[data-audio-init]').forEach((el) => {
+			try { el.__ddgAudioCleanup?.(); } catch { }
+		});
+	});
+
+	function outreach(root = document) {
+		const recs = Array.from(root.querySelectorAll('.recorder:not([data-outreach-init])'));
+		if (!recs.length) return;
+
+		recs.forEach((recorder) => {
+			// Required UI
+			const btnRecord = recorder.querySelector('#rec-record');
+			const btnPlay = recorder.querySelector('#rec-playback');
+			const btnClear = recorder.querySelector('#rec-clear');
+			const btnSave = recorder.querySelector('#rec-save');
+			const btnSubmit = recorder.querySelector('#rec-submit');
+			const msg = recorder.querySelector('.recorder_msg-l, .recorder_msg-s') || recorder.querySelector('.recorder_msg-l');
+			const prog = recorder.querySelector('.recorder_timer');
+			const form = recorder.querySelector('#rec-form');
+			const visRecordSel = '.recorder_visualiser.is-record';
+			const visPlaybackSel = '.recorder_visualiser.is-playback';
+			if (!btnRecord || !btnPlay || !btnClear || !btnSave || !btnSubmit || !msg || !prog || !form) return;
+
+			recorder.setAttribute('data-outreach-init', '');
+
+			let status = 'ready';
+			let wsRec = null;
+			let wsPlayback = null;
+			let recordPlugin = null;
+			let recordedBlob = null;
+			let isRecording = false;
+			let sound = new Audio();
+			let welcomeHasPlayed = false;
+
+			const welcomeURL = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3';
+			const click1 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3';
+			const click2 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3';
+
+			function setStatus(next) {
+				recorder.setAttribute('ddg-status', next);
+				status = next;
+				return status;
+			}
+
+			function updateMessage(text, size) {
+				if (!msg) return;
+				msg.innerHTML = text ? String(text) : 'Ready?';
+				if (size === 'small') {
+					msg.classList.remove('recorder_msg-l');
+					msg.classList.add('recorder_msg-s');
+				} else {
+					msg.classList.remove('recorder_msg-s');
+					msg.classList.add('recorder_msg-l');
+				}
+			}
+
+			function updateProgress(time, units) {
+				if (!prog) return;
+				let mm, ss;
+				if (units === 's') {
+					mm = Math.floor((time % 3600000) / 60);
+					ss = Math.floor((time % 60000) / 1);
+				} else {
+					mm = Math.floor((time % 3600000) / 60000);
+					ss = Math.floor((time % 60000) / 1000);
+				}
+				prog.textContent = [mm, ss].map(v => (v < 10 ? '0' + v : v)).join(':');
+			}
+
+			function beep(duration = 500, frequency = 1000, volume = 1) {
+				const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+				const oscillator = audioCtx.createOscillator();
+				const gainNode = audioCtx.createGain();
+				oscillator.type = 'sine';
+				oscillator.frequency.value = frequency;
+				gainNode.gain.value = volume;
+				oscillator.connect(gainNode);
+				gainNode.connect(audioCtx.destination);
+				oscillator.start();
+				setTimeout(() => { oscillator.stop(); audioCtx.close(); }, duration);
+			}
+
+			function addSounds() {
+				recorder.querySelectorAll('.recorder_btn').forEach((button) => {
+					button.addEventListener('mousedown', () => { sound = new Audio(click1); sound.play(); });
+					button.addEventListener('mouseup', () => { sound = new Audio(click2); sound.play(); });
+				});
+			}
+
+			function qsParam(name) { return new URLSearchParams(window.location.search).get(name); }
+
+			function redirectError() { window.location.replace('/share-your-story-error'); }
+			function redirectSuccess(id) { window.location.replace('/share-your-story-success?ddg_id=' + encodeURIComponent(id || '')); }
+
+			function loadData() {
+				const ddgId = qsParam('ddg_id');
+				const isTestMode = qsParam('test_mode');
+				const name = qsParam('ddg_name');
+
+				if (!ddgId) {
+					updateMessage('Error :(');
+					recorder.style.pointerEvents = 'none';
+					redirectError();
+					return { ddgId, isTestMode };
+				}
+
+				const ddgIdInput = recorder.querySelector('#ddg-id');
+				if (ddgIdInput) ddgIdInput.value = ddgId;
+
+				if (name) {
+					const section = document.querySelector('.outreach-hero');
+					if (section) {
+						if (name.length > 12) section.classList.add('is-sm');
+						else if (name.length > 6) section.classList.add('is-md');
+					}
+					document.querySelectorAll('.outreach-hero_word.is-name').forEach(el => { el.textContent = name; });
+					gsap.to('.outreach-hero_content', { autoAlpha: 1, duration: 0.1 });
+				}
+
+				return { ddgId, isTestMode };
+			}
+
+			async function checkSubmission(ddgId) {
+				const res = await fetch('https://hook.eu2.make.com/82eitnupdvhl1yn3agge1riqmonwlvg3?ddg_id=' + encodeURIComponent(ddgId));
+				const data = await res.json();
+				if (!data) return redirectError();
+				if (data.status === 'no-id') return redirectError();
+				if (data.status === 'recording') return redirectSuccess(ddgId);
+			}
+
+			function wireRecorder(ddgId) {
+				// Initial disabled states
+				btnPlay.disabled = true;
+				btnClear.disabled = true;
+				btnSave.disabled = true;
+
+				function createWaveSurfer() {
+					if (wsRec) { try { wsRec.destroy(); } catch { } }
+					wsRec = WaveSurfer.create({
+						container: visRecordSel,
+						waveColor: 'rgb(0, 0, 0)',
+						progressColor: 'rgb(0, 0, 0)',
+						normalize: false,
+						barWidth: 4,
+						barGap: 6,
+						barHeight: 2.5
+					});
+
+					recordPlugin = wsRec.registerPlugin(WaveSurfer.Record.create({
+						renderRecordedAudio: false,
+						scrollingWaveform: false,
+						continuousWaveform: false,
+						continuousWaveformDuration: 30
+					}));
+
+					recordPlugin.on('record-progress', (time) => updateProgress(time));
+					recordPlugin.on('record-end', (blob) => {
+						recordedBlob = blob;
+						if (isRecording) {
+							setStatus('saved');
+							const url = URL.createObjectURL(blob);
+							if (wsPlayback) { try { wsPlayback.destroy(); } catch { } }
+							wsPlayback = WaveSurfer.create({
+								container: visPlaybackSel,
+								waveColor: '#B1B42E',
+								progressColor: 'rgb(0, 0, 0)',
+								normalize: false,
+								barWidth: 4,
+								barGap: 6,
+								barHeight: 2.5,
+								url
+							});
+
+							btnPlay.onclick = () => wsPlayback.playPause();
+							wsPlayback.on('pause', () => { if (status === 'playback') setStatus('saved'); });
+							wsPlayback.on('play', () => setStatus('playback'));
+							wsPlayback.on('timeupdate', (t) => updateProgress(t, 's'));
+						}
+					});
+				}
+
+				function startRecording() {
+					isRecording = true;
+					btnRecord.disabled = false;
+					btnSave.disabled = false;
+					btnClear.disabled = false;
+					btnPlay.disabled = true;
+					if (recordPlugin.isRecording()) {
+						setStatus('recording-paused');
+						recordPlugin.pauseRecording();
+						try { wsRec.empty(); } catch { }
+						updateMessage('Recording paused.<br>You can continue adding to your recording, and when you\'re finished, hit Save to listen back.', 'small');
+						return;
+					} else if (recordPlugin.isPaused()) {
+						setStatus('recording');
+						recordPlugin.resumeRecording();
+						return;
+					} else {
+						recordPlugin.startRecording().then(() => setStatus('recording'));
+					}
+				}
+
+				btnRecord.onclick = async () => {
+					btnSave.disabled = true;
+					btnClear.disabled = true;
+					btnPlay.disabled = true;
+					btnRecord.disabled = true;
+					btnSubmit.disabled = true;
+
+					if (!welcomeHasPlayed) {
+						welcomeHasPlayed = true;
+						setStatus('welcome');
+						sound = new Audio(welcomeURL);
+						await sound.play();
+						updateMessage('👋<br>What\'s the craic!<br>You\'ve reached the DropDeadGenerous answering machine.<br>Leave your story after the tone...', 'small');
+
+						sound.onended = async () => {
+							updateMessage('3', 'large'); await new Promise(r => setTimeout(r, 1000));
+							updateMessage('2', 'large'); await new Promise(r => setTimeout(r, 1000));
+							updateMessage('1', 'large'); await new Promise(r => setTimeout(r, 1000));
+							beep(300, 900, 0.7);
+							await new Promise(r => setTimeout(r, 700));
+							startRecording();
+						};
+					} else {
+						startRecording();
+					}
+				};
+
+				btnSave.onclick = () => {
+					setStatus('saved');
+					recordPlugin.stopRecording();
+					btnPlay.disabled = false;
+					btnClear.disabled = false;
+					btnSave.disabled = false;
+					btnRecord.disabled = false;
+					btnSubmit.disabled = false;
+					updateMessage('Hit the submit button to send us your voice recording. You can only do this once, so feel free to play it back and have a listen 👂', 'small');
+				};
+
+				btnClear.onclick = () => {
+					if (status === 'playback' && wsPlayback) wsPlayback.pause();
+					setStatus('ready');
+					updateMessage();
+					isRecording = false;
+					recordPlugin.stopRecording();
+					try { wsRec.empty(); } catch { }
+					btnClear.disabled = true;
+					btnPlay.disabled = true;
+					btnSave.disabled = true;
+					btnRecord.disabled = false;
+				};
+
+				btnSubmit.addEventListener('click', async (e) => {
+					e.preventDefault();
+
+					if (status === 'playback' && wsPlayback) wsPlayback.pause();
+					setStatus('submitting');
+					updateMessage('Uploading your recording...', 'small');
+
+					if (!recordedBlob) return;
+
+					const formData = new FormData();
+					formData.append('file', recordedBlob, ddgId + '.webm');
+					formData.append('upload_preset', 'ddg-recordings');
+
+					const resp = await fetch('https://api.cloudinary.com/v1_1/daoliqze4/video/upload', {
+						method: 'POST', body: formData
+					});
+					const data = await resp.json();
+					if (!data.secure_url) { redirectError(); return; }
+
+					form.querySelector('#file-url').value = data.secure_url;
+					form.querySelector('[type="submit"]').click();
+				});
+
+				form.addEventListener('submit', (e) => {
+					e.preventDefault();
+					redirectSuccess(ddgId);
+				});
+
+				addSounds();
+				ddg.ws.loadWaveSurfer({ withRecord: true }).then(createWaveSurfer);
+			}
+
+			const { ddgId, isTestMode } = loadData();
+			if (!ddgId) return;
+			if (!isTestMode) {
+				checkSubmission(ddgId).catch(() => { });
+			}
+			setStatus('ready');
+			wireRecorder(ddgId);
 		});
 	}
 
