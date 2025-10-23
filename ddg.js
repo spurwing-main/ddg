@@ -617,12 +617,42 @@
 			scrollAny: '[data-modal-scroll]',
 		};
 
+		// Ensure a stable baseline: reflect closed state on load before any interaction
+		try {
+			const root = document.documentElement;
+			const initiallyOpen = document.querySelector('[data-modal-el].is-open');
+			if (initiallyOpen) {
+				const id = initiallyOpen.getAttribute('data-modal-el');
+				root.setAttribute('data-modal-state', 'open');
+				if (id) root.setAttribute('data-modal-id', id);
+			} else {
+				root.setAttribute('data-modal-state', 'closed');
+				root.removeAttribute('data-modal-id');
+			}
+		} catch { }
+
 		const syncCssState = ($modal, open, id) => {
 			const $bg = $(`[data-modal-bg="${id}"]`);
 			const $inner = $modal.find(selectors.inner).first();
 			[$modal[0], $inner[0], $bg[0]].filter(Boolean).forEach(el => {
 				open ? el.classList.add('is-open') : el.classList.remove('is-open');
 			});
+
+			// Also reflect a global state for CSS with [data-modal-state]
+			try {
+				const root = document.documentElement;
+				if (open) {
+					root.setAttribute('data-modal-state', 'open');
+					root.setAttribute('data-modal-id', String(id || ''));
+				} else {
+					// Only mark closed if no other modal is currently open
+					const anyOpen = !!document.querySelector('[data-modal-el].is-open');
+					if (!anyOpen) {
+						root.setAttribute('data-modal-state', 'closed');
+						root.removeAttribute('data-modal-id');
+					}
+				}
+			} catch { }
 		};
 
 		const createModal = (id) => {
@@ -765,6 +795,7 @@
 					document.removeEventListener('keydown', onKeydownTrap, true);
 					if (lastActiveEl) lastActiveEl.focus();
 					lastActiveEl = null;
+					syncCssState($modal, false, id);
 					ddg.utils.emit('ddg:modal-closed', { id });
 					closing = false;
 					closingTl = null;
