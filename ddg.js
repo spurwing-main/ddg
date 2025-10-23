@@ -87,7 +87,8 @@
 		let lastW = window.innerWidth || 0;
 		let pendingW = lastW;
 		let ticking = false;
-		const MIN_DELTA = 16; // px threshold to consider a width change meaningful
+		let lastOrientation = (window.matchMedia && window.matchMedia('(orientation: portrait)').matches) ? 'portrait' : 'landscape';
+		const MIN_DELTA_BASE = 24; // px baseline threshold to consider a width change meaningful
 		const emit = () => ddg.utils.emit('ddg:resize', { width: lastW, height: window.innerHeight });
 		const updateAndEmit = ddg.utils.debounce(() => emit(), 180);
 
@@ -98,10 +99,19 @@
 			ticking = true;
 			requestAnimationFrame(() => {
 				try {
-					// Only proceed if width changed meaningfully; ignore height-only resizes
-					if (Math.abs(pendingW - lastW) >= MIN_DELTA) {
+					// Orientation change should always emit, regardless of delta
+					const currOrientation = (window.matchMedia && window.matchMedia('(orientation: portrait)').matches) ? 'portrait' : 'landscape';
+					if (currOrientation !== lastOrientation) {
+						lastOrientation = currOrientation;
 						lastW = pendingW;
-						updateAndEmit();
+						emit();
+					} else {
+						// Only proceed if width changed meaningfully; ignore height-only resizes
+						const dynamicDelta = Math.max(MIN_DELTA_BASE, Math.round(lastW * 0.03)); // ~3% or 24px
+						if (Math.abs(pendingW - lastW) >= dynamicDelta) {
+							lastW = pendingW;
+							updateAndEmit();
+						}
 					}
 				} finally {
 					ticking = false;
@@ -525,7 +535,6 @@
 			whatsapp: ({ url, text }) => `https://wa.me/?text=${encodeURIComponent(`${text} ${url}`)}`,
 			messenger: ({ url }) => `https://www.messenger.com/t/?link=${encodeURIComponent(url)}`,
 			snapchat: ({ url }) => `https://www.snapchat.com/scan?attachmentUrl=${encodeURIComponent(url)}`,
-			instagram: () => 'https://www.instagram.com/',
 			telegram: ({ url, text }) => `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`
 		};
 
@@ -697,10 +706,14 @@
 			};
 
 			const resolveScrollContainer = () => {
+				// Prefer the modal's inner wrapper which is the actual scrollable region
+				if ($inner && $inner[0]) return $inner[0];
+				// Fallbacks for custom containers if explicitly keyed to this modal id
 				const $global = $(`[data-modal-scroll="${id}"]`).first();
 				if ($global.length) return $global[0];
-				const $local = $modal.find(selectors.scrollAny).first();
-				return $local[0] || $inner[0] || $modal[0];
+				const $scoped = $modal.find(`[data-modal-scroll="${id}"]`).first();
+				if ($scoped.length) return $scoped[0];
+				return $modal[0];
 			};
 
 			const scrollToAnchor = (hash) => {
@@ -729,14 +742,19 @@
 			};
 
 
-			// handle waveform share or any button-based scroll trigger
-			$modal.on('click.modalShare', 'a[href^="#"], button[href^="#"]', (e) => {
+			// Internal anchor links should scroll the modal's scroll container
+			$modal.on('click.modalAnchor', 'a[href^="#"], button[href^="#"]', (e) => {
+				const href = e.currentTarget.getAttribute('href') || '';
+				const hash = href.replace(/^#/, '').trim();
+				if (!hash) return;
 				e.preventDefault();
 				e.stopPropagation();
-				scrollToAnchor('share');
-				const u = new URL(window.location.href);
-				u.hash = 'share';
-				window.history.replaceState(window.history.state, '', u.toString());
+				scrollToAnchor(hash);
+				try {
+					const u = new URL(window.location.href);
+					u.hash = hash;
+					window.history.replaceState(window.history.state, '', u.toString());
+				} catch {}
 			});
 
 			const open = ({ skipAnimation = false, afterOpen } = {}) => {
@@ -953,7 +971,27 @@
 		});
 
 		let storyModal = ddg.modals?.[storyModalId] || null;
-		const storyCache = new Map();
+		const STORY_CACHE_MAX = 20;
+		const STORY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+		const storyCache = new Map(); // Map<url, { title, contentHTML, t }>
+		const cacheGet = (url) => {
+			const ent = storyCache.get(url);
+			if (!ent) return null;
+			if (Date.now() - ent.t > STORY_CACHE_TTL) { storyCache.delete(url); return null; }
+			storyCache.delete(url); storyCache.set(url, ent); // mark as recent
+			return ent;
+		};
+		const cacheSet = (url, payload) => {
+			storyCache.set(url, { ...payload, t: Date.now() });
+			if (storyCache.size > STORY_CACHE_MAX) {
+				const overflow = storyCache.size - STORY_CACHE_MAX;
+				for (let i = 0; i < overflow; i++) {
+					const firstKey = storyCache.keys().next().value;
+					if (firstKey == null) break;
+					storyCache.delete(firstKey);
+				}
+			}
+		};
 		let lock = false;
 
 		let prefetchEnabled = false;
@@ -962,7 +1000,7 @@
 		const parseStory = (html) => {
 			const doc = new DOMParser().parseFromString(html, 'text/html');
 			const node = doc.querySelector('[data-ajax-modal="content"]');
-			return { $content: node ? $(node) : null, title: doc.title || '' };
+			return { title: doc.title || '', contentHTML: node ? node.innerHTML : "<div class='modal-error'>Failed to load content.</div>" };
 		};
 
 		const ensureModal = () => {
@@ -971,11 +1009,14 @@
 			return storyModal;
 		};
 
-		const openStory = (url, title, $content) => {
+		const openStory = (url, title, contentHTML) => {
 			const modal = ensureModal();
 			if (!modal) { return; }
 
-			$embed.empty().append($content);
+			$embed.empty();
+			const container = document.createElement('div');
+			container.innerHTML = contentHTML || "<div class='modal-error'>Failed to load content.</div>";
+			$embed[0].append(...Array.from(container.childNodes));
 			modal.open({
 				afterOpen: () => {
 					if (title) document.title = title;
@@ -1030,9 +1071,9 @@
 			if (lock) { return; }
 			lock = true;
 
-			if (storyCache.has(linkUrl)) {
-				const { $content, title } = storyCache.get(linkUrl);
-				openStory(linkUrl, title, $content);
+			if (cacheGet(linkUrl)) {
+				const { title, contentHTML } = cacheGet(linkUrl);
+				openStory(linkUrl, title, contentHTML);
 				lock = false;
 				return;
 			}
@@ -1041,13 +1082,11 @@
 
 			$.ajax({
 				url: linkUrl,
-				success: (response) => {
-					const parsed = parseStory(response);
-					if (!parsed.$content) parsed.$content = $("<div class='modal-error'>Failed to load content.</div>");
-					storyCache.set(linkUrl, parsed);
-					openStory(linkUrl, parsed.title, parsed.$content);
-					if (parsed.$content?.[0]) { marquee(parsed.$content[0]); }
-				},
+					success: (response) => {
+						const parsed = parseStory(response);
+						cacheSet(linkUrl, parsed);
+						openStory(linkUrl, parsed.title, parsed.contentHTML);
+					},
 				error: () => {
 					$embed.empty().append("<div class='modal-error'>Failed to load content.</div>");
 				},
@@ -1068,14 +1107,13 @@
 				const a = root.querySelector ? root.querySelector('a[href]') : null;
 				if (a) url = a.getAttribute('href') || '';
 			}
-			if (!url || storyCache.has(url)) return;
+			if (!url || cacheGet(url)) return;
 			clearTimeout(prefetchTimer);
 			prefetchTimer = setTimeout(() => {
 				$.ajax({
 					url, success: (html) => {
-						if (storyCache.has(url)) return;
-						storyCache.set(url, parseStory(html));
-
+						if (cacheGet(url)) return;
+						cacheSet(url, parseStory(html));
 					}
 				});
 			}, 120);
@@ -1201,26 +1239,45 @@
 			const inner = el.querySelector('.marquee-inner');
 			if (!inner || !el.offsetParent) return;
 
+			const width = el.offsetWidth || 0;
+			if (!width) return;
 
-			// Capture original content once, then rebuild from it each time
+			// Capture original content once, then re-clone only as needed.
 			if (!el.__ddgMarqueeOriginal) {
 				el.__ddgMarqueeOriginal = Array.from(inner.children).map(n => n.cloneNode(true));
-			}
-			inner.textContent = '';
-			el.__ddgMarqueeOriginal.forEach(n => inner.appendChild(n.cloneNode(true)));
-
-			const width = el.offsetWidth;
-			let contentWidth = inner.scrollWidth;
-			if (!width || !contentWidth) return;
-
-			const baseWidth = inner.scrollWidth;
-			let minTotal = Math.max(width * 2, baseWidth * 2);
-			let copies = Math.ceil(minTotal / Math.max(1, baseWidth));
-			if (copies % 2 !== 0) copies += 1; // ensure even number for seamless half-swap
-			for (let k = 1; k < copies; k++) {
+				// Reset to one set for base measurements
+				inner.textContent = '';
 				el.__ddgMarqueeOriginal.forEach(n => inner.appendChild(n.cloneNode(true)));
+				el.__ddgMarqueeBaseWidth = inner.scrollWidth || 0;
+				el.__ddgMarqueeCopies = 1;
 			}
 
+			const baseWidth = el.__ddgMarqueeBaseWidth || 0;
+			if (!baseWidth) return;
+
+			// Determine desired number of copies; ensure even for seamless half-swap
+			let minTotal = Math.max(width * 2, baseWidth * 2);
+			let targetCopies = Math.ceil(minTotal / Math.max(1, baseWidth));
+			if (targetCopies % 2 !== 0) targetCopies += 1;
+			if (targetCopies < 2) targetCopies = 2;
+
+			const currentCopies = el.__ddgMarqueeCopies || 1;
+			if (currentCopies !== targetCopies) {
+				if (currentCopies < targetCopies) {
+					const addSets = targetCopies - currentCopies;
+					for (let k = 0; k < addSets; k++) {
+						el.__ddgMarqueeOriginal.forEach(n => inner.appendChild(n.cloneNode(true)));
+					}
+				} else {
+					const removeSets = currentCopies - targetCopies;
+					const perSet = el.__ddgMarqueeOriginal.length;
+					let toRemove = removeSets * perSet;
+					while (toRemove-- > 0 && inner.lastChild) inner.removeChild(inner.lastChild);
+				}
+				el.__ddgMarqueeCopies = targetCopies;
+			}
+
+			// Compute animation metrics (distance and duration)
 			const totalWidth = inner.scrollWidth;
 			const distance = totalWidth / 2;
 			const effW = Math.min(MAX_W, Math.max(MIN_W, window.innerWidth));
@@ -1230,7 +1287,8 @@
 			const duration = Math.max(fixedDuration, dynamicDuration);
 
 			gsap.set(inner, { x: 0 });
-			el.__ddgMarqueeConfig = { inner, distance, duration };
+			el.__ddgMarqueeConfig = { inner, distance, duration, copies: el.__ddgMarqueeCopies, baseWidth };
+			el.__ddgMarqueeLastWidth = width;
 			startTween(el);
 		}
 
@@ -1255,11 +1313,34 @@
 			el.__ddgMarqueeCleanup = () => {
 				el.__ddgMarqueeTween?.kill();
 				if (typeof unsubResize === 'function') unsubResize();
+				if (el.__ddgMarqueeIO && typeof el.__ddgMarqueeIO.disconnect === 'function') el.__ddgMarqueeIO.disconnect();
 				delete el.__ddgMarqueeTween;
 				delete el.__ddgMarqueeConfig;
+				delete el.__ddgMarqueeOriginal;
+				delete el.__ddgMarqueeBaseWidth;
+				delete el.__ddgMarqueeCopies;
+				delete el.__ddgMarqueeLastWidth;
 			};
 
-			el.__ddgMarqueeReady = () => build(el);
+			// Defer building until element is visible to avoid wasted work
+			el.__ddgMarqueeReady = () => {
+				if (el.__ddgMarqueeIO) el.__ddgMarqueeIO.disconnect();
+				try {
+					el.__ddgMarqueeIO = new IntersectionObserver((entries, obs) => {
+						for (const entry of entries) {
+							if (entry.isIntersecting) {
+								build(el);
+								obs.unobserve(el);
+								break;
+							}
+						}
+					}, { root: null, rootMargin: '100px', threshold: 0 });
+					el.__ddgMarqueeIO.observe(el);
+				} catch {
+					// Fallback if IntersectionObserver is unavailable
+					build(el);
+				}
+			};
 		});
 
 		let stable = 0, last = performance.now();
@@ -1272,28 +1353,55 @@
 			} else requestAnimationFrame(check);
 		});
 
-		ddg.utils.on('ddg:modal-opened', e => {
-			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
-			if (modal) marquee(modal);
-		});
-
-		ddg.utils.on('ddg:modal-closed', e => {
-			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
-			if (!modal) return;
-			modal.querySelectorAll('[data-marquee-init]').forEach(el => {
-				el.__ddgMarqueeCleanup?.();
-				el.removeAttribute('data-marquee-init');
+		// Bind global listeners once (idempotent)
+		if (!ddg.__marqueeGlobalBound) {
+			ddg.__marqueeGlobalBound = true;
+			ddg.utils.on('ddg:modal-opened', e => {
+				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
+				if (modal) marquee(modal);
 			});
-		});
+			ddg.utils.on('ddg:modal-closed', e => {
+				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
+				if (!modal) return;
+				modal.querySelectorAll('[data-marquee-init]').forEach(el => {
+					el.__ddgMarqueeCleanup?.();
+					el.removeAttribute('data-marquee-init');
+				});
+			});
+			// Cleanup for non-modal removals to prevent stray listeners
+			const attachDomObserver = () => {
+				try {
+					if (ddg.__marqueeDomObserver) return;
+					ddg.__marqueeDomObserver = new MutationObserver(muts => {
+						for (const m of muts) {
+							m.removedNodes && m.removedNodes.forEach(node => {
+								if (!(node instanceof Element)) return;
+								const targets = node.matches?.('[data-marquee-init]') ? [node] : [];
+								node.querySelectorAll?.('[data-marquee-init]').forEach(el => targets.push(el));
+								targets.forEach(el => {
+									el.__ddgMarqueeCleanup?.();
+									el.removeAttribute('data-marquee-init');
+								});
+							});
+						}
+					});
+					const root = document.body || document.documentElement;
+					ddg.__marqueeDomObserver.observe(root, { childList: true, subtree: true });
+				} catch {
+					/* no-op */
+				}
+			};
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', attachDomObserver, { once: true });
+			} else {
+				attachDomObserver();
+			}
+		}
 	}
 
 	function storiesAudioPlayer() {
-		// Use centralized utils for logging
-		const log = (...a) => ddg.utils.log('[audio]', ...a);
-		const warn = (...a) => ddg.utils.warn('[audio]', ...a);
-
+		
 		let activePlayer = null;
-
 		// ---- Helpers ----
 		const disable = (btn, state = true) => { if (btn) btn.disabled = !!state; };
 
@@ -1444,7 +1552,7 @@
 		const recs = Array.from(root.querySelectorAll('.recorder:not([data-outreach-init])'));
 		if (!recs.length) return;
 
-		recs.forEach((recorder) => {
+			recs.forEach((recorder) => {
 			const btnRecord = recorder.querySelector('#rec-record');
 			const btnPlay = recorder.querySelector('#rec-playback');
 			const btnClear = recorder.querySelector('#rec-clear');
@@ -1468,9 +1576,14 @@
 			let sound = new Audio();
 			let welcomeHasPlayed = false;
 
-			const welcomeURL = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3';
-			const click1 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3';
-			const click2 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3';
+				const welcomeURL = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3';
+				const click1 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3';
+				const click2 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3';
+				// Preload and reuse click sounds to avoid per-event Audio creation
+				const click1Audio = new Audio(click1);
+				click1Audio.preload = 'auto';
+				const click2Audio = new Audio(click2);
+				click2Audio.preload = 'auto';
 
 			function setStatus(next) {
 				recorder.setAttribute('ddg-status', next);
@@ -1516,12 +1629,12 @@
 				setTimeout(() => { oscillator.stop(); audioCtx.close(); }, duration);
 			}
 
-			function addSounds() {
-				recorder.querySelectorAll('.recorder_btn').forEach((button) => {
-					button.addEventListener('mousedown', () => { sound = new Audio(click1); sound.play(); });
-					button.addEventListener('mouseup', () => { sound = new Audio(click2); sound.play(); });
-				});
-			}
+				function addSounds() {
+					recorder.querySelectorAll('.recorder_btn').forEach((button) => {
+						button.addEventListener('mousedown', () => { click1Audio.currentTime = 0; click1Audio.play(); });
+						button.addEventListener('mouseup', () => { click2Audio.currentTime = 0; click2Audio.play(); });
+					});
+				}
 
 			function qsParam(name) { return new URLSearchParams(window.location.search).get(name); }
 
