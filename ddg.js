@@ -6,86 +6,158 @@
 		ajaxHomeLoaded: false
 	});
 
-	// GSAP Defaults
-	gsap.defaults({ overwrite: 'auto' });
-	gsap.ticker.lagSmoothing(500, 33);
-	ScrollTrigger.config({ ignoreMobileResize: true, autoRefreshEvents: 'visibilitychange,DOMContentLoaded,load' });
+	ddg.utils = {
+		debounce: (fn, ms = 150) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; },
+		on: (event, fn) => document.addEventListener(event, fn),
+		emit: (event, detail) => document.dispatchEvent(new CustomEvent(event, { detail })),
+		fail: (msg) => { throw new Error('ddg: ' + msg); },
+		assert: (cond, msg) => { if (!cond) throw new Error('ddg: ' + (msg || 'assertion failed')); },
+		log: (...a) => { try { console.log('[ddg]', ...a); } catch {} },
+		warn: (...a) => { try { console.warn('[ddg]', ...a); } catch {} },
+		waitForStableFps: function(thresholdFps = 20, stableFrames = 10) {
+			return new Promise((resolve) => {
+				let stable = 0, last = performance.now();
+				function check(now) {
+					const fps = 1000 / (now - last);
+					last = now;
+					stable = fps > thresholdFps ? stable + 1 : 0;
+					if (stable > stableFrames) {
+						resolve();
+					} else {
+						requestAnimationFrame(check);
+					}
+				}
+				requestAnimationFrame(check);
+			});
+		}
+	};
 
-	const debounce = (fn, ms = 150) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+	ddg.scrollLock = ddg.scrollLock || (() => {
+		const held = new Set();
+		let saved = null;
+		const docEl = document.documentElement;
+		const body = document.body;
+
+		function applyLock() {
+			if (saved) return;
+			const scrollY = window.scrollY || docEl.scrollTop || 0;
+			const scrollX = window.scrollX || docEl.scrollLeft || 0;
+			saved = { x: scrollX, y: scrollY };
+			// Prevent background scroll without layout shift
+			body.style.position = 'fixed';
+			body.style.top = `-${scrollY}px`;
+			body.style.left = '0';
+			body.style.right = '0';
+			body.style.width = '100%';
+			// Reduce bounce/overscroll behind modals
+			body.style.overscrollBehavior = 'contain';
+			docEl.style.overscrollBehavior = 'contain';
+		}
+
+		function removeLock() {
+			if (!saved) return;
+			const { x, y } = saved;
+			saved = null;
+			body.style.position = '';
+			body.style.top = '';
+			body.style.left = '';
+			body.style.right = '';
+			body.style.width = '';
+			body.style.overscrollBehavior = '';
+			docEl.style.overscrollBehavior = '';
+			window.scrollTo(x, y);
+		}
+
+		function lock(key) {
+			if (key) held.add(String(key));
+			if (held.size === 1) applyLock();
+		}
+		function unlock(key) {
+			if (key) held.delete(String(key));
+			if (held.size === 0) removeLock();
+		}
+		function isLocked() { return held.size > 0; }
+		function isHolding(key) { return held.has(String(key)); }
+		return { lock, unlock, isLocked, isHolding };
+	})();
 
 	ddg.resizeEvent = ddg.resizeEvent || (() => {
-		const emit = () => document.dispatchEvent(new CustomEvent('ddg:resize', { detail: { width: window.innerWidth, height: window.innerHeight } }));
-		const updateAndEmit = debounce(() => emit(), 180);
+		// Only emit when viewport WIDTH changes (ignore height-only resizes)
+		// Gate with rAF + debounce for efficiency under continuous resizing
+		let lastW = window.innerWidth || 0;
+		let pendingW = lastW;
 		let ticking = false;
+		const MIN_DELTA = 16; // px threshold to consider a width change meaningful
+		const emit = () => ddg.utils.emit('ddg:resize', { width: lastW, height: window.innerHeight });
+		const updateAndEmit = ddg.utils.debounce(() => emit(), 180);
+
 		function onWinResize() {
-			if (ticking) return; ticking = true;
-			requestAnimationFrame(() => { ticking = false; updateAndEmit(); });
+			// Capture current width immediately
+			pendingW = window.innerWidth || 0;
+			if (ticking) return; // coalesce multiple resize events into a single rAF tick
+			ticking = true;
+			requestAnimationFrame(() => {
+				try {
+					// Only proceed if width changed meaningfully; ignore height-only resizes
+					if (Math.abs(pendingW - lastW) >= MIN_DELTA) {
+						lastW = pendingW;
+						updateAndEmit();
+					}
+				} finally {
+					ticking = false;
+				}
+			});
 		}
+
 		window.addEventListener('resize', onWinResize, { passive: true });
+
 		const on = (fn) => {
-			if (typeof fn !== 'function') return () => {};
-			const handler = (e) => fn(e.detail || { width: window.innerWidth, height: window.innerHeight });
-			document.addEventListener('ddg:resize', handler);
+			if (typeof fn !== 'function') return () => { };
+			const handler = (e) => fn(e?.detail || { width: window.innerWidth, height: window.innerHeight });
+			ddg.utils.on('ddg:resize', handler);
 			return () => document.removeEventListener('ddg:resize', handler);
 		};
+
 		return { on };
 	})();
 
-	ddg.fs = (() => {
+	ddg.fs = ddg.fs || (() => {
 		let readyPromise = null;
 		let firstResolved = false;
-		let currentList = null; // always the latest instance we've seen
+		let currentList = null;
 
 		function whenReady() {
-			// If we've already resolved once, always return the latest instance.
 			if (firstResolved && currentList) return Promise.resolve(currentList);
 			if (readyPromise) return readyPromise;
-
 			readyPromise = new Promise((resolve) => {
 				window.FinsweetAttributes ||= [];
 
-				const finish = (instances, label) => {
-					const instArray = Array.isArray(instances) ? instances : [instances];
-					const inst = instArray.find(i => i?.items);
+				const finish = (instances, via) => {
+					const arr = Array.isArray(instances) ? instances : [instances];
+					const inst = arr.find(i => i && i.items);
 					if (!inst) return;
-
 					if (inst !== currentList) {
 						currentList = inst;
-						console.log(`[ddg.fs] list instance ready (${label})`, inst);
-						document.dispatchEvent(new CustomEvent('ddg:list-ready', { detail: { list: inst, via: label } }));
+						ddg.utils.emit('ddg:list-ready', { list: inst, via });
 					}
-
-					if (!firstResolved) {
-						firstResolved = true;
-						resolve(inst);
-					}
+					if (!firstResolved) { firstResolved = true; resolve(inst); }
 				};
 
-				// (1) Early subscription — never miss push init
 				try { window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]); } catch { }
 
-				// (2) Hook existing module loading
 				const mod = window.FinsweetAttributes?.modules?.list;
 				if (mod?.loading?.then) mod.loading.then((i) => finish(i, 'module.loading')).catch(() => { });
 
-				// (3) Trigger FA load and hook — proactive then wait for registration if needed
 				try {
 					const fa = window.FinsweetAttributes;
 					const attemptLoad = () => {
 						try {
 							const res = fa.load?.('list');
-							if (res?.then) res.then(i => finish(i, 'load()')).catch(() => { });
-						} catch (err) {
-							console.warn('[ddg.fs] early load(list) failed', err);
-						}
+							if (res && typeof res.then === 'function') res.then(i => finish(i, 'load()')).catch(() => { });
+						} catch { }
 					};
-
-					// Always attempt to load once — registers the module if not yet ready
 					attemptLoad();
-
-					// If module not registered, observe DOM until it appears
 					if (!fa?.modules?.list) {
-						console.warn('[ddg.fs] list module not yet registered, waiting for registration');
 						const wait = new MutationObserver(() => {
 							if (window.FinsweetAttributes?.modules?.list) {
 								wait.disconnect();
@@ -94,36 +166,35 @@
 						});
 						wait.observe(document.documentElement, { childList: true, subtree: true });
 					}
-				} catch (err) {
-					console.warn('[ddg.fs] load(list) failed early', err);
-				}
+				} catch { }
 
-				// (4) Fallback: detect late-appearing list container (for /stories/ pages)
 				const observer = new MutationObserver(() => {
-					// keep watching until we've seen an instance at least once
 					const listEl = document.querySelector('[fs-list-element="list"]');
 					if (listEl && window.FinsweetAttributes?.modules?.list) {
-						console.log('[ddg.fs] detected late list container → reloading');
 						try {
 							const r = window.FinsweetAttributes.load?.('list');
-							if (r?.then) r.then((i) => finish(i, 'observer')).catch(() => { });
+							if (r && typeof r.then === 'function') r.then((i) => finish(i, 'observer')).catch(() => { });
 						} catch { }
 						if (firstResolved) observer.disconnect();
 					}
 				});
-				observer.observe(document.body, { childList: true, subtree: true });
+				if (document.body) {
+					observer.observe(document.body, { childList: true, subtree: true });
+				} else {
+					document.addEventListener('DOMContentLoaded', () => {
+						observer.observe(document.body, { childList: true, subtree: true });
+					}, { once: true });
+				}
 
-				// (6) React on ajax-home ready
 				document.addEventListener('ddg:ajax-home-ready', () => {
 					const m = window.FinsweetAttributes?.modules?.list;
 					if (m?.loading?.then) m.loading.then((i) => finish(i, 'module.loading (ajax-home)')).catch(() => { });
 					else {
 						const r = window.FinsweetAttributes.load?.('list');
-						if (r?.then) r.then((i) => finish(i, 'load(ddg:ajax-home-ready)')).catch(() => { });
+						if (r && typeof r.then === 'function') r.then((i) => finish(i, 'load(ddg:ajax-home-ready)')).catch(() => { });
 					}
 				}, { once: true });
 			});
-
 			return readyPromise;
 		}
 
@@ -148,7 +219,6 @@
 			return out;
 		};
 
-		// one-shot "next render" helper
 		function afterNextRender(list) {
 			return new Promise((resolve) => {
 				if (typeof list?.addHook !== 'function') return resolve();
@@ -159,7 +229,6 @@
 			});
 		}
 
-		// Helpers: force plain, cloneable shapes
 		function toPlainCondition(c = {}) {
 			return {
 				id: String(c.id ?? ''),
@@ -191,84 +260,68 @@
 				reflectUi = true
 			} = opts;
 
-			try {
-				const list = await whenReady();
+			const list = await whenReady();
 
-				// create NEW groups as plain objects
-				const newGroups = Object.entries(valuesByField || {}).map(([field, vals = []]) => {
-					const conditions = vals.map((v, i) => ({
-						id: `auto-${field}-${i}`,
-						type: 'checkbox',
-						fieldKey: String(field),
-						value: String(v),
-						op: 'equal',
-						interacted: true,
-					}));
-					return { id: `auto-${field}`, conditionsMatch: 'or', conditions };
-				});
+			const newGroups = Object.entries(valuesByField || {}).map(([field, vals = []]) => {
+				const conditions = vals.map((v, i) => ({
+					id: `auto-${field}-${i}`,
+					type: 'checkbox',
+					fieldKey: String(field),
+					value: String(v),
+					op: 'equal',
+					interacted: true,
+				}));
+				return { id: `auto-${field}`, conditionsMatch: 'or', conditions };
+			});
 
-				const current = list.filters.value || { groupsMatch: 'and', groups: [] };
+			const current = list.filters.value || { groupsMatch: 'and', groups: [] };
 
-				let nextGroups;
-				if (merge) {
-					// ✨ sanitize any existing groups before merging
-					const existingPlain = (current.groups || []).map(toPlainGroup);
-					const newPlain = newGroups.map(toPlainGroup);
+			let nextGroups;
+			if (merge) {
+				const existingPlain = (current.groups || []).map(toPlainGroup);
+				const newPlain = newGroups.map(toPlainGroup);
 
-					// keep existing groups whose fieldKey doesn't collide
-					const keep = existingPlain.filter(
-						g => !newPlain.some(ng => firstFieldKey(ng) === firstFieldKey(g))
-					);
+				const keep = existingPlain.filter(
+					g => !newPlain.some(ng => firstFieldKey(ng) === firstFieldKey(g))
+				);
 
-					nextGroups = [...keep, ...newPlain];
-				} else {
-					nextGroups = newGroups.map(toPlainGroup);
-				}
-
-				// assign only plain JSON
-				list.filters.value = { groupsMatch: 'and', groups: nextGroups };
-
-				await list.triggerHook('filter');
-				await afterNextRender(list); // ← ensure callers await the render
-
-				// Reflect in UI without firing change events (avoid double-driving)
-				if (reflectUi && formSel) {
-					const form = document.querySelector(formSel);
-					if (form) {
-						const inputs = form.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]');
-						const wantedByField = {};
-						for (const [f, arr] of Object.entries(valuesByField || {})) {
-							wantedByField[f] = new Set((arr || []).map(String));
-						}
-						inputs.forEach((input) => {
-							const f = input.getAttribute('fs-list-field');
-							const v = input.getAttribute('fs-list-value');
-							const on = !!wantedByField[f]?.has(v);
-							input.checked = on;
-							input.closest('label')?.classList.toggle('is-list-active', on);
-						});
-					}
-				}
-
-				const flat = Object.entries(valuesByField)
-					.map(([f, v]) => `${f}:${v.join(', ')}`)
-					.join(' | ');
-				console.log('[filters] applied:', flat);
-			} catch (err) {
-				console.error('[filters] applyCheckboxFilters error:', err);
-				throw err;
+				nextGroups = [...keep, ...newPlain];
+			} else {
+				nextGroups = newGroups.map(toPlainGroup);
 			}
+
+			list.filters.value = { groupsMatch: 'and', groups: nextGroups };
+
+			await list.triggerHook('filter');
+			await afterNextRender(list); // ← ensure callers await the render
+
+			if (reflectUi && formSel) {
+				const form = document.querySelector(formSel);
+				if (form) {
+					const inputs = form.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]');
+					const wantedByField = {};
+					for (const [f, arr] of Object.entries(valuesByField || {})) {
+						wantedByField[f] = new Set((arr || []).map(String));
+					}
+					inputs.forEach((input) => {
+						const f = input.getAttribute('fs-list-field');
+						const v = input.getAttribute('fs-list-value');
+						const on = !!wantedByField[f]?.has(v);
+						input.checked = on;
+						input.closest('label')?.classList.toggle('is-list-active', on);
+					});
+				}
+			}
+
+
 		}
 
 		return { whenReady, items, valuesForItemSafe, applyCheckboxFilters, afterNextRender };
 	})();
 
-	// Site boot
 	function initSite() {
 		if (data.siteBooted) return;
 		data.siteBooted = true;
-
-		console.log('[ddg] booting site');
 
 		requestAnimationFrame(() => {
 			nav();
@@ -279,9 +332,9 @@
 			marquee();
 			homelistSplit();
 			outreach();
-			storiesAudioPlayer();
 			share();
 			randomFilters();
+			storiesAudioPlayer()
 		});
 	}
 
@@ -290,8 +343,7 @@
 		ddg.navInitialized = true;
 
 		const navEl = document.querySelector('.nav');
-		if (!navEl) return console.warn('[nav] no .nav element found');
-		console.log('[nav] initialized');
+		if (!navEl) return;
 
 		const showThreshold = 50; // px from top to start hiding nav
 		const hideThreshold = 100; // px scrolled before nav can hide
@@ -299,12 +351,6 @@
 
 		let lastY = window.scrollY;
 		let revealDistance = 0;
-
-		// Defensive GSAP setup
-		if (typeof ScrollTrigger === 'undefined' || !gsap) {
-			console.warn('[nav] GSAP ScrollTrigger not available');
-			return;
-		}
 
 		// Ensure a ScrollTrigger instance
 		ScrollTrigger.create({
@@ -315,7 +361,6 @@
 				const y = ScrollTrigger?.scroll?.() ?? window.scrollY;
 				const delta = y - lastY;
 
-				// SCROLL UP / DOWN BEHAVIOR
 				if (y <= showThreshold) {
 					navEl.classList.remove('is-hidden', 'is-past-threshold');
 					revealDistance = 0;
@@ -336,43 +381,43 @@
 			}
 		});
 
-		console.log('[nav] ScrollTrigger active');
 
-		// Cleanup for dynamic environments
-		if (!ddg.navCleanup) {
-			ddg.navCleanup = () => {
-				console.log('[nav] cleanup triggered');
-				ScrollTrigger.getAll().forEach(st => {
-					if (st.trigger === document.body) st.kill();
-				});
-			};
-		}
 	}
 
 	function homelistSplit() {
 		const wraps = gsap.utils.toArray('.home-list_item-wrap');
 		const tapeSpeed = 5000;
 
+		// Track mobile/desktop state to avoid heavy re-splitting on minor resizes
+		const isMobile = window.innerWidth <= 767;
+		ddg.homelistIsMobile = isMobile;
+
+		// Disable SplitText behavior on small screens (<= 767px)
+		if (isMobile) {
+			wraps.forEach(wrap => {
+				const item = wrap.querySelector('.home-list_item');
+				if (item?.split) {
+					item.split.revert();
+					delete item.split;
+					delete item.dataset.splitInit;
+				}
+			});
+			return;
+		}
+
 		wraps.forEach(wrap => {
 			const item = wrap.querySelector('.home-list_item');
 			if (!item || item.dataset.splitInit) return;
 
-			// ✅ Create SplitText with autoSplit (VALID in v3.13.0)
 			const split = new SplitText(item, {
 				type: 'lines',
 				linesClass: 'home-list_split-line',
-				autoSplit: true  // ✅ Official feature (line 246 in source)
+				autoSplit: true
 			});
-
-			// Store instance for cleanup
 			item.split = split;
-
-			// ✅ Use gsap.set() for batched style updates
 			gsap.set(split.lines, {
 				display: 'inline-block'
 			});
-
-			// Detect coming-soon flag
 			if (wrap.querySelector('[data-coming-soon]')) {
 				wrap.dataset.comingSoon = 'true';
 			} else {
@@ -382,18 +427,13 @@
 			item.dataset.splitInit = 'true';
 		});
 
-		// ✅ Batch DOM reads/writes to prevent layout thrashing
 		function setTapeDurations() {
 			requestAnimationFrame(() => {
 				const lines = gsap.utils.toArray('.home-list_split-line');
-
-				// Read all widths first
 				const measurements = lines.map(line => ({
 					line,
 					width: line.offsetWidth
 				}));
-
-				// Then write all durations (prevents layout thrashing)
 				measurements.forEach(({ line, width }) => {
 					const dur = gsap.utils.clamp(0.3, 2, width / tapeSpeed);
 					line.style.setProperty('--tape-dur', `${dur}s`);
@@ -403,19 +443,68 @@
 
 		setTapeDurations();
 
-		// ✅ Hook into global ddg:resize (debounced centrally)
 		const handleResize = () => {
-			gsap.utils.toArray('.home-list_item-wrap').forEach(wrap => {
-				const item = wrap.querySelector('.home-list_item');
-				if (!item?.split) return;
-				item.split.revert();
-				delete item.split;
-				delete item.dataset.splitInit;
-			});
-			homelistSplit();
+			const mobileNow = window.innerWidth <= 767;
+			const wasMobile = !!ddg.homelistIsMobile;
+			// Update state early
+			ddg.homelistIsMobile = mobileNow;
+
+			if (mobileNow && !wasMobile) {
+				// Transitioned to mobile: revert any splits and exit
+				gsap.utils.toArray('.home-list_item-wrap').forEach(wrap => {
+					const item = wrap.querySelector('.home-list_item');
+					if (item?.split) {
+						item.split.revert();
+						delete item.split;
+						delete item.dataset.splitInit;
+					}
+				});
+				return;
+			}
+
+			if (!mobileNow && wasMobile) {
+				// Transitioned to desktop: initialize split on any not yet split
+				gsap.utils.toArray('.home-list_item-wrap').forEach(wrap => {
+					const item = wrap.querySelector('.home-list_item');
+					if (!item || item.dataset.splitInit) return;
+					const split = new SplitText(item, {
+						type: 'lines',
+						linesClass: 'home-list_split-line',
+						autoSplit: true
+					});
+					item.split = split;
+					gsap.set(split.lines, { display: 'inline-block' });
+					if (wrap.querySelector('[data-coming-soon]')) {
+						wrap.dataset.comingSoon = 'true';
+					} else {
+						delete wrap.dataset.comingSoon;
+					}
+					item.dataset.splitInit = 'true';
+				});
+				// Refresh durations on enter desktop
+				setTapeDurations();
+				return;
+			}
+
+			// Within the same mode: only update durations (cheap), no re-splitting
+			if (!mobileNow) setTapeDurations();
 		};
 		if (!ddg.homelistResizeUnsub) {
 			ddg.homelistResizeUnsub = ddg.resizeEvent.on(() => handleResize());
+		}
+
+		// Keep SplitText in sync with list renders — simple, deduped binding
+		if (!ddg.homelistRenderHooked) {
+			ddg.homelistRenderHooked = true;
+			const sync = ddg.utils.debounce(() => homelistSplit(), 120);
+			const bound = (ddg.homelistHookedLists ||= new WeakSet());
+			const bind = (list) => {
+				if (!list || typeof list.addHook !== 'function' || bound.has(list)) return;
+				bound.add(list);
+				list.addHook('afterRender', sync);
+			};
+			if (ddg.fs?.whenReady) ddg.fs.whenReady().then(bind).catch(() => { });
+			ddg.utils.on('ddg:list-ready', (e) => bind(e.detail?.list));
 		}
 	}
 
@@ -427,25 +516,6 @@
 		const shareWebhookUrl = 'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
 		const dailyShareKey = 'share_done_date';
 
-		const todayString = () => new Date().toISOString().slice(0, 10);
-		const nextMidnight = () => { const d = new Date(); d.setHours(24, 0, 0, 0); return d; };
-		const setCookieValue = (name, value, exp) => {
-			document.cookie = `${name}=${value}; expires=${exp.toUTCString()}; path=/; SameSite=Lax`;
-		};
-		const getCookieValue = (name) => {
-			const row = document.cookie.split('; ').find(r => r.startsWith(name + '=')) || '';
-			return row.split('=')[1] || null;
-		};
-		const markShareComplete = () => {
-			const v = todayString(); const exp = nextMidnight();
-			localStorage.setItem(dailyShareKey, v);
-			sessionStorage.setItem(dailyShareKey, v);
-			setCookieValue(dailyShareKey, v, exp);
-		};
-		const alreadySharedToday = () => {
-			const v = todayString();
-			return [localStorage.getItem(dailyShareKey), sessionStorage.getItem(dailyShareKey), getCookieValue(dailyShareKey)].includes(v);
-		};
 
 		const shareUrlMap = {
 			clipboard: ({ url }) => url,
@@ -459,48 +529,11 @@
 			telegram: ({ url, text }) => `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`
 		};
 
-		const setState = (el, state) => {
-			el.setAttribute('data-share-state', state);
-			clearTimeout(el.__shareStateTimer);
-			el.__shareStateTimer = setTimeout(() => {
-				el.removeAttribute('data-share-state');
-				el.__shareStateTimer = null;
-			}, 2000);
-		};
 
-		const decrementCountdown = () => {
-			$('[data-share-countdown]').each((_, el) => {
-				const $el = $(el);
-				let n = parseInt(el.getAttribute('data-share-countdown') || $el.text() || $el.val(), 10);
-				if (!Number.isFinite(n)) n = 0;
-				const next = Math.max(0, n - 1);
-				$el.attr('data-share-countdown', next);
-				$el.is('input, textarea') ? $el.val(next) : $el.text(next);
-			});
-		};
-
-		const sendShareWebhook = (platform) => new Promise((resolve) => {
-			const form = document.createElement('form');
-			const iframe = document.createElement('iframe');
-			const frameName = 'wf_' + Math.random().toString(36).slice(2);
-			iframe.name = frameName; iframe.style.display = 'none';
-			form.target = frameName; form.method = 'POST'; form.action = shareWebhookUrl; form.style.display = 'none';
-			[['platform', platform], ['date', todayString()]].forEach(([name, value]) => {
-				const input = document.createElement('input');
-				input.type = 'hidden'; input.name = name; input.value = value;
-				form.appendChild(input);
-			});
-			document.body.append(iframe, form);
-			form.submit();
-			setTimeout(() => { form.remove(); iframe.remove(); resolve(true); }, 800);
-		});
-
-		// delegated (covers injected content)
 		$(document).off('click.ddgShare').on('click.ddgShare', selectors.btn, async (event) => {
 			const el = event.currentTarget;
 			event.preventDefault();
 
-			// simple per-button lock
 			if (el.shareLock) return;
 			el.shareLock = true;
 			setTimeout(() => { el.shareLock = false; }, 400);
@@ -511,25 +544,52 @@
 			const resolver = shareUrlMap[platform];
 			const destination = resolver ? resolver({ url: shareUrl, text: shareText }) : shareUrl;
 
-			// minimal guard
 			const realClick = event.isTrusted && document.hasFocus();
+			$('[data-share-countdown]').each((_, el2) => {
+				const $el2 = $(el2);
+				let n = parseInt(el2.getAttribute('data-share-countdown') || $el2.text() || $el2.val(), 10);
+				if (!Number.isFinite(n)) n = 0;
+				const next = Math.max(0, n - 1);
+				$el2.attr('data-share-countdown', next);
+				$el2.is('input, textarea') ? $el2.val(next) : $el2.text(next);
+			});
 
-			// immediate UI feedback
-			decrementCountdown();
-
-			// webhook once/day on genuine clicks
-			if (realClick && !alreadySharedToday()) {
-				sendShareWebhook(platform).catch(() => { });
-				markShareComplete();
+			if (realClick) {
+				const today = new Date().toISOString().slice(0, 10);
+				const cookieRow = document.cookie.split('; ').find(r => r.startsWith(dailyShareKey + '=')) || '';
+				const cookieVal = cookieRow.split('=')[1] || null;
+				const done = [localStorage.getItem(dailyShareKey), sessionStorage.getItem(dailyShareKey), cookieVal].includes(today);
+				if (!done) {
+					const form = document.createElement('form');
+					const iframe = document.createElement('iframe');
+					const frameName = 'wf_' + Math.random().toString(36).slice(2);
+					iframe.name = frameName; iframe.style.display = 'none';
+					form.target = frameName; form.method = 'POST'; form.action = shareWebhookUrl; form.style.display = 'none';
+					[['platform', platform], ['date', today]].forEach(([name, value]) => {
+						const input = document.createElement('input');
+						input.type = 'hidden'; input.name = name; input.value = value;
+						form.appendChild(input);
+					});
+					document.body.append(iframe, form);
+					form.submit();
+					const exp = new Date(); exp.setHours(24, 0, 0, 0);
+					localStorage.setItem(dailyShareKey, today);
+					sessionStorage.setItem(dailyShareKey, today);
+					document.cookie = `${dailyShareKey}=${today}; expires=${exp.toUTCString()}; path=/; SameSite=Lax`;
+					setTimeout(() => { form.remove(); iframe.remove(); }, 800);
+				}
 			}
 
 			if (platform === 'clipboard') {
 				try {
 					await navigator.clipboard.writeText(destination);
-					setState(el, 'copied');
-				} catch (err) {
-					console.warn('[share] clipboard failed', err);
-					setState(el, 'error');
+					el.setAttribute('data-share-state', 'copied');
+					clearTimeout(el.__shareStateTimer);
+					el.__shareStateTimer = setTimeout(() => { el.removeAttribute('data-share-state'); el.__shareStateTimer = null; }, 2000);
+				} catch {
+					el.setAttribute('data-share-state', 'error');
+					clearTimeout(el.__shareStateTimer);
+					el.__shareStateTimer = setTimeout(() => { el.removeAttribute('data-share-state'); el.__shareStateTimer = null; }, 2000);
 				}
 				return;
 			}
@@ -542,13 +602,11 @@
 			}
 		});
 
-		console.log('[share] ready (minimal)');
 	}
 
 	function modals() {
 		ddg.modals = ddg.modals || {};
 		ddg.modalsKeydownBound = Boolean(ddg.modalsKeydownBound);
-		console.log('[modals] initializing');
 
 		const selectors = {
 			trigger: '[data-modal-trigger]',
@@ -589,7 +647,7 @@
 				const node = ($inner[0] || $modal[0]);
 				if (!node) return;
 				ensureTabIndex(node);
-				try { node.focus({ preventScroll: true }); } catch { try { node.focus(); } catch { } }
+				node.focus({ preventScroll: true });
 			};
 
 			const onKeydownTrap = (e) => {
@@ -617,14 +675,7 @@
 
 			const scrollToAnchor = (hash) => {
 				if (!hash) return;
-				let target = null;
-				try {
-					if (window.CSS?.escape) {
-						target = $modal.find(`#${CSS.escape(hash)}`).first()[0] || null;
-					} else {
-						target = $modal.find(`[id="${hash.replace(/"/g, '\\"')}"]`).first()[0] || null;
-					}
-				} catch { target = null; }
+				const target = $modal.find(`#${CSS.escape(hash)}`).first()[0] || null;
 				if (!target) return;
 
 				const container = resolveScrollContainer();
@@ -636,10 +687,9 @@
 				const smt = parseFloat(cs.scrollMarginTop || cs.scrollMargin || '0') || 0;
 				const nextTop = container.scrollTop + (tRect.top - cRect.top) - smt;
 
-				try { container.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' }); }
-				catch { container.scrollTop = Math.max(0, nextTop); }
+				container.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' });
 
-				const guard = (ev) => { if (!container.contains(ev.target)) { try { ev.preventDefault(); } catch { } } };
+				const guard = (ev) => { if (!container.contains(ev.target)) { ev.preventDefault?.(); } };
 				window.addEventListener('wheel', guard, { capture: true, passive: false });
 				window.addEventListener('touchmove', guard, { capture: true, passive: false });
 				setTimeout(() => {
@@ -648,21 +698,23 @@
 				}, 900);
 			};
 
-			$modal.on('click.modalAnchors', 'a[href^="#"]', (e) => {
-				const href = (e.currentTarget.getAttribute('href') || '');
-				if (!href || href === '#' || href.length < 2) return;
+
+			// handle waveform share or any button-based scroll trigger
+			$modal.on('click.modalShare', 'a[href^="#"], button[href^="#"]', (e) => {
 				e.preventDefault();
 				e.stopPropagation();
-				scrollToAnchor(href.slice(1));
-				try {
-					const u = new URL(window.location.href);
-					u.hash = href.slice(1);
-					window.history.replaceState(window.history.state, '', u.toString());
-				} catch { }
+				scrollToAnchor('share');
+				const u = new URL(window.location.href);
+				u.hash = 'share';
+				window.history.replaceState(window.history.state, '', u.toString());
 			});
 
 			const open = ({ skipAnimation = false, afterOpen } = {}) => {
-				console.log(`[modals:${id}] open (skip=${skipAnimation})`);
+
+				// Lock body scroll immediately on trigger
+				if (!ddg.scrollLock.isHolding(id)) {
+					ddg.scrollLock.lock(id);
+				}
 
 				Object.keys(ddg.modals).forEach(k => {
 					if (k !== id && ddg.modals[k]?.isOpen?.()) ddg.modals[k].close({ skipAnimation: true });
@@ -676,7 +728,7 @@
 					gsap.set([$bg[0], $anim[0]], { autoAlpha: 1, y: 0 });
 					document.addEventListener('keydown', onKeydownTrap, true);
 					requestAnimationFrame(focusModal);
-					document.dispatchEvent(new CustomEvent('ddg:modal-opened', { detail: { id } }));
+					ddg.utils.emit('ddg:modal-opened', { id });
 					return afterOpen && afterOpen();
 				}
 
@@ -688,20 +740,22 @@
 						setAnimating(false);
 						document.addEventListener('keydown', onKeydownTrap, true);
 						requestAnimationFrame(focusModal);
-						document.dispatchEvent(new CustomEvent('ddg:modal-opened', { detail: { id } }));
+						ddg.utils.emit('ddg:modal-opened', { id });
 						afterOpen && afterOpen();
 					}
 				})
-					.to($bg[0], { autoAlpha: 1, duration: 0.18, ease: 'power1.out' }, 0)
-					.fromTo($anim[0], { y: 40, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, ease: 'power2.out' }, 0);
+					.to($bg[0], { autoAlpha: 1, duration: 0.18, ease: 'power1.out', overwrite: 'auto' }, 0)
+					.fromTo($anim[0], { y: 40, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, ease: 'power2.out', overwrite: 'auto' }, 0);
 			};
 
 			const close = ({ skipAnimation = false, afterClose } = {}) => {
 				if (!$modal.hasClass('is-open')) return;
 				if (closing) return closingTl;
 
-				console.log(`[modals:${id}] close (skip=${skipAnimation})`);
 				closing = true;
+
+				// Unlock body scroll immediately on close trigger
+				ddg.scrollLock.unlock(id);
 
 				gsap.killTweensOf([$anim[0], $bg[0]]);
 
@@ -709,9 +763,9 @@
 					[$modal[0], $inner[0]].forEach(el => el?.classList.remove('is-open'));
 					gsap.set([$anim[0], $bg[0], $modal[0], $inner[0]], { clearProps: 'all' });
 					document.removeEventListener('keydown', onKeydownTrap, true);
-					try { lastActiveEl && lastActiveEl.focus(); } catch { }
+					if (lastActiveEl) lastActiveEl.focus();
 					lastActiveEl = null;
-					document.dispatchEvent(new CustomEvent('ddg:modal-closed', { detail: { id } }));
+					ddg.utils.emit('ddg:modal-closed', { id });
 					closing = false;
 					closingTl = null;
 					afterClose && afterClose();
@@ -725,13 +779,10 @@
 
 				setAnimating(true);
 
-				// 1) remove bg is-open first
 				$bg[0]?.classList.remove('is-open');
 
-				// block any interactions while closing
 				gsap.set([$modal[0], $inner[0], $bg[0]], { pointerEvents: 'none' });
 
-				// 2) animate out
 				closingTl = gsap.timeline({
 					onComplete: () => { setAnimating(false); finish(); }
 				});
@@ -762,7 +813,7 @@
 			const initial = $modal.hasClass('is-open');
 			syncCssState($modal, initial, id);
 
-			document.dispatchEvent(new CustomEvent('ddg:modal-created', { detail: id }));
+			ddg.utils.emit('ddg:modal-created', id);
 			return modal;
 		};
 
@@ -790,7 +841,6 @@
 			(ddg.modals[id] || createModal(id))?.close();
 		});
 
-		// Allow iframes to request closing the modal via postMessage
 		window.addEventListener('message', (ev) => {
 			const data = ev?.data;
 			if (!data) return;
@@ -803,41 +853,34 @@
 
 		// If a close button exists inside a same-origin iframe within the modal,
 		// delegate its click to the parent close logic.
-		document.addEventListener('ddg:modal-opened', (ev) => {
+		ddg.utils.on('ddg:modal-opened', (ev) => {
 			const id = ev.detail?.id;
 			if (!id) return;
 			const modalEl = document.querySelector(`[data-modal-el="${id}"]`);
 			if (!modalEl) return;
 			modalEl.querySelectorAll('iframe').forEach((frame) => {
-				try {
-					const doc = frame.contentDocument || frame.contentWindow?.document;
-					if (!doc) return;
-					const handler = (e) => {
-						const target = e.target && (e.target.closest ? e.target.closest('[data-modal-close]') : null);
-						if (target) {
-							try { e.preventDefault?.(); } catch { }
-							(ddg.modals[id] || createModal(id))?.close();
-						}
-					};
-					doc.addEventListener('click', handler);
-					frame.__ddgIframeCloseHandler = handler;
-				} catch { /* cross-origin — ignore */ }
+				const doc = frame.contentDocument;
+				const handler = (e) => {
+					const target = e.target && (e.target.closest ? e.target.closest('[data-modal-close]') : null);
+					if (target) {
+						e.preventDefault?.();
+						(ddg.modals[id] || createModal(id))?.close();
+					}
+				};
+				doc.addEventListener('click', handler);
+				frame.__ddgIframeCloseHandler = handler;
 			});
 		});
 
-		document.addEventListener('ddg:modal-closed', (ev) => {
+		ddg.utils.on('ddg:modal-closed', (ev) => {
 			const id = ev.detail?.id;
 			if (!id) return;
 			const modalEl = document.querySelector(`[data-modal-el="${id}"]`);
 			if (!modalEl) return;
 			modalEl.querySelectorAll('iframe').forEach((frame) => {
-				try {
-					const doc = frame.contentDocument || frame.contentWindow?.document;
-					if (doc && frame.__ddgIframeCloseHandler) {
-						doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
-						delete frame.__ddgIframeCloseHandler;
-					}
-				} catch { }
+				const doc = frame.contentDocument;
+				doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
+				delete frame.__ddgIframeCloseHandler;
 			});
 		});
 
@@ -848,23 +891,26 @@
 			});
 		}
 
-		requestAnimationFrame(() => {
-			$(selectors.modal).each((_, el) => {
-				const id = el.getAttribute('data-modal-el');
-				const open = el.classList.contains('is-open');
-				syncCssState($(el), open, id);
-			});
-		});
+        requestAnimationFrame(() => {
+            $(selectors.modal).each((_, el) => {
+                const id = el.getAttribute('data-modal-el');
+                const open = el.classList.contains('is-open');
+                syncCssState($(el), open, id);
+                if (open && !ddg.scrollLock.isHolding(id)) {
+                    ddg.scrollLock.lock(id);
+                }
+                // Emit an open event for any modal already open at init
+                if (open) ddg.utils.emit('ddg:modal-opened', { id });
+            });
+        });
 
-		console.log('[modals] ready');
-		document.dispatchEvent(new CustomEvent('ddg:modals-ready'));
+		ddg.utils.emit('ddg:modals-ready');
 	}
 
 	function ajaxStories() {
 		if (ddg.ajaxModalInitialized) return;
 		ddg.ajaxModalInitialized = true;
 
-		console.log('[ajaxModal] init called');
 
 		const storyModalId = 'story';
 		const $embed = $('[data-ajax-modal="embed"]');
@@ -872,7 +918,7 @@
 		const homeUrl = '/';
 
 		const dispatchStoryOpened = (url) => queueMicrotask(() => {
-			try { document.dispatchEvent(new CustomEvent('ddg:story-opened', { detail: { url } })); } catch { }
+			ddg.utils.emit('ddg:story-opened', { url });
 		});
 
 		let storyModal = ddg.modals?.[storyModalId] || null;
@@ -880,17 +926,12 @@
 		let lock = false;
 
 		let prefetchEnabled = false;
-		setTimeout(() => {
-			prefetchEnabled = true;
-			console.log('[ajaxModal] prefetch enabled');
-		}, 2000);
+		setTimeout(() => { prefetchEnabled = true; }, 2000);
 
 		const parseStory = (html) => {
-			try {
-				const doc = new DOMParser().parseFromString(html, 'text/html');
-				const node = doc.querySelector('[data-ajax-modal="content"]');
-				return { $content: node ? $(node) : null, title: doc.title || '' };
-			} catch { return { $content: null, title: '' }; }
+			const doc = new DOMParser().parseFromString(html, 'text/html');
+			const node = doc.querySelector('[data-ajax-modal="content"]');
+			return { $content: node ? $(node) : null, title: doc.title || '' };
 		};
 
 		const ensureModal = () => {
@@ -901,78 +942,61 @@
 
 		const openStory = (url, title, $content) => {
 			const modal = ensureModal();
-			if (!modal) { console.warn('[ajaxModal] story modal not ready'); return; }
+			if (!modal) { return; }
 
 			$embed.empty().append($content);
 			modal.open({
 				afterOpen: () => {
 					if (title) document.title = title;
-					try { history.pushState({ modal: true }, '', url); } catch { }
+					history.pushState({ modal: true }, '', url);
 					// Notify parent of new URL if in iframe
 					if (window !== window.parent) {
-						try {
-							window.parent.postMessage({
-								type: 'iframe:url-change',
-								url,
-								title: document.title
-							}, '*');
-							console.log('[ajaxModal] posted url to parent:', url);
-						} catch (err) {
-							console.warn('[ajaxModal] failed to post url to parent', err);
-						}
+						window.parent.postMessage({
+							type: 'iframe:url-change',
+							url,
+							title: document.title
+						}, '*');
 					}
-					// Emit once the FA list is ready so currentItem resolves deterministically.
 					ddg.fs.whenReady()
 						.then(() => dispatchStoryOpened(url))
 						.catch(() => dispatchStoryOpened(url));
-					console.log('[ajaxModal] openStory -> updated history', url);
+
 				}
 			});
 		};
 
-		document.addEventListener('ddg:modal-closed', (ev) => {
+		ddg.utils.on('ddg:modal-closed', (ev) => {
 			if (ev.detail?.id !== storyModalId) return;
 			document.title = originalTitle;
-			try { history.pushState({}, '', homeUrl); } catch { }
-			// Notify parent of home URL if in iframe
+			history.pushState({}, '', homeUrl);
 			if (window !== window.parent) {
-				try {
-					window.parent.postMessage({
-						type: 'iframe:url-change',
-						url: homeUrl,
-						title: originalTitle
-					}, '*');
-					console.log('[ajaxModal] posted home url to parent:', homeUrl);
-				} catch (err) {
-					console.warn('[ajaxModal] failed to post home url to parent', err);
-				}
+				window.parent.postMessage({
+					type: 'iframe:url-change',
+					url: homeUrl,
+					title: originalTitle
+				}, '*');
 			}
-			console.log('[ajaxModal] modal closed -> restored home URL/title');
+
 		});
 
 		$(document).on('click.ajax', '[data-ajax-modal="link"]', (e) => {
-			// Respect standard link interactions (new tab/window, middle/right click)
 			if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1 || e.button === 2) return;
 
 			const root = e.currentTarget;
 			let linkUrl = root.getAttribute('href') || '';
-			// Support wrapper elements (e.g., div) containing an <a href>
 			if (!linkUrl) {
-				// Prefer closest anchor from the actual click target within the wrapper
 				const candidate = (e.target && e.target.closest) ? e.target.closest('a[href]') : null;
 				if (candidate && root.contains(candidate)) linkUrl = candidate.getAttribute('href') || '';
 			}
 			if (!linkUrl) {
-				// Fallback: first anchor within the wrapper
 				const a = root.querySelector ? root.querySelector('a[href]') : null;
 				if (a) linkUrl = a.getAttribute('href') || '';
 			}
 			if (!linkUrl) return;
 
 			e.preventDefault();
-			console.log('[ajaxModal] clicked link', linkUrl);
 
-			if (lock) { console.log('[ajaxModal] locked'); return; }
+			if (lock) { return; }
 			lock = true;
 
 			if (storyCache.has(linkUrl)) {
@@ -987,22 +1011,19 @@
 			$.ajax({
 				url: linkUrl,
 				success: (response) => {
-					console.log('[ajaxModal] loaded', linkUrl, 'len:', response?.length ?? 0);
 					const parsed = parseStory(response);
 					if (!parsed.$content) parsed.$content = $("<div class='modal-error'>Failed to load content.</div>");
 					storyCache.set(linkUrl, parsed);
 					openStory(linkUrl, parsed.title, parsed.$content);
-					if (parsed.$content?.[0]) { try { marquee(parsed.$content[0]); } catch { } }
+					if (parsed.$content?.[0]) { marquee(parsed.$content[0]); }
 				},
 				error: () => {
-					console.warn('[ajaxModal] load failed');
 					$embed.empty().append("<div class='modal-error'>Failed to load content.</div>");
 				},
-				complete: () => { lock = false; console.log('[ajaxModal] complete'); }
+				complete: () => { lock = false; }
 			});
 		});
 
-		// Prefetch on hover/touch (snappy UX)
 		let prefetchTimer = null;
 		$(document).on('mouseenter.ajax touchstart.ajax', '[data-ajax-modal="link"]', (e) => {
 			if (!prefetchEnabled) return; // 🔒 skip until 2s have passed
@@ -1023,7 +1044,7 @@
 					url, success: (html) => {
 						if (storyCache.has(url)) return;
 						storyCache.set(url, parseStory(html));
-						console.log('[ajaxModal] prefetched', url);
+
 					}
 				});
 			}, 120);
@@ -1034,31 +1055,28 @@
 			const modal = ensureModal();
 			if (!modal) return;
 			if (!path.startsWith('/stories/') && modal.isOpen()) {
-				console.log('[ajaxModal] popstate -> closing story modal');
 				modal.close();
 			}
 		});
 
 		const tryOpenDirectStory = () => {
 			const modal = ensureModal();
-			if (!modal) return console.warn('[ajaxModal] story modal not found after ready');
+			if (!modal) return;
 
 			if (!window.location.pathname.startsWith('/stories/')) return;
 
 			const url = window.location.href;
 			const after = () => {
-				try { history.replaceState({ modal: true }, '', url); } catch { }
+				history.replaceState({ modal: true }, '', url);
 				ddg.fs.whenReady()
 					.then(() => dispatchStoryOpened(url))
 					.catch(() => dispatchStoryOpened(url));
 			};
 
 			if (modal.isOpen()) {
-				console.log('[ajaxModal] direct story detected — modal already open, dispatching story-opened');
 				after();
 			} else {
-				console.log('[ajaxModal] direct story detected — opening modal (skipAnimation)');
-				modal.open({ skipAnimation: true, afterOpen: after });
+				modal.open({ skipAnimation: true, afterOpen: () => after() });
 			}
 		};
 
@@ -1067,7 +1085,6 @@
 			tryOpenDirectStory();
 		} else {
 			document.addEventListener('ddg:modals-ready', tryOpenDirectStory, { once: true });
-			console.log('[ajaxModal] waiting for ddg:modals-ready');
 		}
 	}
 
@@ -1107,32 +1124,27 @@
 			btn.rfLock = true;
 			setTimeout(() => (btn.rfLock = false), 250);
 
-			console.log('[randomfilters] trigger clicked');
+			const list = await ddg.fs.whenReady();
+			const all = ddg.fs.items(list);
+			if (!all.length) return;
 
-			try {
-				const list = await ddg.fs.whenReady();
-				const all = ddg.fs.items(list);
-				if (!all.length) return console.warn('[randomfilters] no items found');
+			const idx = nextIndex(all);
+			const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
+			const values = ddg.fs.valuesForItemSafe(item);
 
-				const idx = nextIndex(all);
-				const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
-				const values = ddg.fs.valuesForItemSafe(item);
-
-				await ddg.fs.applyCheckboxFilters(values, { merge: false });
-				console.log('[randomfilters] picked index', idx, '→ applied');
-			} catch (err) {
-				console.warn('[randomfilters] failed', err);
-			}
+			await ddg.fs.applyCheckboxFilters(values, { merge: false });
 		}, true);
 	}
 
 	function marquee(root = document) {
-		console.log('[marquee] init');
 
 		const els = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
 		if (!els.length) return;
 
-		const baseSpeed = 100; // px/s
+		const MIN_W = 320;
+		const MAX_W = 1440;
+		const vwPerSec = 12; // viewport-width units per second (fixed for all marquees)
+		const fixedPxPerSec = 100; // legacy fixed speed (px/s) baseline
 		const accelTime = 1.2; // s to reach full speed
 
 		function startTween(el) {
@@ -1145,10 +1157,11 @@
 				duration,
 				ease: 'none',
 				repeat: -1,
-				paused: true
+				paused: true,
+				overwrite: 'auto'
 			});
 			tween.timeScale(0);
-			gsap.to(tween, { timeScale: 1, duration: accelTime, ease: 'power1.out' });
+			gsap.to(tween, { timeScale: 1, duration: accelTime, ease: 'power1.out', overwrite: 'auto' });
 			tween.play();
 			el.__ddgMarqueeTween = tween;
 		}
@@ -1157,22 +1170,33 @@
 			const inner = el.querySelector('.marquee-inner');
 			if (!inner || !el.offsetParent) return;
 
-			// reset clones
-			while (inner.children.length > 1 && inner.scrollWidth > el.offsetWidth * 2)
-				inner.removeChild(inner.lastChild);
+
+			// Capture original content once, then rebuild from it each time
+			if (!el.__ddgMarqueeOriginal) {
+				el.__ddgMarqueeOriginal = Array.from(inner.children).map(n => n.cloneNode(true));
+			}
+			inner.textContent = '';
+			el.__ddgMarqueeOriginal.forEach(n => inner.appendChild(n.cloneNode(true)));
 
 			const width = el.offsetWidth;
 			let contentWidth = inner.scrollWidth;
 			if (!width || !contentWidth) return;
 
-			// duplicate content until 2× container width
-			let i = 0;
-			while (inner.scrollWidth < width * 2 && i++ < 20)
-				Array.from(inner.children).forEach(c => inner.appendChild(c.cloneNode(true)));
+			const baseWidth = inner.scrollWidth;
+			let minTotal = Math.max(width * 2, baseWidth * 2);
+			let copies = Math.ceil(minTotal / Math.max(1, baseWidth));
+			if (copies % 2 !== 0) copies += 1; // ensure even number for seamless half-swap
+			for (let k = 1; k < copies; k++) {
+				el.__ddgMarqueeOriginal.forEach(n => inner.appendChild(n.cloneNode(true)));
+			}
 
 			const totalWidth = inner.scrollWidth;
 			const distance = totalWidth / 2;
-			const duration = distance / baseSpeed;
+			const effW = Math.min(MAX_W, Math.max(MIN_W, window.innerWidth));
+			const speedPxPerSec = (vwPerSec / 100) * effW;
+			const dynamicDuration = distance / Math.max(1, speedPxPerSec);
+			const fixedDuration = distance / fixedPxPerSec;
+			const duration = Math.max(fixedDuration, dynamicDuration);
 
 			gsap.set(inner, { x: 0 });
 			el.__ddgMarqueeConfig = { inner, distance, duration };
@@ -1207,236 +1231,189 @@
 			el.__ddgMarqueeReady = () => build(el);
 		});
 
-		// wait for stable fps before building any marquees
 		let stable = 0, last = performance.now();
 		requestAnimationFrame(function check(now) {
 			const fps = 1000 / (now - last);
 			last = now;
 			stable = fps > 20 ? stable + 1 : 0;
 			if (stable > 10) {
-				console.log('[marquee] stable FPS — building');
 				els.forEach(el => el.__ddgMarqueeReady?.());
 			} else requestAnimationFrame(check);
 		});
 
-		// modal lifecycle integration
-		document.addEventListener('ddg:modal-opened', e => {
+		ddg.utils.on('ddg:modal-opened', e => {
 			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
 			if (modal) marquee(modal);
 		});
 
-		document.addEventListener('ddg:modal-closed', e => {
+		ddg.utils.on('ddg:modal-closed', e => {
 			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
 			if (!modal) return;
 			modal.querySelectorAll('[data-marquee-init]').forEach(el => {
-				try { el.__ddgMarqueeCleanup?.(); } catch { }
+				el.__ddgMarqueeCleanup?.();
 				el.removeAttribute('data-marquee-init');
 			});
 		});
 	}
 
-	function storiesAudioPlayer(root = document) {
-		if (!root || !root.querySelectorAll) return;
+	function storiesAudioPlayer() {
+		// Use centralized utils for logging
+		const log = (...a) => ddg.utils.log('[audio]', ...a);
+		const warn = (...a) => ddg.utils.warn('[audio]', ...a);
 
-		const scope = root;
-		const players = scope.querySelectorAll('.story-player:not([data-audio-init])');
-		if (!players.length) return;
+		let activePlayer = null;
 
-		players.forEach((playerEl) => {
-			// Ensure a single active player per modal/document root
-			const ownerRoot = playerEl.closest('[data-modal-el]') || document.body;
-			if (ownerRoot.hasAttribute('data-audio-active')) return;
+		// ---- Helpers ----
+		const disable = (btn, state = true) => { if (btn) btn.disabled = !!state; };
 
-			const audioFileUrl = playerEl?.dataset?.audioUrl || '';
-			if (!audioFileUrl) return;
+		const setPlayState = (playBtn, playIcon, pauseIcon, playing) => {
+			playBtn.setAttribute('data-state', playing ? 'playing' : 'paused');
+			playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+			if (playIcon) playIcon.style.display = playing ? 'none' : 'block';
+			if (pauseIcon) pauseIcon.style.display = playing ? 'grid' : 'none';
+		};
 
-			const waveformContainer = playerEl.querySelector('.story-player_waveform');
-			const playButton = playerEl.querySelector("button[data-player='play']");
-			const muteButton = playerEl.querySelector("button[data-player='mute']");
-			const shareButton = playerEl.querySelector("button[data-player='share']");
+		const setMuteState = (muteBtn, muteIcon, unmuteIcon, muted) => {
+			muteBtn.setAttribute('data-state', muted ? 'muted' : 'unmuted');
+			muteBtn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
+			if (muteIcon) muteIcon.style.display = muted ? 'none' : 'block';
+			if (unmuteIcon) unmuteIcon.style.display = muted ? 'block' : 'none';
+		};
 
-			if (!waveformContainer || !playButton || !muteButton || !shareButton) return;
+		const cleanupActive = () => {
+			if (!activePlayer) return;
+			const { el, wavesurfer } = activePlayer;
+			try { wavesurfer?.destroy(); } catch (err) { warn('cleanup failed', err); }
+			el.removeAttribute('data-audio-init');
+			activePlayer = null;
+			log('cleaned up');
+		};
 
-			const playIcon = playButton.querySelector('.circle-btn_icon.is-play');
-			const pauseIcon = playButton.querySelector('.circle-btn_icon.is-pause');
-			const muteIcon = muteButton.querySelector('.circle-btn_icon.is-mute');
-			const unmuteIcon = muteButton.querySelector('.circle-btn_icon.is-unmute');
+		// ---- Build player ----
+		const buildAudio = (modalEl) => {
+			if (!modalEl) { warn('No modal element'); return; }
+			const playerEl = modalEl.querySelector('.story-player');
+			if (!playerEl) { warn('No .story-player found'); return; }
+			if (playerEl.hasAttribute('data-audio-init')) return;
 
-			// Find the scrolling panel within the story modal if present
-			const modalRoot = playerEl.closest('[data-modal-el]') || document;
-			const scroller = (modalRoot.querySelector('.lightbox_panel') || document.querySelector('.lightbox_panel'));
-			if (!scroller) return;
+			cleanupActive(); // ensure only one at a time
 
-			// Guard this root and mark this player as initialized
-			ownerRoot.setAttribute('data-audio-active', '');
-			playerEl.setAttribute('data-audio-init', '');
+			const audioUrl = playerEl.dataset.audioUrl;
+			if (!audioUrl) { warn('Missing data-audio-url', playerEl); return; }
+
+			const waveformEl = playerEl.querySelector('.story-player_waveform');
+			const playBtn = playerEl.querySelector('[data-player="play"]');
+			const muteBtn = playerEl.querySelector('[data-player="mute"]');
+			if (!waveformEl || !playBtn || !muteBtn) { warn('Missing waveform/play/mute buttons', playerEl); return; }
+
+			const playIcon = playBtn.querySelector('.circle-btn_icon.is-play');
+			const pauseIcon = playBtn.querySelector('.circle-btn_icon.is-pause');
+			const muteIcon = muteBtn.querySelector('.circle-btn_icon.is-mute');
+			const unmuteIcon = muteBtn.querySelector('.circle-btn_icon.is-unmute');
+
+			playerEl.dataset.audioInit = 'true';
+			log('building player', audioUrl);
 
 			let wavesurfer = null;
 			let isMuted = false;
 			let isPlaying = false;
-			let status = 'not ready';
-			let hasPlayedOnce = false;
-			let flipInstance = null;
-			let cleanupHandlers = [];
-			let originalParent = playerEl.parentNode;
-			let originalNext = playerEl.nextSibling;
 
-			const prefersReduced = () => window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+			// Dynamically read the rendered height of the container
+			const containerHeight = waveformEl.offsetHeight || 42;
 
-			const setBtnDisabled = (btn, on) => { try { btn.disabled = !!on; } catch { } };
-
-			function updatePlayButton() {
-				if (isPlaying) {
-					playButton.setAttribute('data-state', 'playing');
-					playButton.setAttribute('aria-label', 'Pause');
-					if (playIcon) playIcon.style.display = 'none';
-					if (pauseIcon) pauseIcon.style.display = 'grid';
-				} else {
-					playButton.setAttribute('data-state', 'paused');
-					playButton.setAttribute('aria-label', 'Play');
-					if (playIcon) playIcon.style.display = 'block';
-					if (pauseIcon) pauseIcon.style.display = 'none';
-				}
-			}
-
-			function updateMuteButton() {
-				if (isMuted) {
-					muteButton.setAttribute('aria-label', 'Unmute');
-					muteButton.setAttribute('data-state', 'muted');
-					if (muteIcon) muteIcon.style.display = 'none';
-					if (unmuteIcon) unmuteIcon.style.display = 'block';
-				} else {
-					muteButton.setAttribute('aria-label', 'Mute');
-					muteButton.setAttribute('data-state', 'unmuted');
-					if (muteIcon) muteIcon.style.display = 'block';
-					if (unmuteIcon) unmuteIcon.style.display = 'none';
-				}
-			}
-
-			function scrollToSel(sel) {
-				const target = (modalRoot || document).querySelector(sel);
-				if (!target) return;
-				gsap.to(scroller, { duration: prefersReduced() ? 0 : 1.2, scrollTo: sel, ease: 'power2.out' });
-			}
-
-			function initPlayerFlip() {
-				const topBar = modalRoot.querySelector('.lightbox_top-bar');
-				const topNumber = modalRoot.querySelector('.lightbox_top-number');
-				if (!topBar || !topNumber) return;
-				const state = Flip.getState(playerEl);
-				topNumber.insertAdjacentElement('afterend', playerEl);
-				flipInstance = Flip.from(state, { duration: prefersReduced() ? 0 : 0.8, ease: 'power2.out', scale: true });
-			}
-
-			function createWaveSurfer() {
-				if (wavesurfer) return;
-				if (typeof WaveSurfer === 'undefined') throw new Error('audio: WaveSurfer not available');
-
+			// ---- WaveSurfer ----
+			try {
+				if (typeof WaveSurfer === 'undefined') throw new Error('WaveSurfer not available');
 				wavesurfer = WaveSurfer.create({
-					container: waveformContainer,
-					height: 42,
-					waveColor: '#b6b83bff',
+					container: waveformEl,
+					height: containerHeight,
+					waveColor: '#b6b83b',
 					progressColor: '#2C2C2C',
 					cursorColor: '#2C2C2C',
 					normalize: true,
 					barWidth: 2,
 					barGap: 1,
 					dragToSeek: true,
-					url: audioFileUrl,
-					interact: true
+					interact: true,
+					url: audioUrl
 				});
+			} catch (err) { warn(err?.message || 'WaveSurfer init failed', playerEl); return; }
 
-				wavesurfer.once('ready', () => {
-					status = 'ready';
-					setBtnDisabled(playButton, false);
-					setBtnDisabled(muteButton, false);
-					console.log('[audio] waveform ready');
+			// ---- Initial UI ----
+			disable(playBtn, true);
+			disable(muteBtn, true);
+			setPlayState(playBtn, playIcon, pauseIcon, false);
+			setMuteState(muteBtn, muteIcon, unmuteIcon, false);
+
+			wavesurfer.once('ready', () => {
+				disable(playBtn, false);
+				disable(muteBtn, false);
+				log('waveform ready');
+			});
+
+			// ---- Events ----
+			wavesurfer.on('play', () => {
+				isPlaying = true;
+				setPlayState(playBtn, playIcon, pauseIcon, true);
+				// Pause other players
+				document.querySelectorAll('.story-player[data-audio-init]').forEach((el) => {
+					if (el !== playerEl && el.__ws && typeof el.__ws.pause === 'function') el.__ws.pause();
 				});
+			});
 
-				wavesurfer.on('play', () => { isPlaying = true; status = 'playing'; updatePlayButton(); });
-				wavesurfer.on('pause', () => { isPlaying = false; status = 'paused'; updatePlayButton(); });
-				wavesurfer.on('finish', () => { isPlaying = false; status = 'finished'; updatePlayButton(); });
-			}
+			wavesurfer.on('pause', () => {
+				isPlaying = false;
+				setPlayState(playBtn, playIcon, pauseIcon, false);
+			});
 
-			function cleanup() {
-				cleanupHandlers.forEach((off) => off());
-				cleanupHandlers = [];
-				if (flipInstance) flipInstance.kill();
-				flipInstance = null;
-				if (wavesurfer) wavesurfer.destroy();
-				wavesurfer = null;
-				if (originalParent) originalParent.insertBefore(playerEl, originalNext || null);
-				playerEl.removeAttribute('data-audio-init');
-				ownerRoot.removeAttribute('data-audio-active');
-				console.log('[audio] cleaned up');
-			}
+			wavesurfer.on('finish', () => {
+				isPlaying = false;
+				setPlayState(playBtn, playIcon, pauseIcon, false);
+			});
 
-			// Initial UI state
-			setBtnDisabled(playButton, true);
-			setBtnDisabled(muteButton, true);
-			updatePlayButton();
-			updateMuteButton();
+			playBtn.addEventListener('click', () => {
+				try { wavesurfer.playPause(); }
+				catch (err) { warn('playPause failed', err); }
+			});
 
-			// Wire controls
-			const onPlay = (e) => {
-				if (!wavesurfer) return;
-				if (!hasPlayedOnce && (status === 'ready' || status === 'not ready')) {
-					hasPlayedOnce = true;
-					try { wavesurfer.play(); } catch { }
-					// Scroll to main content
-					try { scrollToSel('.story_main'); } catch { }
-					// Defer the FLIP move slightly to avoid jank
-					setTimeout(() => { try { initPlayerFlip(); } catch { } }, 100);
-				} else {
-					try { wavesurfer.playPause(); } catch { }
-				}
-			};
-			const onMute = (e) => {
-				if (!wavesurfer) return;
-				isMuted = !isMuted;
-				try { wavesurfer.setMuted(isMuted); } catch { }
-				updateMuteButton();
-			};
-			const onShare = (e) => { e?.preventDefault?.(); scrollToSel('.story_share'); };
+			muteBtn.addEventListener('click', () => {
+				try {
+					isMuted = !isMuted;
+					wavesurfer.setMuted(isMuted);
+					setMuteState(muteBtn, muteIcon, unmuteIcon, isMuted);
+				} catch (err) { warn('mute toggle failed', err); }
+			});
 
-			playButton.addEventListener('click', onPlay);
-			muteButton.addEventListener('click', onMute);
-			shareButton.addEventListener('click', onShare);
+			playerEl.__ws = wavesurfer;
+			activePlayer = { el: playerEl, wavesurfer };
+		};
 
-			cleanupHandlers.push(() => playButton.removeEventListener('click', onPlay));
-			cleanupHandlers.push(() => muteButton.removeEventListener('click', onMute));
-			cleanupHandlers.push(() => shareButton.removeEventListener('click', onShare));
+		// ---- Modal lifecycle ----
+		const onModalOpened = (e) => {
+			const id = e.detail?.id;
+			const modal = document.querySelector(`[data-modal-el="${id}"]`);
+			if (modal) buildAudio(modal);
+		};
 
-			// Build immediately; WaveSurfer is assumed available
-			createWaveSurfer();
+		const onModalClosed = (e) => {
+			const id = e.detail?.id;
+			const modal = document.querySelector(`[data-modal-el="${id}"]`);
+			if (!modal) return;
+			const playerEl = modal.querySelector('.story-player[data-audio-init]');
+			if (playerEl && activePlayer && activePlayer.el === playerEl) cleanupActive();
+		};
 
-			// Expose a per-player cleanup method
-			playerEl.__ddgAudioCleanup = cleanup;
-		});
+		// Attach once
+		document.addEventListener('ddg:modal-opened', onModalOpened);
+		document.addEventListener('ddg:modal-closed', onModalClosed);
+		log('storiesAudioPlayer initialized');
 	}
-
-	// modal lifecycle integration for audio player
-	document.addEventListener('ddg:modal-opened', e => {
-		const id = e.detail?.id;
-		const modal = document.querySelector(`[data-modal-el="${id}"]`);
-		if (modal) storiesAudioPlayer(modal);
-	});
-
-	document.addEventListener('ddg:modal-closed', e => {
-		const id = e.detail?.id;
-		const modal = document.querySelector(`[data-modal-el="${id}"]`);
-		if (!modal) return;
-		modal.querySelectorAll('.story-player[data-audio-init]').forEach((el) => {
-			try { el.__ddgAudioCleanup?.(); } catch { }
-		});
-	});
 
 	function outreach(root = document) {
 		const recs = Array.from(root.querySelectorAll('.recorder:not([data-outreach-init])'));
 		if (!recs.length) return;
 
 		recs.forEach((recorder) => {
-			// Required UI
 			const btnRecord = recorder.querySelector('#rec-record');
 			const btnPlay = recorder.querySelector('#rec-playback');
 			const btnClear = recorder.querySelector('#rec-clear');
@@ -1542,7 +1519,7 @@
 						else if (name.length > 6) section.classList.add('is-md');
 					}
 					document.querySelectorAll('.outreach-hero_word.is-name').forEach(el => { el.textContent = name; });
-					gsap.to('.outreach-hero_content', { autoAlpha: 1, duration: 0.1 });
+					gsap.to('.outreach-hero_content', { autoAlpha: 1, duration: 0.1, overwrite: 'auto' });
 				}
 
 				return { ddgId, isTestMode };
@@ -1563,7 +1540,7 @@
 				btnSave.disabled = true;
 
 				function createWaveSurfer() {
-					if (wsRec) { try { wsRec.destroy(); } catch { } }
+					if (wsRec) { wsRec.destroy(); }
 					wsRec = WaveSurfer.create({
 						container: visRecordSel,
 						waveColor: 'rgb(0, 0, 0)',
@@ -1587,7 +1564,7 @@
 						if (isRecording) {
 							setStatus('saved');
 							const url = URL.createObjectURL(blob);
-							if (wsPlayback) { try { wsPlayback.destroy(); } catch { } }
+							if (wsPlayback) { wsPlayback.destroy(); }
 							wsPlayback = WaveSurfer.create({
 								container: visPlaybackSel,
 								waveColor: '#B1B42E',
@@ -1616,7 +1593,7 @@
 					if (recordPlugin.isRecording()) {
 						setStatus('recording-paused');
 						recordPlugin.pauseRecording();
-						try { wsRec.empty(); } catch { }
+						wsRec.empty();
 						updateMessage('Recording paused.<br>You can continue adding to your recording, and when you\'re finished, hit Save to listen back.', 'small');
 						return;
 					} else if (recordPlugin.isPaused()) {
@@ -1672,7 +1649,7 @@
 					updateMessage();
 					isRecording = false;
 					recordPlugin.stopRecording();
-					try { wsRec.empty(); } catch { }
+					wsRec.empty();
 					btnClear.disabled = true;
 					btnPlay.disabled = true;
 					btnSave.disabled = true;
@@ -1730,12 +1707,10 @@
 		let pendingUrl = null;   // last seen story url (can arrive before list is ready)
 		let hooksBound = false;
 
-		// Reset so a re-open of the same slug re-emits
-		document.addEventListener('ddg:modal-closed', (e) => {
+		ddg.utils.on('ddg:modal-closed', (e) => {
 			if (e.detail?.id === 'story') lastKey = null;
 		});
 
-		// ---- helpers ----
 		function keyFor(item) {
 			return (
 				(item?.slug) ||
@@ -1755,14 +1730,9 @@
 			const pathname = u.pathname;
 			const slug = pathname.split('/').filter(Boolean).pop() || '';
 
-			// 1) strict pathname match
-			let found = items.find(it => {
-				try { return it?.url?.pathname === pathname; }
-				catch { return false; }
-			});
+			let found = items.find(it => it?.url?.pathname === pathname);
 			if (found) return found;
 
-			// 2) fallback slug match (case-insensitive)
 			if (slug) {
 				const lower = slug.toLowerCase();
 				found = items.find(it => {
@@ -1776,20 +1746,14 @@
 
 		function setCurrent(item, url) {
 			const k = keyFor(item);
-			if (!k) {
-				console.log(`${logPrefix} no match for`, url);
-				return;
-			}
+			if (!k) { return; }
 			if (k === lastKey) return; // no change
 
 			lastKey = k;
 			ddg.currentItem.item = item;
 			ddg.currentItem.url = url;
 
-			console.log(`${logPrefix} current item changed →`, k, item);
-			document.dispatchEvent(new CustomEvent('ddg:current-item-changed', {
-				detail: { item, url }
-			}));
+			ddg.utils.emit('ddg:current-item-changed', { item, url });
 		}
 
 		function bindListHooks(list) {
@@ -1803,7 +1767,6 @@
 			if (ddg.currentItem.list) return ddg.currentItem.list;
 			const list = await ddg.fs.whenReady();
 			ddg.currentItem.list = list;
-			console.log(`${logPrefix} list ready`, list);
 			bindListHooks(list);
 			return list;
 		}
@@ -1814,27 +1777,24 @@
 			const item = findItem(list, pendingUrl);
 			if (item) { setCurrent(item, pendingUrl); return; }
 
-			console.log(`${logPrefix} no match yet for`, new URL(pendingUrl, window.location.origin).pathname, '— will retry after render');
+
 		}
 
 		// capture early story-opened (can fire before list exists)
-		document.addEventListener('ddg:story-opened', (e) => {
+		ddg.utils.on('ddg:story-opened', (e) => {
 			pendingUrl = e.detail?.url || window.location.href;
-			console.log(`${logPrefix} story-opened (global):`, pendingUrl);
 			tryResolve(pendingUrl);
 		});
 
 		if (window.location.pathname.startsWith('/stories/')) {
-			console.log(`${logPrefix} story page detected`);
 			// On direct story load: kick both sides; whichever resolves last triggers tryResolve
 			ensureList().then(() => tryResolve());
 		} else {
-			console.log(`${logPrefix} home page, attempting to get list`);
 			ensureList().then(() => tryResolve('/'));
 		}
 
 		// Force reconciliation after list becomes ready (critical for /stories/ pages)
-		document.addEventListener('ddg:list-ready', (e) => {
+		ddg.utils.on('ddg:list-ready', (e) => {
 			const newList = e.detail?.list;
 			if (newList && newList !== ddg.currentItem.list) {
 				ddg.currentItem.list = newList;
@@ -1842,12 +1802,10 @@
 				bindListHooks(newList);
 			}
 			if (window.location.pathname.startsWith('/stories/')) {
-				console.log(`${logPrefix} forcing resolve after list-ready`);
 				tryResolve(window.location.href);
 			}
 		});
 
-		console.log(`${logPrefix} initialized`);
 	}
 
 	function relatedFilters() {
@@ -1862,12 +1820,8 @@
 
 		const excludeFields = new Set(['slug', 'name', 'title']);
 
-		console.log('[relatedFilters] ready');
 
-		// Ensure targets start empty on load (before data is available)
-		try {
-			Array.from(document.querySelectorAll(selectors.target)).forEach((el) => clearTarget(el));
-		} catch { }
+		Array.from(document.querySelectorAll(selectors.target)).forEach((el) => clearTarget(el));
 
 		function hasAnyUsableValues(values) {
 			if (!values) return false;
@@ -1888,10 +1842,7 @@
 				if (target) clearTarget(target);
 			});
 
-			if (!hasAnyUsableValues(values)) {
-				console.warn('[relatedFilters] no usable field values');
-				return; // Targets already emptied above
-			}
+			if (!hasAnyUsableValues(values)) { return; }
 
 			parents.forEach((parent) => {
 				renderListForItem(parent, values);
@@ -1998,35 +1949,24 @@
 			btn.addEventListener('click', async (e) => {
 				e.preventDefault();
 				const values = collectSelections(parent);
-				if (!Object.keys(values).length) {
-					console.warn('[relatedFilters] nothing selected to apply');
-					return;
-				}
-				try {
-					await ddg.fs.applyCheckboxFilters(values, { merge: true });
-					console.log('[relatedFilters] applied to main filters', values);
-				} catch (err) {
-					console.warn('[relatedFilters] failed to apply', err);
-				}
+				if (!Object.keys(values).length) { return; }
+				await ddg.fs.applyCheckboxFilters(values, { merge: true });
 			});
 		}
 
-		document.addEventListener('ddg:current-item-changed', (e) => {
+		ddg.utils.on('ddg:current-item-changed', (e) => {
 			const item = e.detail?.item;
 			if (!item) return;
 			buildAll(item);
 		});
 
-		// Rebuild after Finsweet render (ensures fields are hydrated)
-		try {
-			ddg.fs.whenReady().then(list => {
-				const rebuild = () => {
-					if (ddg.currentItem?.item) buildAll(ddg.currentItem.item);
-				};
-				document.addEventListener('ddg:list-ready', rebuild);
-				if (typeof list.addHook === 'function') list.addHook('afterRender', rebuild);
-			});
-		} catch { }
+		ddg.fs.whenReady().then(list => {
+			const rebuild = () => {
+				if (ddg.currentItem?.item) buildAll(ddg.currentItem.item);
+			};
+			ddg.utils.on('ddg:list-ready', rebuild);
+			if (typeof list.addHook === 'function') list.addHook('afterRender', rebuild);
+		});
 	}
 
 	ddg.boot = initSite;
