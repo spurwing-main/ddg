@@ -12,16 +12,18 @@
 		emit: (event, detail) => document.dispatchEvent(new CustomEvent(event, { detail })),
 		fail: (msg) => { throw new Error('ddg: ' + msg); },
 		assert: (cond, msg) => { if (!cond) throw new Error('ddg: ' + (msg || 'assertion failed')); },
-		log: (...a) => { try { console.log('[ddg]', ...a); } catch {} },
-		warn: (...a) => { try { console.warn('[ddg]', ...a); } catch {} },
-		waitForStableFps: function(thresholdFps = 20, stableFrames = 10) {
+		log: (...a) => { try { console.log('[ddg]', ...a); } catch { } },
+		warn: (...a) => { try { console.warn('[ddg]', ...a); } catch { } },
+		waitForStableFps: function (thresholdFps = 20, stableFrames = 10, maxWaitMs = 2000) {
 			return new Promise((resolve) => {
-				let stable = 0, last = performance.now();
+				let stable = 0;
+				let last = performance.now();
+				const start = last;
 				function check(now) {
-					const fps = 1000 / (now - last);
+					const fps = 1000 / (now - last || 1);
 					last = now;
 					stable = fps > thresholdFps ? stable + 1 : 0;
-					if (stable > stableFrames) {
+					if (stable > stableFrames || (maxWaitMs && now - start >= maxWaitMs)) {
 						resolve();
 					} else {
 						requestAnimationFrame(check);
@@ -214,16 +216,30 @@
 		};
 
 		const valuesForItemSafe = (item) => {
+			const normalize = (value) => {
+				if (value == null) return [];
+				const arrayValue = Array.isArray(value) ? value : [value];
+				const outValues = [];
+				for (const entry of arrayValue) {
+					if (entry == null) continue;
+					const parts = String(entry).split(',');
+					for (const part of parts) {
+						const trimmed = part.trim();
+						if (trimmed) outValues.push(trimmed);
+					}
+				}
+				return outValues;
+			};
+
 			const out = {};
 			if (item?.fields && Object.keys(item.fields).length) {
 				for (const [n, f] of Object.entries(item.fields)) {
-					let v = f?.value ?? f?.rawValue ?? [];
-					if (typeof v === 'string') v = v.split(',').map(s => s.trim()).filter(Boolean);
-					out[n] = Array.isArray(v) ? v.map(String) : (v == null ? [] : [String(v)]);
+					const v = f?.value ?? f?.rawValue ?? [];
+					out[n] = normalize(v);
 				}
 			} else if (item?.fieldData && typeof item.fieldData === 'object') {
 				for (const [n, v] of Object.entries(item.fieldData)) {
-					out[n] = Array.isArray(v) ? v.map(String) : (v == null ? [] : [String(v)]);
+					out[n] = normalize(v);
 				}
 			}
 			return out;
@@ -344,7 +360,7 @@
 			outreach();
 			share();
 			randomFilters();
-			storiesAudioPlayer()
+			storiesAudioPlayer();
 		});
 	}
 
@@ -352,8 +368,12 @@
 		if (ddg.navInitialized) return;
 		ddg.navInitialized = true;
 
-		const navEl = document.querySelector('.nav');
-		if (!navEl) return;
+	const navEl = document.querySelector('.nav');
+	if (!navEl) return;
+	if (typeof ScrollTrigger === 'undefined' || typeof ScrollTrigger.create !== 'function') {
+		ddg.utils.warn('[nav] ScrollTrigger not available');
+		return;
+	}
 
 		const showThreshold = 50; // px from top to start hiding nav
 		const hideThreshold = 100; // px scrolled before nav can hide
@@ -395,8 +415,12 @@
 	}
 
 	function homelistSplit() {
-		const wraps = gsap.utils.toArray('.home-list_item-wrap');
-		const tapeSpeed = 5000;
+	const wraps = gsap.utils.toArray('.home-list_item-wrap');
+	const tapeSpeed = 5000;
+	if (typeof SplitText === 'undefined') {
+		ddg.utils.warn('[homelistSplit] SplitText not available');
+		return;
+	}
 
 		// Track mobile/desktop state to avoid heavy re-splitting on minor resizes
 		const isMobile = window.innerWidth <= 767;
@@ -437,14 +461,16 @@
 			item.dataset.splitInit = 'true';
 		});
 
+		let tapeRaf = null;
 		function setTapeDurations() {
-			requestAnimationFrame(() => {
+			if (tapeRaf) return;
+			tapeRaf = requestAnimationFrame(() => {
+				tapeRaf = null;
 				const lines = gsap.utils.toArray('.home-list_split-line');
-				const measurements = lines.map(line => ({
-					line,
-					width: line.offsetWidth
-				}));
-				measurements.forEach(({ line, width }) => {
+				lines.forEach((line) => {
+					const width = Math.round(line.offsetWidth || 0);
+					if (line.__ddgTapeWidth === width) return;
+					line.__ddgTapeWidth = width;
 					const dur = gsap.utils.clamp(0.3, 2, width / tapeSpeed);
 					line.style.setProperty('--tape-dur', `${dur}s`);
 				});
@@ -539,10 +565,26 @@
 		};
 
 
-		$(document).off('click.ddgShare').on('click.ddgShare', selectors.btn, async (event) => {
-			const el = event.currentTarget;
-			event.preventDefault();
+		const updateCountdowns = () => {
+			document.querySelectorAll('[data-share-countdown]').forEach((node) => {
+				let current = parseInt(node.getAttribute('data-share-countdown') || '', 10);
+				if (!Number.isFinite(current)) {
+					if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) current = parseInt(node.value, 10);
+					else current = parseInt(node.textContent || '', 10);
+				}
+				if (!Number.isFinite(current)) current = 0;
+				const next = Math.max(0, current - 1);
+				node.setAttribute('data-share-countdown', String(next));
+				if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.value = String(next);
+				else node.textContent = String(next);
+			});
+		};
 
+		const onShareClick = async (event) => {
+			const el = event.target.closest(selectors.btn);
+			if (!el) return;
+			if (event.button && event.button !== 0) return;
+			event.preventDefault();
 			if (el.shareLock) return;
 			el.shareLock = true;
 			setTimeout(() => { el.shareLock = false; }, 400);
@@ -554,14 +596,7 @@
 			const destination = resolver ? resolver({ url: shareUrl, text: shareText }) : shareUrl;
 
 			const realClick = event.isTrusted && document.hasFocus();
-			$('[data-share-countdown]').each((_, el2) => {
-				const $el2 = $(el2);
-				let n = parseInt(el2.getAttribute('data-share-countdown') || $el2.text() || $el2.val(), 10);
-				if (!Number.isFinite(n)) n = 0;
-				const next = Math.max(0, n - 1);
-				$el2.attr('data-share-countdown', next);
-				$el2.is('input, textarea') ? $el2.val(next) : $el2.text(next);
-			});
+			updateCountdowns();
 
 			if (realClick) {
 				const today = new Date().toISOString().slice(0, 10);
@@ -572,16 +607,23 @@
 					const form = document.createElement('form');
 					const iframe = document.createElement('iframe');
 					const frameName = 'wf_' + Math.random().toString(36).slice(2);
-					iframe.name = frameName; iframe.style.display = 'none';
-					form.target = frameName; form.method = 'POST'; form.action = shareWebhookUrl; form.style.display = 'none';
+					iframe.name = frameName;
+					iframe.style.display = 'none';
+					form.target = frameName;
+					form.method = 'POST';
+					form.action = shareWebhookUrl;
+					form.style.display = 'none';
 					[['platform', platform], ['date', today]].forEach(([name, value]) => {
 						const input = document.createElement('input');
-						input.type = 'hidden'; input.name = name; input.value = value;
+						input.type = 'hidden';
+						input.name = name;
+						input.value = value;
 						form.appendChild(input);
 					});
 					document.body.append(iframe, form);
 					form.submit();
-					const exp = new Date(); exp.setHours(24, 0, 0, 0);
+					const exp = new Date();
+					exp.setHours(24, 0, 0, 0);
 					localStorage.setItem(dailyShareKey, today);
 					sessionStorage.setItem(dailyShareKey, today);
 					document.cookie = `${dailyShareKey}=${today}; expires=${exp.toUTCString()}; path=/; SameSite=Lax`;
@@ -603,13 +645,15 @@
 				return;
 			}
 
-			// open new tab; no fallbacks
 			const w = window.open('about:blank', '_blank');
 			if (w) {
 				w.opener = null;
 				w.location.href = destination;
 			}
-		});
+		};
+
+		document.addEventListener('click', onShareClick);
+		ddg.shareClickHandler = onShareClick;
 
 	}
 
@@ -689,10 +733,28 @@
 				node.focus({ preventScroll: true });
 			};
 
+			const clearInlineTransforms = () => {
+				const el = $anim[0];
+				if (!el) return;
+				['transform', 'translate', 'rotate', 'scale', 'opacity', 'visibility'].forEach((prop) => {
+					try { el.style.removeProperty(prop); } catch { el.style[prop] = ''; }
+				});
+				if (el.getAttribute('style') && el.getAttribute('style').trim() === '') {
+					el.removeAttribute('style');
+				}
+			};
+
 			const onKeydownTrap = (e) => {
 				if (e.key !== 'Tab') return;
 				const root = $modal[0];
-				const list = root.querySelectorAll('a[href],button,textarea,input,select,[tabindex]:not([tabindex="-1"])');
+				const list = Array.from(root.querySelectorAll('a[href],button,textarea,input,select,[tabindex]:not([tabindex="-1"])')).filter((node) => {
+					if (!node) return false;
+					if (node.disabled || node.getAttribute('aria-disabled') === 'true') return false;
+					const style = window.getComputedStyle(node);
+					if (style.display === 'none' || style.visibility === 'hidden') return false;
+					if (node.offsetParent === null && !node.hasAttribute('data-allow-focus-when-hidden')) return false;
+					return node.tabIndex >= 0;
+				});
 				if (!list.length) return;
 				const first = list[0], last = list[list.length - 1];
 				if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
@@ -754,7 +816,7 @@
 					const u = new URL(window.location.href);
 					u.hash = hash;
 					window.history.replaceState(window.history.state, '', u.toString());
-				} catch {}
+				} catch { }
 			});
 
 			const open = ({ skipAnimation = false, afterOpen } = {}) => {
@@ -774,6 +836,7 @@
 
 				if (skipAnimation) {
 					gsap.set([$bg[0], $anim[0]], { autoAlpha: 1, y: 0 });
+					requestAnimationFrame(clearInlineTransforms);
 					document.addEventListener('keydown', onKeydownTrap, true);
 					requestAnimationFrame(focusModal);
 					ddg.utils.emit('ddg:modal-opened', { id });
@@ -786,6 +849,7 @@
 				gsap.timeline({
 					onComplete: () => {
 						setAnimating(false);
+						requestAnimationFrame(clearInlineTransforms);
 						document.addEventListener('keydown', onKeydownTrap, true);
 						requestAnimationFrame(focusModal);
 						ddg.utils.emit('ddg:modal-opened', { id });
@@ -809,7 +873,7 @@
 
 				const finish = () => {
 					[$modal[0], $inner[0]].forEach(el => el?.classList.remove('is-open'));
-					gsap.set([$anim[0], $bg[0], $modal[0], $inner[0]], { clearProps: 'all' });
+					gsap.set([$anim[0], $bg[0], $modal[0], $inner[0]], { clearProps: 'transform,opacity,autoAlpha,pointerEvents,willChange' });
 					document.removeEventListener('keydown', onKeydownTrap, true);
 					if (lastActiveEl) lastActiveEl.focus();
 					lastActiveEl = null;
@@ -940,18 +1004,18 @@
 			});
 		}
 
-        requestAnimationFrame(() => {
-            $(selectors.modal).each((_, el) => {
-                const id = el.getAttribute('data-modal-el');
-                const open = el.classList.contains('is-open');
-                syncCssState($(el), open, id);
-                if (open && !ddg.scrollLock.isHolding(id)) {
-                    ddg.scrollLock.lock(id);
-                }
-                // Emit an open event for any modal already open at init
-                if (open) ddg.utils.emit('ddg:modal-opened', { id });
-            });
-        });
+		requestAnimationFrame(() => {
+			$(selectors.modal).each((_, el) => {
+				const id = el.getAttribute('data-modal-el');
+				const open = el.classList.contains('is-open');
+				syncCssState($(el), open, id);
+				if (open && !ddg.scrollLock.isHolding(id)) {
+					ddg.scrollLock.lock(id);
+				}
+				// Emit an open event for any modal already open at init
+				if (open) ddg.utils.emit('ddg:modal-opened', { id });
+			});
+		});
 
 		ddg.utils.emit('ddg:modals-ready');
 	}
@@ -965,6 +1029,8 @@
 		const $embed = $('[data-ajax-modal="embed"]');
 		const originalTitle = document.title;
 		const homeUrl = '/';
+		const SKELETON_HTML = "<div class='modal-skeleton' aria-busy='true'></div>";
+		const ERROR_HTML = "<div class='modal-error'>Failed to load content.</div>";
 
 		const dispatchStoryOpened = (url) => queueMicrotask(() => {
 			ddg.utils.emit('ddg:story-opened', { url });
@@ -1000,7 +1066,13 @@
 		const parseStory = (html) => {
 			const doc = new DOMParser().parseFromString(html, 'text/html');
 			const node = doc.querySelector('[data-ajax-modal="content"]');
-			return { title: doc.title || '', contentHTML: node ? node.innerHTML : "<div class='modal-error'>Failed to load content.</div>" };
+			return { title: doc.title || '', contentHTML: node ? node.outerHTML : ERROR_HTML };
+		};
+
+		const renderEmbed = (html) => {
+			const markup = typeof html === 'string' && html.trim() ? html : ERROR_HTML;
+			$embed.empty();
+			$embed[0].innerHTML = markup;
 		};
 
 		const ensureModal = () => {
@@ -1009,18 +1081,20 @@
 			return storyModal;
 		};
 
-		const openStory = (url, title, contentHTML) => {
+		const openStory = (url, title, contentHTML, options = {}) => {
 			const modal = ensureModal();
 			if (!modal) { return; }
 
-			$embed.empty();
-			const container = document.createElement('div');
-			container.innerHTML = contentHTML || "<div class='modal-error'>Failed to load content.</div>";
-			$embed[0].append(...Array.from(container.childNodes));
+			const { stateMode = 'push' } = options;
+			renderEmbed(contentHTML);
 			modal.open({
 				afterOpen: () => {
 					if (title) document.title = title;
-					history.pushState({ modal: true }, '', url);
+					if (stateMode === 'replace') {
+						history.replaceState({ modal: true }, '', url);
+					} else if (stateMode === 'push') {
+						history.pushState({ modal: true }, '', url);
+					}
 					// Notify parent of new URL if in iframe
 					if (window !== window.parent) {
 						window.parent.postMessage({
@@ -1031,10 +1105,35 @@
 					}
 					ddg.fs.whenReady()
 						.then(() => dispatchStoryOpened(url))
-						.catch(() => dispatchStoryOpened(url));
+						.catch(() => dispatchStoryOpened(url))
+						.finally(() => marquee?.($embed[0]));
 
 				}
 			});
+		};
+
+		const loadAndOpenStory = async (url, options = {}) => {
+			if (!url) return;
+			if (lock && !options.force) return;
+			lock = true;
+			try {
+				const cached = cacheGet(url);
+				if (cached) {
+					openStory(url, cached.title, cached.contentHTML, options);
+					return;
+				}
+				if (options.showSkeleton !== false) renderEmbed(SKELETON_HTML);
+				const response = await fetch(url, { credentials: 'same-origin' });
+				if (!response.ok) throw new Error('story request failed');
+				const text = await response.text();
+				const parsed = parseStory(text);
+				cacheSet(url, parsed);
+				openStory(url, parsed.title, parsed.contentHTML, options);
+			} catch {
+				renderEmbed(ERROR_HTML);
+			} finally {
+				lock = false;
+			}
 		};
 
 		ddg.utils.on('ddg:modal-closed', (ev) => {
@@ -1051,102 +1150,102 @@
 
 		});
 
-		$(document).on('click.ajax', '[data-ajax-modal="link"]', (e) => {
-			if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1 || e.button === 2) return;
-
-			const root = e.currentTarget;
-			let linkUrl = root.getAttribute('href') || '';
-			if (!linkUrl) {
-				const candidate = (e.target && e.target.closest) ? e.target.closest('a[href]') : null;
-				if (candidate && root.contains(candidate)) linkUrl = candidate.getAttribute('href') || '';
-			}
-			if (!linkUrl) {
-				const a = root.querySelector ? root.querySelector('a[href]') : null;
-				if (a) linkUrl = a.getAttribute('href') || '';
-			}
-			if (!linkUrl) return;
-
-			e.preventDefault();
-
-			if (lock) { return; }
-			lock = true;
-
-			if (cacheGet(linkUrl)) {
-				const { title, contentHTML } = cacheGet(linkUrl);
-				openStory(linkUrl, title, contentHTML);
-				lock = false;
-				return;
-			}
-
-			$embed.empty().append("<div class='modal-skeleton' aria-busy='true'></div>");
-
-			$.ajax({
-				url: linkUrl,
-					success: (response) => {
-						const parsed = parseStory(response);
-						cacheSet(linkUrl, parsed);
-						openStory(linkUrl, parsed.title, parsed.contentHTML);
-					},
-				error: () => {
-					$embed.empty().append("<div class='modal-error'>Failed to load content.</div>");
-				},
-				complete: () => { lock = false; }
-			});
-		});
-
-		let prefetchTimer = null;
-		$(document).on('mouseenter.ajax touchstart.ajax', '[data-ajax-modal="link"]', (e) => {
-			if (!prefetchEnabled) return; // 🔒 skip until 2s have passed
-			const root = e.currentTarget;
+		const resolveLinkHref = (root, target) => {
+			if (!root) return '';
 			let url = root.getAttribute('href') || '';
-			if (!url) {
-				const candidate = (e.target && e.target.closest) ? e.target.closest('a[href]') : null;
+			if (!url && target) {
+				const candidate = target.closest ? target.closest('a[href]') : null;
 				if (candidate && root.contains(candidate)) url = candidate.getAttribute('href') || '';
 			}
-			if (!url) {
-				const a = root.querySelector ? root.querySelector('a[href]') : null;
-				if (a) url = a.getAttribute('href') || '';
+			if (!url && root.querySelector) {
+				const anchor = root.querySelector('a[href]');
+				if (anchor) url = anchor.getAttribute('href') || '';
 			}
-			if (!url || cacheGet(url)) return;
+			return url;
+		};
+
+		const onStoryLinkClick = async (event) => {
+			if (event.defaultPrevented) return;
+			if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button === 1 || event.button === 2) return;
+			const root = event.target.closest('[data-ajax-modal="link"]');
+			if (!root) return;
+			event.preventDefault();
+			const url = resolveLinkHref(root, event.target);
+			if (!url) return;
+			await loadAndOpenStory(url, { stateMode: 'push' });
+		};
+
+		let prefetchTimer = null;
+		let prefetchTarget = null;
+		const schedulePrefetch = (url) => {
+			if (!prefetchEnabled || !url || cacheGet(url)) return;
 			clearTimeout(prefetchTimer);
-			prefetchTimer = setTimeout(() => {
-				$.ajax({
-					url, success: (html) => {
-						if (cacheGet(url)) return;
-						cacheSet(url, parseStory(html));
-					}
-				});
+			prefetchTimer = setTimeout(async () => {
+				try {
+					const response = await fetch(url, { credentials: 'same-origin' });
+					if (!response.ok) return;
+					const text = await response.text();
+					if (cacheGet(url)) return;
+					cacheSet(url, parseStory(text));
+				} catch { }
 			}, 120);
-		});
+		};
+
+		const onStoryLinkPointerOver = (event) => {
+			const root = event.target.closest('[data-ajax-modal="link"]');
+			if (!root) return;
+			if (prefetchTarget === root) return;
+			prefetchTarget = root;
+			const url = resolveLinkHref(root, event.target);
+			schedulePrefetch(url);
+		};
+
+		const onStoryLinkPointerOut = (event) => {
+			const root = event.target.closest('[data-ajax-modal="link"]');
+			if (!root) return;
+			const related = event.relatedTarget;
+			if (related && root.contains(related)) return;
+			if (prefetchTarget === root) prefetchTarget = null;
+			clearTimeout(prefetchTimer);
+			prefetchTimer = null;
+		};
+
+		const onStoryLinkTouchStart = (event) => {
+			const root = event.target.closest('[data-ajax-modal="link"]');
+			if (!root) return;
+			const url = resolveLinkHref(root, event.target);
+			schedulePrefetch(url);
+		};
+
+		document.addEventListener('click', onStoryLinkClick);
+		document.addEventListener('mouseover', onStoryLinkPointerOver);
+		document.addEventListener('mouseout', onStoryLinkPointerOut);
+		document.addEventListener('touchstart', onStoryLinkTouchStart, { passive: true });
+		document.addEventListener('touchend', () => {
+			clearTimeout(prefetchTimer);
+			prefetchTimer = null;
+			prefetchTarget = null;
+		}, { passive: true });
+		document.addEventListener('touchcancel', () => {
+			clearTimeout(prefetchTimer);
+			prefetchTimer = null;
+			prefetchTarget = null;
+		}, { passive: true });
 
 		window.addEventListener('popstate', () => {
 			const path = window.location.pathname;
 			const modal = ensureModal();
 			if (!modal) return;
-			if (!path.startsWith('/stories/') && modal.isOpen()) {
-				modal.close();
+			if (!path.startsWith('/stories/')) {
+				if (modal.isOpen()) modal.close();
+				return;
 			}
+			loadAndOpenStory(window.location.href, { stateMode: 'none', showSkeleton: true, force: true });
 		});
 
 		const tryOpenDirectStory = () => {
-			const modal = ensureModal();
-			if (!modal) return;
-
 			if (!window.location.pathname.startsWith('/stories/')) return;
-
-			const url = window.location.href;
-			const after = () => {
-				history.replaceState({ modal: true }, '', url);
-				ddg.fs.whenReady()
-					.then(() => dispatchStoryOpened(url))
-					.catch(() => dispatchStoryOpened(url));
-			};
-
-			if (modal.isOpen()) {
-				after();
-			} else {
-				modal.open({ skipAnimation: true, afterOpen: () => after() });
-			}
+			loadAndOpenStory(window.location.href, { stateMode: 'replace', showSkeleton: true, force: true });
 		};
 
 		// If modals are already initialized, run immediately; otherwise, wait.
@@ -1160,6 +1259,30 @@
 	function randomFilters() {
 		const selectors = { trigger: '[data-randomfilters]' };
 		const state = (ddg.randomFilters ||= { bag: [] });
+		if (!state.scheduleApply) {
+			state.scheduleApply = (() => {
+				let timer = null;
+				let pendingValues = null;
+				let resolvers = [];
+				return (values) => new Promise((resolve) => {
+					pendingValues = values;
+					resolvers.push(resolve);
+					clearTimeout(timer);
+					timer = setTimeout(async () => {
+						const toApply = pendingValues;
+						pendingValues = null;
+						timer = null;
+						try {
+							await ddg.fs.applyCheckboxFilters(toApply, { merge: false });
+						} finally {
+							const pending = resolvers.slice();
+							resolvers = [];
+							pending.forEach(r => r());
+						}
+					}, 90);
+				});
+			})();
+		}
 
 		const keyOf = (it) => (
 			it?.url?.pathname ||
@@ -1201,7 +1324,7 @@
 			const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
 			const values = ddg.fs.valuesForItemSafe(item);
 
-			await ddg.fs.applyCheckboxFilters(values, { merge: false });
+			await state.scheduleApply(values);
 		}, true);
 	}
 
@@ -1400,7 +1523,8 @@
 	}
 
 	function storiesAudioPlayer() {
-		
+		const log = (...a) => ddg.utils.log('[audio]', ...a);
+		const warn = (...a) => ddg.utils.warn('[audio]', ...a);
 		let activePlayer = null;
 		// ---- Helpers ----
 		const disable = (btn, state = true) => { if (btn) btn.disabled = !!state; };
@@ -1424,6 +1548,7 @@
 			const { el, wavesurfer } = activePlayer;
 			try { wavesurfer?.destroy(); } catch (err) { warn('cleanup failed', err); }
 			el.removeAttribute('data-audio-init');
+			delete el.__ws;
 			activePlayer = null;
 			log('cleaned up');
 		};
@@ -1551,8 +1676,19 @@
 	function outreach(root = document) {
 		const recs = Array.from(root.querySelectorAll('.recorder:not([data-outreach-init])'));
 		if (!recs.length) return;
+		const warn = (...a) => ddg.utils.warn('[outreach]', ...a);
+		let sharedBeepCtx = null;
+		const getBeepContext = () => {
+			const Ctor = window.AudioContext || window.webkitAudioContext;
+			if (!Ctor) return null;
+			if (!sharedBeepCtx || sharedBeepCtx.state === 'closed') {
+				try { sharedBeepCtx = new Ctor(); }
+				catch { sharedBeepCtx = null; }
+			}
+			return sharedBeepCtx;
+		};
 
-			recs.forEach((recorder) => {
+		recs.forEach((recorder) => {
 			const btnRecord = recorder.querySelector('#rec-record');
 			const btnPlay = recorder.querySelector('#rec-playback');
 			const btnClear = recorder.querySelector('#rec-clear');
@@ -1563,6 +1699,8 @@
 			const form = recorder.querySelector('#rec-form');
 			const visRecordSel = '.recorder_visualiser.is-record';
 			const visPlaybackSel = '.recorder_visualiser.is-playback';
+			const visRecordEl = recorder.querySelector(visRecordSel);
+			const visPlaybackEl = recorder.querySelector(visPlaybackSel);
 			if (!btnRecord || !btnPlay || !btnClear || !btnSave || !btnSubmit || !msg || !prog || !form) return;
 
 			recorder.setAttribute('data-outreach-init', '');
@@ -1576,14 +1714,14 @@
 			let sound = new Audio();
 			let welcomeHasPlayed = false;
 
-				const welcomeURL = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3';
-				const click1 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3';
-				const click2 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3';
-				// Preload and reuse click sounds to avoid per-event Audio creation
-				const click1Audio = new Audio(click1);
-				click1Audio.preload = 'auto';
-				const click2Audio = new Audio(click2);
-				click2Audio.preload = 'auto';
+			const welcomeURL = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3';
+			const click1 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3';
+			const click2 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3';
+			// Preload and reuse click sounds to avoid per-event Audio creation
+			const click1Audio = new Audio(click1);
+			click1Audio.preload = 'auto';
+			const click2Audio = new Audio(click2);
+			click2Audio.preload = 'auto';
 
 			function setStatus(next) {
 				recorder.setAttribute('ddg-status', next);
@@ -1605,36 +1743,48 @@
 
 			function updateProgress(time, units) {
 				if (!prog) return;
-				let mm, ss;
+				let mm = 0;
+				let ss = 0;
 				if (units === 's') {
-					mm = Math.floor((time % 3600000) / 60);
-					ss = Math.floor((time % 60000) / 1);
+					const totalSeconds = Math.max(0, Number(time) || 0);
+					mm = Math.floor(totalSeconds / 60);
+					ss = Math.floor(totalSeconds % 60);
 				} else {
-					mm = Math.floor((time % 3600000) / 60000);
-					ss = Math.floor((time % 60000) / 1000);
+					const totalMs = Math.max(0, Number(time) || 0);
+					mm = Math.floor(totalMs / 60000);
+					ss = Math.floor((totalMs % 60000) / 1000);
 				}
 				prog.textContent = [mm, ss].map(v => (v < 10 ? '0' + v : v)).join(':');
 			}
 
-			function beep(duration = 500, frequency = 1000, volume = 1) {
-				const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-				const oscillator = audioCtx.createOscillator();
-				const gainNode = audioCtx.createGain();
-				oscillator.type = 'sine';
-				oscillator.frequency.value = frequency;
-				gainNode.gain.value = volume;
-				oscillator.connect(gainNode);
-				gainNode.connect(audioCtx.destination);
-				oscillator.start();
-				setTimeout(() => { oscillator.stop(); audioCtx.close(); }, duration);
-			}
-
-				function addSounds() {
-					recorder.querySelectorAll('.recorder_btn').forEach((button) => {
-						button.addEventListener('mousedown', () => { click1Audio.currentTime = 0; click1Audio.play(); });
-						button.addEventListener('mouseup', () => { click2Audio.currentTime = 0; click2Audio.play(); });
-					});
+				function beep(duration = 500, frequency = 1000, volume = 1) {
+					const audioCtx = getBeepContext();
+					if (!audioCtx) return;
+					if (audioCtx.state === 'suspended') {
+						audioCtx.resume().catch(() => { });
+					}
+					const oscillator = audioCtx.createOscillator();
+					const gainNode = audioCtx.createGain();
+					oscillator.type = 'sine';
+					oscillator.frequency.value = frequency;
+					gainNode.gain.value = volume;
+					oscillator.connect(gainNode);
+					gainNode.connect(audioCtx.destination);
+					oscillator.start();
+					const stop = () => {
+						try { oscillator.stop(); } catch { }
+						try { oscillator.disconnect(); } catch { }
+						try { gainNode.disconnect(); } catch { }
+					};
+					setTimeout(stop, duration);
 				}
+
+			function addSounds() {
+				recorder.querySelectorAll('.recorder_btn').forEach((button) => {
+					button.addEventListener('mousedown', () => { click1Audio.currentTime = 0; click1Audio.play(); });
+					button.addEventListener('mouseup', () => { click2Audio.currentTime = 0; click2Audio.play(); });
+				});
+			}
 
 			function qsParam(name) { return new URLSearchParams(window.location.search).get(name); }
 
@@ -1684,9 +1834,10 @@
 				btnSave.disabled = true;
 
 				function createWaveSurfer() {
+					if (!visRecordEl) { warn('Missing record visualiser', recorder); return; }
 					if (wsRec) { wsRec.destroy(); }
 					wsRec = WaveSurfer.create({
-						container: visRecordSel,
+						container: visRecordEl,
 						waveColor: 'rgb(0, 0, 0)',
 						progressColor: 'rgb(0, 0, 0)',
 						normalize: false,
@@ -1708,9 +1859,10 @@
 						if (isRecording) {
 							setStatus('saved');
 							const url = URL.createObjectURL(blob);
-							if (wsPlayback) { wsPlayback.destroy(); }
+							if (wsPlayback) { wsPlayback.destroy(); wsPlayback = null; }
+							if (!visPlaybackEl) { warn('Missing playback visualiser', recorder); return; }
 							wsPlayback = WaveSurfer.create({
-								container: visPlaybackSel,
+								container: visPlaybackEl,
 								waveColor: '#B1B42E',
 								progressColor: 'rgb(0, 0, 0)',
 								normalize: false,
@@ -1745,7 +1897,18 @@
 						recordPlugin.resumeRecording();
 						return;
 					} else {
-						recordPlugin.startRecording().then(() => setStatus('recording'));
+						recordPlugin.startRecording()
+							.then(() => setStatus('recording'))
+							.catch((err) => {
+								isRecording = false;
+								btnSave.disabled = true;
+								btnClear.disabled = true;
+								btnPlay.disabled = true;
+								btnSubmit.disabled = false;
+								setStatus('permission-denied');
+								updateMessage('We couldn\'t access your microphone. Please enable mic permissions and try again.', 'small');
+								warn('startRecording failed', err);
+							});
 					}
 				}
 
