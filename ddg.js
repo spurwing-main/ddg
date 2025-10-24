@@ -1,9 +1,7 @@
 (function () {
 	const ddg = (window.ddg ??= {});
 	const data = (ddg.data ??= {
-		siteBooted: false,
-		truePath: window.location.pathname,
-		ajaxHomeLoaded: false
+		siteBooted: false
 	});
 
 	ddg.utils = {
@@ -12,26 +10,8 @@
 		emit: (event, detail) => document.dispatchEvent(new CustomEvent(event, { detail })),
 		fail: (msg) => { throw new Error('ddg: ' + msg); },
 		assert: (cond, msg) => { if (!cond) throw new Error('ddg: ' + (msg || 'assertion failed')); },
-		log: (...a) => { try { console.log('[ddg]', ...a); } catch { } },
-		warn: (...a) => { try { console.warn('[ddg]', ...a); } catch { } },
-		waitForStableFps: function (thresholdFps = 20, stableFrames = 10, maxWaitMs = 2000) {
-			return new Promise((resolve) => {
-				let stable = 0;
-				let last = performance.now();
-				const start = last;
-				function check(now) {
-					const fps = 1000 / (now - last || 1);
-					last = now;
-					stable = fps > thresholdFps ? stable + 1 : 0;
-					if (stable > stableFrames || (maxWaitMs && now - start >= maxWaitMs)) {
-						resolve();
-					} else {
-						requestAnimationFrame(check);
-					}
-				}
-				requestAnimationFrame(check);
-			});
-		}
+		log: (...a) => console.log('[ddg]', ...a),
+		warn: (...a) => console.warn('[ddg]', ...a)
 	};
 
 	ddg.scrollLock = ddg.scrollLock || (() => {
@@ -155,57 +135,65 @@
 					if (!firstResolved) { firstResolved = true; resolve(inst); }
 				};
 
-				try { window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]); } catch { }
-
-				const mod = window.FinsweetAttributes?.modules?.list;
-				if (mod?.loading?.then) mod.loading.then((i) => finish(i, 'module.loading')).catch(() => { });
-
-				try {
-					const fa = window.FinsweetAttributes;
-					const attemptLoad = () => {
-						try {
-							const res = fa.load?.('list');
-							if (res && typeof res.then === 'function') res.then(i => finish(i, 'load()')).catch(() => { });
-						} catch { }
-					};
-					attemptLoad();
-					if (!fa?.modules?.list) {
-						const wait = new MutationObserver(() => {
-							if (window.FinsweetAttributes?.modules?.list) {
-								wait.disconnect();
-								attemptLoad();
-							}
-						});
-						wait.observe(document.documentElement, { childList: true, subtree: true });
-					}
-				} catch { }
-
-				const observer = new MutationObserver(() => {
-					const listEl = document.querySelector('[fs-list-element="list"]');
-					if (listEl && window.FinsweetAttributes?.modules?.list) {
-						try {
-							const r = window.FinsweetAttributes.load?.('list');
-							if (r && typeof r.then === 'function') r.then((i) => finish(i, 'observer')).catch(() => { });
-						} catch { }
-						if (firstResolved) observer.disconnect();
-					}
-				});
-				if (document.body) {
-					observer.observe(document.body, { childList: true, subtree: true });
-				} else {
-					document.addEventListener('DOMContentLoaded', () => {
-						observer.observe(document.body, { childList: true, subtree: true });
-					}, { once: true });
+				if (Array.isArray(window.FinsweetAttributes)) {
+					window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]);
 				}
 
-				document.addEventListener('ddg:ajax-home-ready', () => {
-					const m = window.FinsweetAttributes?.modules?.list;
-					if (m?.loading?.then) m.loading.then((i) => finish(i, 'module.loading (ajax-home)')).catch(() => { });
-					else {
-						const r = window.FinsweetAttributes.load?.('list');
-						if (r && typeof r.then === 'function') r.then((i) => finish(i, 'load(ddg:ajax-home-ready)')).catch(() => { });
+				const mod = window.FinsweetAttributes?.modules?.list;
+				if (mod?.loading?.then) {
+					mod.loading.then((i) => finish(i, 'module.loading')).catch((err) => ddg.utils.warn('[fs] module.loading failed', err));
+				}
+
+				const fa = window.FinsweetAttributes;
+				const attemptLoad = () => {
+					if (typeof fa?.load !== 'function') return;
+					try {
+						const res = fa.load('list');
+						if (res && typeof res.then === 'function') {
+							res.then(i => finish(i, 'load()')).catch((err) => ddg.utils.warn('[fs] load(list) failed', err));
+						}
+					} catch (err) {
+						ddg.utils.warn('[fs] load(list) threw', err);
 					}
-				}, { once: true });
+				};
+				attemptLoad();
+				if (!fa?.modules?.list && typeof MutationObserver === 'function') {
+					const wait = new MutationObserver(() => {
+						if (window.FinsweetAttributes?.modules?.list) {
+							wait.disconnect();
+							attemptLoad();
+						}
+					});
+					wait.observe(document.documentElement, { childList: true, subtree: true });
+				}
+
+				if (typeof MutationObserver === 'function') {
+					const observer = new MutationObserver(() => {
+						const listEl = document.querySelector('[fs-list-element="list"]');
+						if (listEl && window.FinsweetAttributes?.modules?.list) {
+							const loader = window.FinsweetAttributes?.load;
+							if (typeof loader === 'function') {
+								try {
+									const r = loader('list');
+									if (r && typeof r.then === 'function') {
+										r.then((i) => finish(i, 'observer')).catch((err) => ddg.utils.warn('[fs] observer load failed', err));
+									}
+								} catch (err) {
+									ddg.utils.warn('[fs] observer load threw', err);
+								}
+							}
+							if (firstResolved) observer.disconnect();
+						}
+					});
+					if (document.body) {
+						observer.observe(document.body, { childList: true, subtree: true });
+					} else {
+						document.addEventListener('DOMContentLoaded', () => {
+							observer.observe(document.body, { childList: true, subtree: true });
+						}, { once: true });
+					}
+				}
+
 			});
 			return readyPromise;
 		}
@@ -345,11 +333,56 @@
 		return { whenReady, items, valuesForItemSafe, applyCheckboxFilters, afterNextRender };
 	})();
 
+	ddg.confetti = (() => {
+		let js = null;
+		let canvas = null;
+
+		function ensureCanvas() {
+			if (canvas) return canvas;
+			canvas = document.createElement('canvas');
+			canvas.id = 'ddg-confetti-canvas';
+			Object.assign(canvas.style, {
+				position: 'fixed',
+				inset: 0,
+				width: '100%',
+				height: '100%',
+				zIndex: 999999, // 🔝 absolutely on top of everything
+				pointerEvents: 'none',
+			});
+			document.body.appendChild(canvas);
+			return canvas;
+		}
+
+		function getInstance() {
+			if (!window.JSConfetti) {
+				ddg.utils.warn('Confetti library missing');
+				return null;
+			}
+			if (!js) js = new JSConfetti({ canvas: ensureCanvas() });
+			return js;
+		}
+
+		function trigger(options = {}) {
+			const inst = getInstance();
+			if (!inst) return;
+			inst.addConfetti({
+				emojis: ['🎉', '✨', '💥'],
+				confettiRadius: 6,
+				confettiNumber: 150,
+				...options,
+			});
+		}
+
+		return { trigger };
+	})();
+
 	function initSite() {
 		if (data.siteBooted) return;
 		data.siteBooted = true;
 
 		requestAnimationFrame(() => {
+			syncFrameUrl();
+			iframeLinkPolicy();
 			nav();
 			modals();
 			currentItem();
@@ -364,16 +397,78 @@
 		});
 	}
 
-	function nav() {
-		if (ddg.navInitialized) return;
-		ddg.navInitialized = true;
+	function syncFrameUrl() {
+		if (ddg.syncFrameUrlBound) return;
+		ddg.syncFrameUrlBound = true;
 
-	const navEl = document.querySelector('.nav');
-	if (!navEl) return;
-	if (typeof ScrollTrigger === 'undefined' || typeof ScrollTrigger.create !== 'function') {
-		ddg.utils.warn('[nav] ScrollTrigger not available');
-		return;
+		// In child (iframe): notify parent whenever URL changes via history or hash
+		if (window !== window.parent) {
+			const notify = ddg.utils.debounce(() => {
+				try {
+					window.parent.postMessage({
+						type: 'iframe:url-change',
+						url: window.location.href,
+						title: document.title
+					}, '*');
+				} catch (err) {
+					ddg.utils.warn('[sync] postMessage failed', err);
+				}
+			}, 0);
+
+			const wrap = (method) => {
+				try {
+					const orig = history[method];
+					if (typeof orig !== 'function' || orig.__ddgWrapped) return;
+					history[method] = function () {
+						const res = orig.apply(this, arguments);
+						notify();
+						return res;
+					};
+					history[method].__ddgWrapped = true;
+				} catch {}
+			};
+			wrap('pushState');
+			wrap('replaceState');
+			window.addEventListener('popstate', notify);
+			window.addEventListener('hashchange', notify);
+			// Send initial state so parent reflects the starting URL
+			setTimeout(notify, 0);
+			return;
+		}
+
+		// In parent (top): update our URL/title when the iframe reports a change
+		window.addEventListener('message', (event) => {
+			const data = event && event.data;
+			if (!data || data.type !== 'iframe:url-change') return;
+			const { url, title } = data;
+			try {
+				if (url && url !== window.location.href) {
+					const u = new URL(String(url), window.location.href);
+					if (u.origin === window.location.origin) {
+						window.history.replaceState(window.history.state, '', u.toString());
+					} else {
+						// Cross-origin: navigate instead of replaceState (which would throw)
+						window.location.assign(u.toString());
+					}
+				}
+				if (typeof title === 'string' && title.length) {
+					document.title = title;
+				}
+			} catch (err) {
+				ddg.utils.warn('[sync] parent update failed', err);
+			}
+		}, false);
 	}
+
+	function nav() {
+		const navEl = document.querySelector('.nav');
+		if (!navEl) return;
+		if (ddg.navInitialized) return;
+
+		ddg.utils.assert(typeof ScrollTrigger !== 'undefined' && typeof ScrollTrigger.create === 'function', 'nav requires ScrollTrigger');
+		ddg.utils.assert(typeof gsap !== 'undefined', 'nav requires gsap');
+
+		ddg.navInitialized = true;
 
 		const showThreshold = 50; // px from top to start hiding nav
 		const hideThreshold = 100; // px scrolled before nav can hide
@@ -410,64 +505,79 @@
 				lastY = y;
 			}
 		});
+	}
 
+	function iframeLinkPolicy() {
+		if (window === window.parent) return;
+		if (ddg.iframeLinkPolicyBound) return;
 
+		ddg.utils.assert(window.top && window.top.location && typeof window.top.location.assign === 'function', 'iframe link policy requires parent');
+
+			const handler = (event) => {
+				if (event.defaultPrevented) return;
+				if (event.button !== 0) return;
+				if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+				const target = event.target;
+				if (!(target instanceof Element)) return;
+				const anchor = target.closest('a[href]');
+				if (!anchor) return;
+				const href = anchor.getAttribute('href') || '';
+				if (!href || href.startsWith('#')) return;
+				if (anchor.closest('[data-modal-trigger],[data-ajax-modal],[data-share]')) return;
+				event.preventDefault();
+				window.top.location.assign(href);
+			};
+
+		document.addEventListener('click', handler, true);
+		ddg.iframeLinkPolicyBound = true;
 	}
 
 	function homelistSplit() {
-	const wraps = gsap.utils.toArray('.home-list_item-wrap');
-	const tapeSpeed = 5000;
-	if (typeof SplitText === 'undefined') {
-		ddg.utils.warn('[homelistSplit] SplitText not available');
-		return;
-	}
+		const homelistContainer = document.querySelector('.home-list') || document.querySelector('[fs-list-element="list"]');
+		if (!homelistContainer) return;
 
-		// Track mobile/desktop state to avoid heavy re-splitting on minor resizes
-		const isMobile = window.innerWidth <= 767;
-		ddg.homelistIsMobile = isMobile;
+		ddg.utils.assert(typeof gsap !== 'undefined', 'homelistSplit requires gsap');
+		ddg.utils.assert(typeof SplitText !== 'undefined', 'homelistSplit requires SplitText');
 
-		// Disable SplitText behavior on small screens (<= 767px)
-		if (isMobile) {
-			wraps.forEach(wrap => {
-				const item = wrap.querySelector('.home-list_item');
-				if (item?.split) {
-					item.split.revert();
-					delete item.split;
-					delete item.dataset.splitInit;
-				}
-			});
-			return;
-		}
+		const tapeSpeed = 5000;
+		const getWraps = () => gsap.utils.toArray('.home-list_item-wrap');
 
-		wraps.forEach(wrap => {
-			const item = wrap.querySelector('.home-list_item');
+		const clearLineState = (line) => {
+			if (!line) return;
+			delete line.__ddgTapeWidth;
+			line.style.removeProperty('--tape-dur');
+		};
+
+		const revertWrap = (wrap) => {
+			const item = wrap?.querySelector('.home-list_item');
+			if (!item?.split) return;
+			item.split.revert();
+			item.split.lines?.forEach(clearLineState);
+			delete item.split;
+			delete item.dataset.splitInit;
+		};
+
+		const splitWrap = (wrap) => {
+			const item = wrap?.querySelector('.home-list_item');
 			if (!item || item.dataset.splitInit) return;
-
 			const split = new SplitText(item, {
 				type: 'lines',
 				linesClass: 'home-list_split-line',
 				autoSplit: true
 			});
 			item.split = split;
-			gsap.set(split.lines, {
-				display: 'inline-block'
-			});
-			if (wrap.querySelector('[data-coming-soon]')) {
-				wrap.dataset.comingSoon = 'true';
-			} else {
-				delete wrap.dataset.comingSoon;
-			}
-
 			item.dataset.splitInit = 'true';
-		});
+			gsap.set(split.lines, { display: 'inline-block' });
+			if (wrap.querySelector('[data-coming-soon]')) wrap.dataset.comingSoon = 'true';
+			else delete wrap.dataset.comingSoon;
+		};
 
 		let tapeRaf = null;
-		function setTapeDurations() {
+		const setTapeDurations = () => {
 			if (tapeRaf) return;
 			tapeRaf = requestAnimationFrame(() => {
 				tapeRaf = null;
-				const lines = gsap.utils.toArray('.home-list_split-line');
-				lines.forEach((line) => {
+				gsap.utils.toArray('.home-list_split-line').forEach((line) => {
 					const width = Math.round(line.offsetWidth || 0);
 					if (line.__ddgTapeWidth === width) return;
 					line.__ddgTapeWidth = width;
@@ -475,73 +585,59 @@
 					line.style.setProperty('--tape-dur', `${dur}s`);
 				});
 			});
-		}
+		};
 
-		setTapeDurations();
+		const applyMobile = () => {
+			getWraps().forEach(revertWrap);
+		};
+
+		const applyDesktop = () => {
+			getWraps().forEach(splitWrap);
+			setTapeDurations();
+		};
 
 		const handleResize = () => {
 			const mobileNow = window.innerWidth <= 767;
-			const wasMobile = !!ddg.homelistIsMobile;
-			// Update state early
-			ddg.homelistIsMobile = mobileNow;
-
-			if (mobileNow && !wasMobile) {
-				// Transitioned to mobile: revert any splits and exit
-				gsap.utils.toArray('.home-list_item-wrap').forEach(wrap => {
-					const item = wrap.querySelector('.home-list_item');
-					if (item?.split) {
-						item.split.revert();
-						delete item.split;
-						delete item.dataset.splitInit;
-					}
-				});
+			const wasMobile = !!ddg.homelistSplitIsMobile;
+			ddg.homelistSplitIsMobile = mobileNow;
+			if (mobileNow) {
+				applyMobile();
 				return;
 			}
-
-			if (!mobileNow && wasMobile) {
-				// Transitioned to desktop: initialize split on any not yet split
-				gsap.utils.toArray('.home-list_item-wrap').forEach(wrap => {
-					const item = wrap.querySelector('.home-list_item');
-					if (!item || item.dataset.splitInit) return;
-					const split = new SplitText(item, {
-						type: 'lines',
-						linesClass: 'home-list_split-line',
-						autoSplit: true
-					});
-					item.split = split;
-					gsap.set(split.lines, { display: 'inline-block' });
-					if (wrap.querySelector('[data-coming-soon]')) {
-						wrap.dataset.comingSoon = 'true';
-					} else {
-						delete wrap.dataset.comingSoon;
-					}
-					item.dataset.splitInit = 'true';
-				});
-				// Refresh durations on enter desktop
-				setTapeDurations();
+			if (wasMobile) {
+				applyDesktop();
 				return;
 			}
-
-			// Within the same mode: only update durations (cheap), no re-splitting
-			if (!mobileNow) setTapeDurations();
+			setTapeDurations();
 		};
-		if (!ddg.homelistResizeUnsub) {
-			ddg.homelistResizeUnsub = ddg.resizeEvent.on(() => handleResize());
+
+		if (!ddg.homelistSplitInitialized) {
+			ddg.homelistSplitInitialized = true;
+			if (!ddg.homelistSplitResizeUnsub) {
+				ddg.homelistSplitResizeUnsub = ddg.resizeEvent.on(handleResize);
+			}
+			if (!ddg.homelistSplitRenderBound) {
+				ddg.homelistSplitRenderBound = true;
+				const sync = ddg.utils.debounce(() => homelistSplit(), 120);
+				const boundLists = (ddg.homelistSplitHookedLists ||= new WeakSet());
+				const bind = (list) => {
+					if (!list || typeof list.addHook !== 'function' || boundLists.has(list)) return;
+					boundLists.add(list);
+					list.addHook('afterRender', sync);
+				};
+				if (ddg.fs?.whenReady) ddg.fs.whenReady().then(bind);
+				ddg.utils.on('ddg:list-ready', (e) => bind(e.detail?.list));
+			}
 		}
 
-		// Keep SplitText in sync with list renders — simple, deduped binding
-		if (!ddg.homelistRenderHooked) {
-			ddg.homelistRenderHooked = true;
-			const sync = ddg.utils.debounce(() => homelistSplit(), 120);
-			const bound = (ddg.homelistHookedLists ||= new WeakSet());
-			const bind = (list) => {
-				if (!list || typeof list.addHook !== 'function' || bound.has(list)) return;
-				bound.add(list);
-				list.addHook('afterRender', sync);
-			};
-			if (ddg.fs?.whenReady) ddg.fs.whenReady().then(bind).catch(() => { });
-			ddg.utils.on('ddg:list-ready', (e) => bind(e.detail?.list));
+		const isMobile = window.innerWidth <= 767;
+		ddg.homelistSplitIsMobile = isMobile;
+		if (isMobile) {
+			applyMobile();
+			return;
 		}
+
+		applyDesktop();
 	}
 
 	function share() {
@@ -566,25 +662,44 @@
 
 
 		const updateCountdowns = () => {
+			let anyHitZero = false;
 			document.querySelectorAll('[data-share-countdown]').forEach((node) => {
-				let current = parseInt(node.getAttribute('data-share-countdown') || '', 10);
+				const attrVal = node.getAttribute('data-share-countdown');
+				let current = Number.parseInt(attrVal ?? '', 10);
 				if (!Number.isFinite(current)) {
-					if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) current = parseInt(node.value, 10);
-					else current = parseInt(node.textContent || '', 10);
+					// Fallback to visible text/value if attribute was not set
+					const raw = (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)
+						? node.value
+						: node.textContent;
+					current = Number.parseInt(String(raw || '').trim(), 10);
 				}
 				if (!Number.isFinite(current)) current = 0;
+
 				const next = Math.max(0, current - 1);
+				if (current > 0 && next === 0) anyHitZero = true;
+
 				node.setAttribute('data-share-countdown', String(next));
 				if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.value = String(next);
 				else node.textContent = String(next);
 			});
+			if (anyHitZero && ddg.confetti && typeof ddg.confetti.trigger === 'function') {
+				try { ddg.confetti.trigger(); } catch {}
+			}
 		};
 
-		const onShareClick = async (event) => {
-			const el = event.target.closest(selectors.btn);
+		const clearShareStateTimer = (el) => {
 			if (!el) return;
-			if (event.button && event.button !== 0) return;
-			event.preventDefault();
+			if (el.__shareStateTimer) {
+				clearTimeout(el.__shareStateTimer);
+				el.__shareStateTimer = null;
+			}
+		};
+
+			const onShareClick = async (event) => {
+				const el = event.target.closest(selectors.btn);
+				if (!el) return;
+				if (event.button && event.button !== 0) return;
+				event.preventDefault();
 			if (el.shareLock) return;
 			el.shareLock = true;
 			setTimeout(() => { el.shareLock = false; }, 400);
@@ -635,12 +750,18 @@
 				try {
 					await navigator.clipboard.writeText(destination);
 					el.setAttribute('data-share-state', 'copied');
-					clearTimeout(el.__shareStateTimer);
-					el.__shareStateTimer = setTimeout(() => { el.removeAttribute('data-share-state'); el.__shareStateTimer = null; }, 2000);
+					clearShareStateTimer(el);
+					el.__shareStateTimer = setTimeout(() => {
+						el.removeAttribute('data-share-state');
+						el.__shareStateTimer = null;
+					}, 2000);
 				} catch {
 					el.setAttribute('data-share-state', 'error');
-					clearTimeout(el.__shareStateTimer);
-					el.__shareStateTimer = setTimeout(() => { el.removeAttribute('data-share-state'); el.__shareStateTimer = null; }, 2000);
+					clearShareStateTimer(el);
+					el.__shareStateTimer = setTimeout(() => {
+						el.removeAttribute('data-share-state');
+						el.__shareStateTimer = null;
+					}, 2000);
 				}
 				return;
 			}
@@ -652,12 +773,21 @@
 			}
 		};
 
-		document.addEventListener('click', onShareClick);
-		ddg.shareClickHandler = onShareClick;
+			document.addEventListener('click', onShareClick, true);
+			ddg.shareClickHandler = onShareClick;
 
 	}
 
 	function modals() {
+		const modalRoot = document.querySelector('[data-modal-el]') || document.querySelector('[data-modal-trigger]');
+		if (!modalRoot) return;
+		if (ddg.modalsInitialized) return;
+
+		ddg.utils.assert(typeof $ === 'function', 'modals requires $');
+		ddg.utils.assert(typeof gsap !== 'undefined', 'modals requires gsap');
+
+		ddg.modalsInitialized = true;
+
 		ddg.modals = ddg.modals || {};
 		ddg.modalsKeydownBound = Boolean(ddg.modalsKeydownBound);
 
@@ -671,18 +801,18 @@
 		};
 
 		// Ensure a stable baseline: reflect closed state on load before any interaction
-		try {
-			const root = document.documentElement;
-			const initiallyOpen = document.querySelector('[data-modal-el].is-open');
+		const docRoot = document.documentElement;
+		const initiallyOpen = document.querySelector('[data-modal-el].is-open');
+		if (docRoot) {
 			if (initiallyOpen) {
-				const id = initiallyOpen.getAttribute('data-modal-el');
-				root.setAttribute('data-modal-state', 'open');
-				if (id) root.setAttribute('data-modal-id', id);
+				const id = initiallyOpen.getAttribute('data-modal-el') || '';
+				docRoot.setAttribute('data-modal-state', 'open');
+				if (id) docRoot.setAttribute('data-modal-id', id);
 			} else {
-				root.setAttribute('data-modal-state', 'closed');
-				root.removeAttribute('data-modal-id');
+				docRoot.setAttribute('data-modal-state', 'closed');
+				docRoot.removeAttribute('data-modal-id');
 			}
-		} catch { }
+		}
 
 		const syncCssState = ($modal, open, id) => {
 			const $bg = $(`[data-modal-bg="${id}"]`);
@@ -692,20 +822,18 @@
 			});
 
 			// Also reflect a global state for CSS with [data-modal-state]
-			try {
-				const root = document.documentElement;
-				if (open) {
-					root.setAttribute('data-modal-state', 'open');
-					root.setAttribute('data-modal-id', String(id || ''));
-				} else {
-					// Only mark closed if no other modal is currently open
-					const anyOpen = !!document.querySelector('[data-modal-el].is-open');
-					if (!anyOpen) {
-						root.setAttribute('data-modal-state', 'closed');
-						root.removeAttribute('data-modal-id');
-					}
+			const root = document.documentElement;
+			if (open) {
+				root.setAttribute('data-modal-state', 'open');
+				root.setAttribute('data-modal-id', String(id || ''));
+			} else {
+				// Only mark closed if no other modal is currently open
+				const anyOpen = !!document.querySelector('[data-modal-el].is-open');
+				if (!anyOpen) {
+					root.setAttribute('data-modal-state', 'closed');
+					root.removeAttribute('data-modal-id');
 				}
-			} catch { }
+			}
 		};
 
 		const createModal = (id) => {
@@ -812,11 +940,9 @@
 				e.preventDefault();
 				e.stopPropagation();
 				scrollToAnchor(hash);
-				try {
-					const u = new URL(window.location.href);
-					u.hash = hash;
-					window.history.replaceState(window.history.state, '', u.toString());
-				} catch { }
+				const u = new URL(window.location.href);
+				u.hash = hash;
+				window.history.replaceState(window.history.state, '', u.toString());
 			});
 
 			const open = ({ skipAnimation = false, afterOpen } = {}) => {
@@ -954,25 +1080,25 @@
 			(ddg.modals[id] || createModal(id))?.close();
 		});
 
-		window.addEventListener('message', (ev) => {
-			const data = ev?.data;
-			if (!data) return;
-			const type = data.type || data.event;
-			if (type === 'ddg:modal-close' || type === 'iframe:close-modal') {
-				const id = data.id || data.modalId || 'story';
-				(ddg.modals[id] || createModal(id))?.close();
-			}
-		});
-
 		// If a close button exists inside a same-origin iframe within the modal,
 		// delegate its click to the parent close logic.
+		const getFrameDocument = (frame) => {
+			if (!frame) return null;
+			try {
+				return frame.contentDocument || frame.contentWindow?.document || null;
+			} catch (err) {
+				return null;
+			}
+		};
+
 		ddg.utils.on('ddg:modal-opened', (ev) => {
 			const id = ev.detail?.id;
 			if (!id) return;
 			const modalEl = document.querySelector(`[data-modal-el="${id}"]`);
 			if (!modalEl) return;
 			modalEl.querySelectorAll('iframe').forEach((frame) => {
-				const doc = frame.contentDocument;
+				const doc = getFrameDocument(frame);
+				if (!doc) return;
 				const handler = (e) => {
 					const target = e.target && (e.target.closest ? e.target.closest('[data-modal-close]') : null);
 					if (target) {
@@ -980,8 +1106,34 @@
 						(ddg.modals[id] || createModal(id))?.close();
 					}
 				};
+				if (frame.__ddgIframeCloseHandler) {
+					doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
+				}
 				doc.addEventListener('click', handler);
 				frame.__ddgIframeCloseHandler = handler;
+
+				const linkHandler = (event) => {
+					const closestAnchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+					if (!closestAnchor) return;
+					if (closestAnchor.closest('[data-modal-trigger],[data-ajax-modal]')) return;
+					const href = closestAnchor.getAttribute('href');
+					if (!href) return;
+					event.preventDefault();
+					try {
+						if (window.top && window.top.location && typeof window.top.location.assign === 'function') {
+							window.top.location.assign(href);
+						} else {
+							window.location.assign(href);
+						}
+					} catch {
+						window.location.assign(href);
+					}
+				};
+				if (frame.__ddgIframeLinkHandler) {
+					doc.removeEventListener('click', frame.__ddgIframeLinkHandler);
+				}
+				doc.addEventListener('click', linkHandler);
+				frame.__ddgIframeLinkHandler = linkHandler;
 			});
 		});
 
@@ -991,9 +1143,13 @@
 			const modalEl = document.querySelector(`[data-modal-el="${id}"]`);
 			if (!modalEl) return;
 			modalEl.querySelectorAll('iframe').forEach((frame) => {
-				const doc = frame.contentDocument;
-				doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
+				const doc = getFrameDocument(frame);
+				if (doc) {
+					if (frame.__ddgIframeCloseHandler) doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
+					if (frame.__ddgIframeLinkHandler) doc.removeEventListener('click', frame.__ddgIframeLinkHandler);
+				}
 				delete frame.__ddgIframeCloseHandler;
+				delete frame.__ddgIframeLinkHandler;
 			});
 		});
 
@@ -1021,12 +1177,17 @@
 	}
 
 	function ajaxStories() {
-		if (ddg.ajaxModalInitialized) return;
-		ddg.ajaxModalInitialized = true;
+		const embedEl = document.querySelector('[data-ajax-modal="embed"]');
+		if (!embedEl) return;
+		if (ddg.ajaxStoriesInitialized) return;
+
+		ddg.utils.assert(typeof $ === 'function', 'ajaxStories requires $');
+
+		ddg.ajaxStoriesInitialized = true;
 
 
 		const storyModalId = 'story';
-		const $embed = $('[data-ajax-modal="embed"]');
+		const $embed = $(embedEl);
 		const originalTitle = document.title;
 		const homeUrl = '/';
 		const SKELETON_HTML = "<div class='modal-skeleton' aria-busy='true'></div>";
@@ -1187,7 +1348,9 @@
 					const text = await response.text();
 					if (cacheGet(url)) return;
 					cacheSet(url, parseStory(text));
-				} catch { }
+				} catch (err) {
+					ddg.utils.warn('[ajaxStories] prefetch failed', err);
+				}
 			}, 120);
 		};
 
@@ -1257,7 +1420,13 @@
 	}
 
 	function randomFilters() {
-		const selectors = { trigger: '[data-randomfilters]' };
+		const triggerSelector = '[data-randomfilters]';
+		const triggerEl = document.querySelector(triggerSelector);
+		if (!triggerEl) return;
+		if (ddg.randomFiltersInitialized) return;
+		ddg.randomFiltersInitialized = true;
+
+		const selectors = { trigger: triggerSelector };
 		const state = (ddg.randomFilters ||= { bag: [] });
 		if (!state.scheduleApply) {
 			state.scheduleApply = (() => {
@@ -1329,6 +1498,10 @@
 	}
 
 	function marquee(root = document) {
+		const firstMarquee = root?.querySelector?.('[data-marquee]');
+		if (!firstMarquee) return;
+		ddg.utils.assert(typeof gsap !== 'undefined', 'marquee requires gsap');
+		ddg.utils.assert(typeof IntersectionObserver !== 'undefined', 'marquee requires IntersectionObserver');
 
 		const els = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
 		if (!els.length) return;
@@ -1448,21 +1621,17 @@
 			// Defer building until element is visible to avoid wasted work
 			el.__ddgMarqueeReady = () => {
 				if (el.__ddgMarqueeIO) el.__ddgMarqueeIO.disconnect();
-				try {
-					el.__ddgMarqueeIO = new IntersectionObserver((entries, obs) => {
-						for (const entry of entries) {
-							if (entry.isIntersecting) {
-								build(el);
-								obs.unobserve(el);
-								break;
-							}
+				const observer = new IntersectionObserver((entries, obs) => {
+					for (const entry of entries) {
+						if (entry.isIntersecting) {
+							build(el);
+							obs.unobserve(el);
+							break;
 						}
-					}, { root: null, rootMargin: '100px', threshold: 0 });
-					el.__ddgMarqueeIO.observe(el);
-				} catch {
-					// Fallback if IntersectionObserver is unavailable
-					build(el);
-				}
+					}
+				}, { root: null, rootMargin: '100px', threshold: 0 });
+				el.__ddgMarqueeIO = observer;
+				observer.observe(el);
 			};
 		});
 
@@ -1477,8 +1646,8 @@
 		});
 
 		// Bind global listeners once (idempotent)
-		if (!ddg.__marqueeGlobalBound) {
-			ddg.__marqueeGlobalBound = true;
+		if (!ddg.marqueeGlobalBound) {
+			ddg.marqueeGlobalBound = true;
 			ddg.utils.on('ddg:modal-opened', e => {
 				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
 				if (modal) marquee(modal);
@@ -1493,26 +1662,23 @@
 			});
 			// Cleanup for non-modal removals to prevent stray listeners
 			const attachDomObserver = () => {
-				try {
-					if (ddg.__marqueeDomObserver) return;
-					ddg.__marqueeDomObserver = new MutationObserver(muts => {
-						for (const m of muts) {
-							m.removedNodes && m.removedNodes.forEach(node => {
-								if (!(node instanceof Element)) return;
-								const targets = node.matches?.('[data-marquee-init]') ? [node] : [];
-								node.querySelectorAll?.('[data-marquee-init]').forEach(el => targets.push(el));
-								targets.forEach(el => {
-									el.__ddgMarqueeCleanup?.();
-									el.removeAttribute('data-marquee-init');
-								});
+				if (ddg.marqueeDomObserver) return;
+				if (typeof MutationObserver !== 'function') return;
+				ddg.marqueeDomObserver = new MutationObserver(muts => {
+					for (const m of muts) {
+						m.removedNodes && m.removedNodes.forEach(node => {
+							if (!(node instanceof Element)) return;
+							const targets = node.matches?.('[data-marquee-init]') ? [node] : [];
+							node.querySelectorAll?.('[data-marquee-init]').forEach(el => targets.push(el));
+							targets.forEach(el => {
+								el.__ddgMarqueeCleanup?.();
+								el.removeAttribute('data-marquee-init');
 							});
-						}
-					});
-					const root = document.body || document.documentElement;
-					ddg.__marqueeDomObserver.observe(root, { childList: true, subtree: true });
-				} catch {
-					/* no-op */
-				}
+						});
+					}
+				});
+				const domRoot = document.body || document.documentElement;
+				if (domRoot) ddg.marqueeDomObserver.observe(domRoot, { childList: true, subtree: true });
 			};
 			if (document.readyState === 'loading') {
 				document.addEventListener('DOMContentLoaded', attachDomObserver, { once: true });
@@ -1523,6 +1689,14 @@
 	}
 
 	function storiesAudioPlayer() {
+		const storyModal = document.querySelector('[data-modal-el="story"]');
+		if (!storyModal) return;
+		if (ddg.storiesAudioPlayerInitialized) return;
+
+		ddg.utils.assert(typeof WaveSurfer !== 'undefined', 'storiesAudioPlayer requires WaveSurfer');
+
+		ddg.storiesAudioPlayerInitialized = true;
+
 		const log = (...a) => ddg.utils.log('[audio]', ...a);
 		const warn = (...a) => ddg.utils.warn('[audio]', ...a);
 		let activePlayer = null;
@@ -1547,6 +1721,20 @@
 			if (!activePlayer) return;
 			const { el, wavesurfer } = activePlayer;
 			try { wavesurfer?.destroy(); } catch (err) { warn('cleanup failed', err); }
+			const playBtn = el.querySelector('[data-player="play"]');
+			if (playBtn) {
+				const playIcon = playBtn.querySelector('.circle-btn_icon.is-play');
+				const pauseIcon = playBtn.querySelector('.circle-btn_icon.is-pause');
+				setPlayState(playBtn, playIcon, pauseIcon, false);
+				disable(playBtn, true);
+			}
+			const muteBtn = el.querySelector('[data-player="mute"]');
+			if (muteBtn) {
+				const muteIcon = muteBtn.querySelector('.circle-btn_icon.is-mute');
+				const unmuteIcon = muteBtn.querySelector('.circle-btn_icon.is-unmute');
+				setMuteState(muteBtn, muteIcon, unmuteIcon, false);
+				disable(muteBtn, true);
+			}
 			el.removeAttribute('data-audio-init');
 			delete el.__ws;
 			activePlayer = null;
@@ -1673,336 +1861,335 @@
 		log('storiesAudioPlayer initialized');
 	}
 
-	function outreach(root = document) {
-		const recs = Array.from(root.querySelectorAll('.recorder:not([data-outreach-init])'));
-		if (!recs.length) return;
-		const warn = (...a) => ddg.utils.warn('[outreach]', ...a);
-		let sharedBeepCtx = null;
-		const getBeepContext = () => {
-			const Ctor = window.AudioContext || window.webkitAudioContext;
-			if (!Ctor) return null;
-			if (!sharedBeepCtx || sharedBeepCtx.state === 'closed') {
-				try { sharedBeepCtx = new Ctor(); }
-				catch { sharedBeepCtx = null; }
+	function outreach() {
+		if (outreach.__initialized) return;
+		outreach.__initialized = true;
+
+		// pages: main / success / error
+		const path = (location.pathname || '').replace(/\/+$/, '') || '/';
+		const isMain = path === '/share-your-story';
+		const isSuccess = path === '/share-your-story-success';
+		const isError = path === '/share-your-story-error';
+		if (!isMain && !isSuccess && !isError) return;
+
+		// helpers
+		const getQuery = (key) => new URLSearchParams(location.search).get(key);
+		const go = (p) => { try { location.replace(p); } catch { location.href = p; } };
+		const warn = (...a) => console.warn('[outreach]', ...a);
+
+		// niceties (safe on any page)
+		setupSplitTextTweaks();
+		setupVideoPlayPause();
+		setupInstructionReveal();
+
+		// success page: require ddg_id + wire Airtable link
+		if (isSuccess) {
+			const ddgId = getQuery('ddg_id');
+			if (!ddgId) return go('/share-your-story-error');
+			const link = document.querySelector('#send-us-more');
+			if (link) {
+				link.href = 'https://airtable.com/appXsCnokfNjxOjon/pagjRUFuQgWS5y2HF/form' +
+					`?prefill_DDG+ID=${encodeURIComponent(ddgId)}&hide_DDG+ID=true`;
 			}
-			return sharedBeepCtx;
-		};
+			return;
+		}
 
-		recs.forEach((recorder) => {
-			const btnRecord = recorder.querySelector('#rec-record');
-			const btnPlay = recorder.querySelector('#rec-playback');
-			const btnClear = recorder.querySelector('#rec-clear');
-			const btnSave = recorder.querySelector('#rec-save');
-			const btnSubmit = recorder.querySelector('#rec-submit');
-			const msg = recorder.querySelector('.recorder_msg-l, .recorder_msg-s') || recorder.querySelector('.recorder_msg-l');
-			const prog = recorder.querySelector('.recorder_timer');
-			const form = recorder.querySelector('#rec-form');
-			const visRecordSel = '.recorder_visualiser.is-record';
-			const visPlaybackSel = '.recorder_visualiser.is-playback';
-			const visRecordEl = recorder.querySelector(visRecordSel);
-			const visPlaybackEl = recorder.querySelector(visPlaybackSel);
-			if (!btnRecord || !btnPlay || !btnClear || !btnSave || !btnSubmit || !msg || !prog || !form) return;
+		// error page: nothing else to do
+		if (isError) return;
 
-			recorder.setAttribute('data-outreach-init', '');
+		// main page
+		const ddgId = getQuery('ddg_id');
+		if (!ddgId) return go('/share-your-story-error');
+		const heroName = getQuery('ddg_name');
+		const isTestMode = Boolean(getQuery('test_mode'));
 
-			let status = 'ready';
-			let wsRec = null;
-			let wsPlayback = null;
-			let recordPlugin = null;
-			let recordedBlob = null;
-			let isRecording = false;
-			let sound = new Audio();
-			let welcomeHasPlayed = false;
+		if (heroName) {
+			const hero = document.querySelector('.outreach-hero');
+			if (hero) {
+				if (heroName.length > 12) hero.classList.add('is-sm');
+				else if (heroName.length > 6) hero.classList.add('is-md');
+			}
+			document.querySelectorAll('.outreach-hero_word.is-name').forEach(n => n.textContent = heroName);
+			if (window.gsap) gsap.to('.outreach-hero_content', { autoAlpha: 1, duration: 0.1, overwrite: 'auto' });
+		}
 
-			const welcomeURL = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3';
-			const click1 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-1_za1q7j.mp3';
-			const click2 = 'https://res.cloudinary.com/daoliqze4/video/upload/v1741276319/click-2_lrgabh.mp3';
-			// Preload and reuse click sounds to avoid per-event Audio creation
-			const click1Audio = new Audio(click1);
-			click1Audio.preload = 'auto';
-			const click2Audio = new Audio(click2);
-			click2Audio.preload = 'auto';
+		// if backend already has a recording, jump to success
+		if (!isTestMode) checkExistingSubmission(ddgId).catch(() => { });
 
-			function setStatus(next) {
-				recorder.setAttribute('ddg-status', next);
-				status = next;
-				return status;
+		if (typeof WaveSurfer === 'undefined' || typeof WaveSurfer.Record === 'undefined') {
+			warn('WaveSurfer not found — recorder disabled.');
+			return;
+		}
+
+		// recorder elements
+		const root = document.querySelector('.recorder');
+		const recordBtn = root?.querySelector('#rec-record');
+		const playBtn = root?.querySelector('#rec-playback');
+		const clearBtn = root?.querySelector('#rec-clear');
+		const saveBtn = root?.querySelector('#rec-save');
+		const submitBtn = root?.querySelector('#rec-submit');
+		const msgEl = root?.querySelector('.recorder_msg-l, .recorder_msg-s') || root?.querySelector('.recorder_msg-l');
+		const timerEl = root?.querySelector('.recorder_timer');
+		const recWaveWrap = root?.querySelector('.recorder_visualiser.is-record');
+		const pbWaveWrap = root?.querySelector('.recorder_visualiser.is-playback');
+		const form = root?.querySelector('#rec-form');
+
+		if (!root || !recordBtn || !playBtn || !clearBtn || !saveBtn || !submitBtn || !msgEl || !timerEl || !form || !recWaveWrap || !pbWaveWrap) {
+			warn('Recorder DOM incomplete — aborting wiring.');
+			return;
+		}
+
+		const ddgIdInput = form.querySelector('#ddg-id');
+		if (ddgIdInput) ddgIdInput.value = ddgId;
+
+		// recorder state
+		let wsRecord = null;
+		let wsPlayback = null;
+		let wsRecordPlugin = null;
+		let welcomePlayed = false;
+		let recording = false;
+		let blob = null;
+
+		// ui helpers
+		function setMessage(html, size = 'large') {
+			msgEl.innerHTML = html || 'Ready?';
+			msgEl.classList.toggle('recorder_msg-s', size === 'small');
+			msgEl.classList.toggle('recorder_msg-l', size !== 'small');
+		}
+		function setTimerMs(ms) {
+			const m = Math.floor((ms || 0) / 60000);
+			const s = Math.floor(((ms || 0) % 60000) / 1000);
+			timerEl.textContent = [m, s].map(v => (v < 10 ? '0' + v : String(v))).join(':');
+		}
+		function setTimerSec(sec) { setTimerMs((Number(sec) || 0) * 1000); }
+		function syncButtons() {
+			const hasAudio = Boolean(blob);
+			recordBtn.disabled = false;
+			saveBtn.disabled = !recording && !hasAudio;
+			clearBtn.disabled = !recording && !hasAudio;
+			playBtn.disabled = !hasAudio;
+			submitBtn.disabled = !hasAudio;
+		}
+
+		// beep
+		let audioCtx = null;
+		function getAudioCtx() {
+			if (audioCtx && audioCtx.state !== 'closed') return audioCtx;
+			try { audioCtx = new AudioContext(); } catch { audioCtx = null; }
+			return audioCtx;
+		}
+		function beep(duration = 300, freq = 900, gain = 0.7) {
+			const ctx = getAudioCtx();
+			if (!ctx) return;
+			if (ctx.state === 'suspended') ctx.resume().catch(() => { });
+			const osc = ctx.createOscillator();
+			const vol = ctx.createGain();
+			osc.type = 'sine'; osc.frequency.value = freq; vol.gain.value = gain;
+			osc.connect(vol); vol.connect(ctx.destination);
+			osc.start();
+			setTimeout(() => { try { osc.stop(); osc.disconnect(); vol.disconnect(); } catch { } }, duration);
+		}
+
+		// wavesurfer
+		function initWaveSurfer() {
+			wsRecord?.destroy?.();
+			wsRecord = WaveSurfer.create({
+				container: recWaveWrap,
+				waveColor: 'rgb(0,0,0)',
+				progressColor: 'rgb(0,0,0)',
+				normalize: false,
+				barWidth: 4, barGap: 6, barHeight: 2.5
+			});
+			wsRecordPlugin = wsRecord.registerPlugin(WaveSurfer.Record.create({
+				renderRecordedAudio: false,
+				scrollingWaveform: false,
+				continuousWaveform: false,
+				continuousWaveformDuration: 30
+			}));
+			wsRecordPlugin.on('record-progress', (ms) => setTimerMs(ms));
+			wsRecordPlugin.on('record-end', (b) => {
+				blob = b; recording = false; syncButtons();
+				wsPlayback?.destroy?.();
+				const url = URL.createObjectURL(b);
+				wsPlayback = WaveSurfer.create({
+					container: pbWaveWrap,
+					waveColor: '#B1B42E',
+					progressColor: 'rgb(0,0,0)',
+					normalize: false,
+					barWidth: 4, barGap: 6, barHeight: 2.5,
+					url
+				});
+				wsPlayback.on('timeupdate', (t) => setTimerSec(t));
+			});
+			setMessage('Ready?'); setTimerMs(0); syncButtons();
+		}
+
+		function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+		async function countdownThen(fn) {
+			setMessage('3'); await delay(1000);
+			setMessage('2'); await delay(1000);
+			setMessage('1'); await delay(1000);
+			beep(); await delay(700);
+			fn();
+		}
+
+		async function onRecordClick() {
+			// if already recording or paused, toggle immediately (no countdown/welcome)
+			if (wsRecordPlugin?.isRecording() || wsRecordPlugin?.isPaused()) {
+				return toggleRecording();
 			}
 
-			function updateMessage(text, size) {
-				if (!msg) return;
-				msg.innerHTML = text ? String(text) : 'Ready?';
-				if (size === 'small') {
-					msg.classList.remove('recorder_msg-l');
-					msg.classList.add('recorder_msg-s');
+			// first start: play welcome then countdown
+			if (!welcomePlayed) {
+				welcomePlayed = true;
+				setMessage('👋<br>What’s the craic!<br>You’ve reached the DropDeadGenerous answering machine.<br>Leave your story after the tone...', 'small');
+				try {
+					const audio = new Audio('https://res.cloudinary.com/daoliqze4/video/upload/v1741701256/welcome_paoycn.mp3');
+					audio.addEventListener('ended', () => countdownThen(toggleRecording), { once: true });
+					await audio.play().catch(() => countdownThen(toggleRecording));
+				} catch {
+					await countdownThen(toggleRecording);
+				}
+			} else {
+				await countdownThen(toggleRecording);
+			}
+		}
+
+		function toggleRecording() {
+			if (wsRecordPlugin.isRecording()) {
+				wsRecordPlugin.pauseRecording();
+				recording = true;
+				setMessage('Recording paused.<br>You can add more; hit Save when finished.', 'small');
+				return syncButtons();
+			}
+			if (wsRecordPlugin.isPaused()) {
+				wsRecordPlugin.resumeRecording();
+				recording = true;
+				setMessage('Recording…', 'small');
+				return syncButtons();
+			}
+			wsRecordPlugin.startRecording()
+				.then(() => { recording = true; setMessage('Recording…', 'small'); syncButtons(); })
+				.catch((err) => {
+					recording = false; blob = null; syncButtons();
+					setMessage('Mic access failed. Enable permissions and try again.', 'small');
+					warn('startRecording failed', err);
+				});
+		}
+
+		function onSaveClick() {
+			try { wsRecordPlugin.stopRecording(); } catch { }
+			recording = false;
+			setMessage('Hit submit to send your recording. You can only do this once. 👂', 'small');
+			syncButtons();
+		}
+
+		function onClearClick() {
+			try { wsRecordPlugin.stopRecording(); } catch { }
+			wsRecord?.empty?.(); wsPlayback?.pause?.();
+			blob = null; recording = false;
+			setMessage('Ready?'); setTimerMs(0); syncButtons();
+		}
+
+		async function onSubmitClick(e) {
+			e.preventDefault();
+			if (!blob) return go('/share-your-story-error');
+
+			setMessage('Uploading your recording…', 'small');
+			submitBtn.disabled = true;
+
+			try {
+				const fileUrl = await uploadToCloudinary(blob, ddgId);
+				const urlField = form.querySelector('#file-url');
+				if (urlField) urlField.value = fileUrl;
+
+				// redirect to success (we intercept the submit)
+				form.addEventListener('submit', (ev) => {
+					ev.preventDefault();
+					go(`/share-your-story-success?ddg_id=${encodeURIComponent(ddgId)}`);
+				}, { once: true });
+
+				const realSubmit = form.querySelector('[type="submit"]');
+				if (realSubmit) realSubmit.click();
+				else go(`/share-your-story-success?ddg_id=${encodeURIComponent(ddgId)}`);
+			} catch (err) {
+				warn('upload failed', err);
+				setMessage('Upload failed. Please try again.', 'small');
+				go('/share-your-story-error');
+			}
+		}
+
+		async function uploadToCloudinary(fileBlob, id) {
+			const fd = new FormData();
+			fd.append('file', fileBlob, `${id}.webm`);
+			fd.append('upload_preset', 'ddg-recordings');
+			const res = await fetch('https://api.cloudinary.com/v1_1/daoliqze4/video/upload', { method: 'POST', body: fd });
+			if (!res.ok) throw new Error('Cloudinary upload failed');
+			const json = await res.json();
+			if (!json?.secure_url) throw new Error('secure_url missing');
+			return json.secure_url;
+		}
+
+		async function checkExistingSubmission(id) {
+			const res = await fetch(`https://hook.eu2.make.com/82eitnupdvhl1yn3agge1riqmonwlvg3?ddg_id=${encodeURIComponent(id)}`);
+			if (!res.ok) throw new Error('check failed');
+			const data = await res.json();
+			if (data?.status === 'recording') go(`/share-your-story-success?ddg_id=${encodeURIComponent(id)}`);
+		}
+
+		// wire up
+		initWaveSurfer();
+		syncButtons();
+		recordBtn.addEventListener('click', onRecordClick);
+		saveBtn.addEventListener('click', onSaveClick);
+		clearBtn.addEventListener('click', onClearClick);
+		playBtn.addEventListener('click', () => wsPlayback?.playPause?.());
+		submitBtn.addEventListener('click', onSubmitClick);
+
+		// niceties
+		function setupSplitTextTweaks() {
+			if (!window.gsap || typeof window.SplitText === 'undefined') return;
+			document.querySelectorAll('[ddg-text-anim="true"]').forEach((el) => {
+				const split = new SplitText(el, { type: 'chars, words' });
+				for (let i = 1; i < 4; i++) {
+					const raw = el.getAttribute('ddg-text-anim-' + i);
+					const idx = Number(raw) - 1;
+					if (!split.chars[idx]) continue;
+					gsap.set(split.chars[idx], { fontFamily: 'Tiny5', letterSpacing: '-0.05em', fontSize: '1.18em' });
+					if (split.chars[idx - 1]) gsap.set(split.chars[idx - 1], { letterSpacing: '0.05em' });
+					if (split.chars[idx + 1]) gsap.set(split.chars[idx + 1], { letterSpacing: '-0.05em' });
+				}
+			});
+		}
+
+		function setupVideoPlayPause() {
+			const video = document.getElementById('outreach-video');
+			const trigger = document.getElementById('video-playpause-trigger');
+			const label = document.getElementById('video-playpause');
+			if (!video || !trigger || !label) return;
+
+			trigger.addEventListener('click', async () => {
+				if (video.paused) {
+					try { await video.play(); label.textContent = 'Pause'; trigger.setAttribute('data-playing', 'true'); }
+					catch (err) { warn('Video play failed', err); alert('Unable to play the video. Please try again.'); }
 				} else {
-					msg.classList.remove('recorder_msg-s');
-					msg.classList.add('recorder_msg-l');
+					try { video.pause(); label.textContent = 'Play'; trigger.setAttribute('data-playing', 'false'); }
+					catch (err) { warn('Video pause failed', err); }
 				}
-			}
+			});
+		}
 
-			function updateProgress(time, units) {
-				if (!prog) return;
-				let mm = 0;
-				let ss = 0;
-				if (units === 's') {
-					const totalSeconds = Math.max(0, Number(time) || 0);
-					mm = Math.floor(totalSeconds / 60);
-					ss = Math.floor(totalSeconds % 60);
-				} else {
-					const totalMs = Math.max(0, Number(time) || 0);
-					mm = Math.floor(totalMs / 60000);
-					ss = Math.floor((totalMs % 60000) / 1000);
-				}
-				prog.textContent = [mm, ss].map(v => (v < 10 ? '0' + v : v)).join(':');
-			}
-
-				function beep(duration = 500, frequency = 1000, volume = 1) {
-					const audioCtx = getBeepContext();
-					if (!audioCtx) return;
-					if (audioCtx.state === 'suspended') {
-						audioCtx.resume().catch(() => { });
-					}
-					const oscillator = audioCtx.createOscillator();
-					const gainNode = audioCtx.createGain();
-					oscillator.type = 'sine';
-					oscillator.frequency.value = frequency;
-					gainNode.gain.value = volume;
-					oscillator.connect(gainNode);
-					gainNode.connect(audioCtx.destination);
-					oscillator.start();
-					const stop = () => {
-						try { oscillator.stop(); } catch { }
-						try { oscillator.disconnect(); } catch { }
-						try { gainNode.disconnect(); } catch { }
-					};
-					setTimeout(stop, duration);
-				}
-
-			function addSounds() {
-				recorder.querySelectorAll('.recorder_btn').forEach((button) => {
-					button.addEventListener('mousedown', () => { click1Audio.currentTime = 0; click1Audio.play(); });
-					button.addEventListener('mouseup', () => { click2Audio.currentTime = 0; click2Audio.play(); });
-				});
-			}
-
-			function qsParam(name) { return new URLSearchParams(window.location.search).get(name); }
-
-			function redirectError() { window.location.replace('/share-your-story-error'); }
-			function redirectSuccess(id) { window.location.replace('/share-your-story-success?ddg_id=' + encodeURIComponent(id || '')); }
-
-			function loadData() {
-				const ddgId = qsParam('ddg_id');
-				const isTestMode = qsParam('test_mode');
-				const name = qsParam('ddg_name');
-
-				if (!ddgId) {
-					updateMessage('Error :(');
-					recorder.style.pointerEvents = 'none';
-					redirectError();
-					return { ddgId, isTestMode };
-				}
-
-				const ddgIdInput = recorder.querySelector('#ddg-id');
-				if (ddgIdInput) ddgIdInput.value = ddgId;
-
-				if (name) {
-					const section = document.querySelector('.outreach-hero');
-					if (section) {
-						if (name.length > 12) section.classList.add('is-sm');
-						else if (name.length > 6) section.classList.add('is-md');
-					}
-					document.querySelectorAll('.outreach-hero_word.is-name').forEach(el => { el.textContent = name; });
-					gsap.to('.outreach-hero_content', { autoAlpha: 1, duration: 0.1, overwrite: 'auto' });
-				}
-
-				return { ddgId, isTestMode };
-			}
-
-			async function checkSubmission(ddgId) {
-				const res = await fetch('https://hook.eu2.make.com/82eitnupdvhl1yn3agge1riqmonwlvg3?ddg_id=' + encodeURIComponent(ddgId));
-				const data = await res.json();
-				if (!data) return redirectError();
-				if (data.status === 'no-id') return redirectError();
-				if (data.status === 'recording') return redirectSuccess(ddgId);
-			}
-
-			function wireRecorder(ddgId) {
-				// Initial disabled states
-				btnPlay.disabled = true;
-				btnClear.disabled = true;
-				btnSave.disabled = true;
-
-				function createWaveSurfer() {
-					if (!visRecordEl) { warn('Missing record visualiser', recorder); return; }
-					if (wsRec) { wsRec.destroy(); }
-					wsRec = WaveSurfer.create({
-						container: visRecordEl,
-						waveColor: 'rgb(0, 0, 0)',
-						progressColor: 'rgb(0, 0, 0)',
-						normalize: false,
-						barWidth: 4,
-						barGap: 6,
-						barHeight: 2.5
-					});
-
-					recordPlugin = wsRec.registerPlugin(WaveSurfer.Record.create({
-						renderRecordedAudio: false,
-						scrollingWaveform: false,
-						continuousWaveform: false,
-						continuousWaveformDuration: 30
-					}));
-
-					recordPlugin.on('record-progress', (time) => updateProgress(time));
-					recordPlugin.on('record-end', (blob) => {
-						recordedBlob = blob;
-						if (isRecording) {
-							setStatus('saved');
-							const url = URL.createObjectURL(blob);
-							if (wsPlayback) { wsPlayback.destroy(); wsPlayback = null; }
-							if (!visPlaybackEl) { warn('Missing playback visualiser', recorder); return; }
-							wsPlayback = WaveSurfer.create({
-								container: visPlaybackEl,
-								waveColor: '#B1B42E',
-								progressColor: 'rgb(0, 0, 0)',
-								normalize: false,
-								barWidth: 4,
-								barGap: 6,
-								barHeight: 2.5,
-								url
-							});
-
-							btnPlay.onclick = () => wsPlayback.playPause();
-							wsPlayback.on('pause', () => { if (status === 'playback') setStatus('saved'); });
-							wsPlayback.on('play', () => setStatus('playback'));
-							wsPlayback.on('timeupdate', (t) => updateProgress(t, 's'));
-						}
-					});
-				}
-
-				function startRecording() {
-					isRecording = true;
-					btnRecord.disabled = false;
-					btnSave.disabled = false;
-					btnClear.disabled = false;
-					btnPlay.disabled = true;
-					if (recordPlugin.isRecording()) {
-						setStatus('recording-paused');
-						recordPlugin.pauseRecording();
-						wsRec.empty();
-						updateMessage('Recording paused.<br>You can continue adding to your recording, and when you\'re finished, hit Save to listen back.', 'small');
-						return;
-					} else if (recordPlugin.isPaused()) {
-						setStatus('recording');
-						recordPlugin.resumeRecording();
-						return;
-					} else {
-						recordPlugin.startRecording()
-							.then(() => setStatus('recording'))
-							.catch((err) => {
-								isRecording = false;
-								btnSave.disabled = true;
-								btnClear.disabled = true;
-								btnPlay.disabled = true;
-								btnSubmit.disabled = false;
-								setStatus('permission-denied');
-								updateMessage('We couldn\'t access your microphone. Please enable mic permissions and try again.', 'small');
-								warn('startRecording failed', err);
-							});
-					}
-				}
-
-				btnRecord.onclick = async () => {
-					btnSave.disabled = true;
-					btnClear.disabled = true;
-					btnPlay.disabled = true;
-					btnRecord.disabled = true;
-					btnSubmit.disabled = true;
-
-					if (!welcomeHasPlayed) {
-						welcomeHasPlayed = true;
-						setStatus('welcome');
-						sound = new Audio(welcomeURL);
-						await sound.play();
-						updateMessage('👋<br>What\'s the craic!<br>You\'ve reached the DropDeadGenerous answering machine.<br>Leave your story after the tone...', 'small');
-
-						sound.onended = async () => {
-							updateMessage('3', 'large'); await new Promise(r => setTimeout(r, 1000));
-							updateMessage('2', 'large'); await new Promise(r => setTimeout(r, 1000));
-							updateMessage('1', 'large'); await new Promise(r => setTimeout(r, 1000));
-							beep(300, 900, 0.7);
-							await new Promise(r => setTimeout(r, 700));
-							startRecording();
-						};
-					} else {
-						startRecording();
-					}
-				};
-
-				btnSave.onclick = () => {
-					setStatus('saved');
-					recordPlugin.stopRecording();
-					btnPlay.disabled = false;
-					btnClear.disabled = false;
-					btnSave.disabled = false;
-					btnRecord.disabled = false;
-					btnSubmit.disabled = false;
-					updateMessage('Hit the submit button to send us your voice recording. You can only do this once, so feel free to play it back and have a listen 👂', 'small');
-				};
-
-				btnClear.onclick = () => {
-					if (status === 'playback' && wsPlayback) wsPlayback.pause();
-					setStatus('ready');
-					updateMessage();
-					isRecording = false;
-					recordPlugin.stopRecording();
-					wsRec.empty();
-					btnClear.disabled = true;
-					btnPlay.disabled = true;
-					btnSave.disabled = true;
-					btnRecord.disabled = false;
-				};
-
-				btnSubmit.addEventListener('click', async (e) => {
-					e.preventDefault();
-
-					if (status === 'playback' && wsPlayback) wsPlayback.pause();
-					setStatus('submitting');
-					updateMessage('Uploading your recording...', 'small');
-
-					if (!recordedBlob) return;
-
-					const formData = new FormData();
-					formData.append('file', recordedBlob, ddgId + '.webm');
-					formData.append('upload_preset', 'ddg-recordings');
-
-					const resp = await fetch('https://api.cloudinary.com/v1_1/daoliqze4/video/upload', {
-						method: 'POST', body: formData
-					});
-					const data = await resp.json();
-					if (!data.secure_url) { redirectError(); return; }
-
-					form.querySelector('#file-url').value = data.secure_url;
-					form.querySelector('[type="submit"]').click();
-				});
-
-				form.addEventListener('submit', (e) => {
-					e.preventDefault();
-					redirectSuccess(ddgId);
-				});
-
-				addSounds();
-				createWaveSurfer();
-			}
-
-			const { ddgId, isTestMode } = loadData();
-			if (!ddgId) return;
-			if (!isTestMode) {
-				checkSubmission(ddgId).catch(() => { });
-			}
-			setStatus('ready');
-			wireRecorder(ddgId);
-		});
+		function setupInstructionReveal() {
+			if (!window.gsap || !window.ScrollTrigger) return;
+			gsap.registerPlugin(ScrollTrigger);
+			document.querySelectorAll('.outreach-instructions_item').forEach((item) => {
+				const img = item.querySelector('.outreach-instructions_img-wrap');
+				const block = item.querySelector('.outreach-instructions_block');
+				const tl = gsap.timeline({ scrollTrigger: { trigger: item, start: 'top 80%', toggleActions: 'play none none reverse' } });
+				if (block) { gsap.set(block, { opacity: 0, y: 50 }); tl.to(block, { opacity: 1, y: 0, duration: 1, ease: 'power2.out' }, 0); }
+				if (img) { gsap.set(img, { opacity: 0, y: 50 }); tl.to(img, { opacity: 1, y: 0, duration: 1, ease: 'power2.out' }, 0.2); }
+			});
+		}
 	}
 
 	function currentItem() {
@@ -2013,6 +2200,7 @@
 		let lastKey = null;
 		let pendingUrl = null;   // last seen story url (can arrive before list is ready)
 		let hooksBound = false;
+		let unresolvedWarnLogged = false;
 
 		ddg.utils.on('ddg:modal-closed', (e) => {
 			if (e.detail?.id === 'story') lastKey = null;
@@ -2059,6 +2247,7 @@
 			lastKey = k;
 			ddg.currentItem.item = item;
 			ddg.currentItem.url = url;
+			unresolvedWarnLogged = false;
 
 			ddg.utils.emit('ddg:current-item-changed', { item, url });
 		}
@@ -2083,6 +2272,19 @@
 			const list = ddg.currentItem.list || await ensureList();
 			const item = findItem(list, pendingUrl);
 			if (item) { setCurrent(item, pendingUrl); return; }
+
+			try {
+				const resolved = new URL(pendingUrl, window.location.origin);
+				if (!unresolvedWarnLogged && list && resolved.pathname.startsWith('/stories/')) {
+					unresolvedWarnLogged = true;
+					ddg.utils.warn(`${logPrefix} unresolved for URL ${resolved.href}`);
+				}
+			} catch (err) {
+				if (!unresolvedWarnLogged) {
+					unresolvedWarnLogged = true;
+					ddg.utils.warn(`${logPrefix} unresolved for URL ${pendingUrl}`);
+				}
+			}
 
 
 		}
@@ -2116,9 +2318,16 @@
 	}
 
 	function relatedFilters() {
+		const parentSelector = '[data-relatedfilters="parent"]';
+		const targetSelector = '[data-relatedfilters="target"]';
+		const rootParent = document.querySelector(parentSelector);
+		if (!rootParent) return;
+		if (ddg.relatedFiltersInitialized) return;
+		ddg.relatedFiltersInitialized = true;
+
 		const selectors = {
-			parent: '[data-relatedfilters="parent"]',
-			target: '[data-relatedfilters="target"]',
+			parent: parentSelector,
+			target: targetSelector,
 			search: '[data-relatedfilters="search"]',
 			label: 'label[fs-list-emptyfacet]',
 			input: 'input[type="checkbox"][fs-list-field][fs-list-value]',
@@ -2126,6 +2335,7 @@
 		};
 
 		const excludeFields = new Set(['slug', 'name', 'title']);
+		const MAX_FILTERS = 6;
 
 
 		Array.from(document.querySelectorAll(selectors.target)).forEach((el) => clearTarget(el));
@@ -2185,26 +2395,35 @@
 			const tpl = target.querySelector(selectors.label) || createLabelTemplate();
 			clearTarget(target);
 
-			let count = 0;
+			const entries = [];
 			for (const [field, arr] of Object.entries(itemValues || {})) {
-				if (!arr || !arr.length) continue;
+				if (!Array.isArray(arr) || !arr.length) continue;
 				if (excludeFields.has(field)) continue;
 				for (const val of Array.from(new Set(arr))) {
-					const clone = tpl.cloneNode(true);
-					const input = clone.querySelector(selectors.input);
-					const span = clone.querySelector(selectors.span);
-					if (!input || !span) continue;
-
-					const id = `rf-${field}-${count++}`;
-					input.id = id;
-					input.name = `rf-${field}`;
-					input.setAttribute('fs-list-field', field);
-					input.setAttribute('fs-list-value', String(val));
-					span.textContent = String(val);
-
-					target.appendChild(clone);
+					entries.push({ field, value: String(val) });
 				}
 			}
+
+			for (let i = entries.length - 1; i > 0; i--) {
+				const j = Math.floor(Math.random() * (i + 1));
+				[entries[i], entries[j]] = [entries[j], entries[i]];
+			}
+
+			const limited = entries.slice(0, MAX_FILTERS);
+			limited.forEach(({ field, value }, idx) => {
+				const clone = tpl.cloneNode(true);
+				const input = clone.querySelector(selectors.input);
+				const span = clone.querySelector(selectors.span);
+				if (!input || !span) return;
+				const id = `rf-${field}-${idx}`;
+				input.id = id;
+				input.name = `rf-${field}`;
+				input.setAttribute('fs-list-field', field);
+				input.setAttribute('fs-list-value', value);
+				span.textContent = value;
+				target.appendChild(clone);
+			});
+
 			// ensure selection wiring and initial active classes
 			wireSelectable(parent);
 			const inputs = parent.querySelectorAll(`${selectors.target} ${selectors.input}`);
@@ -2276,5 +2495,5 @@
 		});
 	}
 
-	ddg.boot = initSite;
+    ddg.boot = initSite;
 })();
