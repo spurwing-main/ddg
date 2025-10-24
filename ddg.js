@@ -271,63 +271,77 @@
 			const {
 				formSel = '[fs-list-element="filters"]',
 				merge = false,
-				reflectUi = true
 			} = opts;
 
 			const list = await whenReady();
 
-			const newGroups = Object.entries(valuesByField || {}).map(([field, vals = []]) => {
-				const conditions = vals.map((v, i) => ({
-					id: `auto-${field}-${i}`,
-					type: 'checkbox',
-					fieldKey: String(field),
-					value: String(v),
-					op: 'equal',
-					interacted: true,
-				}));
-				return { id: `auto-${field}`, conditionsMatch: 'or', conditions };
-			});
-
-			const current = list.filters.value || { groupsMatch: 'and', groups: [] };
-
-			let nextGroups;
-			if (merge) {
-				const existingPlain = (current.groups || []).map(toPlainGroup);
-				const newPlain = newGroups.map(toPlainGroup);
-
-				const keep = existingPlain.filter(
-					g => !newPlain.some(ng => firstFieldKey(ng) === firstFieldKey(g))
-				);
-
-				nextGroups = [...keep, ...newPlain];
-			} else {
-				nextGroups = newGroups.map(toPlainGroup);
+			// Build a map of what values we want per field
+			const targetValuesByField = {};
+			for (const [field, vals = []] of Object.entries(valuesByField || {})) {
+				targetValuesByField[field] = new Set((vals || []).map(String));
 			}
 
-			list.filters.value = { groupsMatch: 'and', groups: nextGroups };
+			// Get or create groups - but PRESERVE existing group references
+			const existingGroups = list.filters.value.groups || [];
 
-			await list.triggerHook('filter');
-			await afterNextRender(list); // ← ensure callers await the render
+			// Update existing groups in place
+			for (const [field, targetValues] of Object.entries(targetValuesByField)) {
+				// Find existing group for this field
+				let group = existingGroups.find(g =>
+					g.conditions.some(c => c.fieldKey === field)
+				);
 
-			if (reflectUi && formSel) {
-				const form = document.querySelector(formSel);
-				if (form) {
-					const inputs = form.querySelectorAll('input[type="checkbox"][fs-list-field][fs-list-value]');
-					const wantedByField = {};
-					for (const [f, arr] of Object.entries(valuesByField || {})) {
-						wantedByField[f] = new Set((arr || []).map(String));
+				// If no group exists, create one
+				if (!group) {
+					group = {
+						id: `auto-${field}`,
+						conditionsMatch: 'or',
+						conditions: []
+					};
+					existingGroups.push(group);
+				}
+
+				// Find or create the condition for this field
+				let condition = group.conditions.find(c =>
+					c.fieldKey === field && (c.op === 'equal' || !c.op)
+				);
+
+				if (!condition) {
+					// Create new condition
+					condition = {
+						id: `${field}_equal`,  // ← Use consistent ID format
+						type: 'checkbox',
+						fieldKey: field,
+						value: [],
+						op: 'equal',
+						interacted: true,
+					};
+					group.conditions.push(condition);
+				}
+
+				// Update the condition's value IN PLACE (critical!)
+				condition.value = Array.from(targetValues);
+				condition.interacted = true;
+			}
+
+			// If not merging, remove groups for fields not in targetValuesByField
+			if (!merge) {
+				const fieldsToKeep = new Set(Object.keys(targetValuesByField));
+
+				// Remove groups that don't match any target fields
+				for (let i = existingGroups.length - 1; i >= 0; i--) {
+					const group = existingGroups[i];
+					const hasMatchingField = group.conditions.some(c => fieldsToKeep.has(c.fieldKey));
+
+					if (!hasMatchingField) {
+						existingGroups.splice(i, 1);
 					}
-					inputs.forEach((input) => {
-						const f = input.getAttribute('fs-list-field');
-						const v = input.getAttribute('fs-list-value');
-						const on = !!wantedByField[f]?.has(v);
-						input.checked = on;
-						input.closest('label')?.classList.toggle('is-list-active', on);
-					});
 				}
 			}
 
-
+			// Trigger the filter lifecycle
+			await list.triggerHook('filter');
+			await afterNextRender(list);
 		}
 
 		return { whenReady, items, valuesForItemSafe, applyCheckboxFilters, afterNextRender };
@@ -425,7 +439,7 @@
 						return res;
 					};
 					history[method].__ddgWrapped = true;
-				} catch {}
+				} catch { }
 			};
 			wrap('pushState');
 			wrap('replaceState');
@@ -513,20 +527,20 @@
 
 		ddg.utils.assert(window.top && window.top.location && typeof window.top.location.assign === 'function', 'iframe link policy requires parent');
 
-			const handler = (event) => {
-				if (event.defaultPrevented) return;
-				if (event.button !== 0) return;
-				if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-				const target = event.target;
-				if (!(target instanceof Element)) return;
-				const anchor = target.closest('a[href]');
-				if (!anchor) return;
-				const href = anchor.getAttribute('href') || '';
-				if (!href || href.startsWith('#')) return;
-				if (anchor.closest('[data-modal-trigger],[data-ajax-modal],[data-share]')) return;
-				event.preventDefault();
-				window.top.location.assign(href);
-			};
+		const handler = (event) => {
+			if (event.defaultPrevented) return;
+			if (event.button !== 0) return;
+			if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+			const target = event.target;
+			if (!(target instanceof Element)) return;
+			const anchor = target.closest('a[href]');
+			if (!anchor) return;
+			const href = anchor.getAttribute('href') || '';
+			if (!href || href.startsWith('#')) return;
+			if (anchor.closest('[data-modal-trigger],[data-ajax-modal],[data-share]')) return;
+			event.preventDefault();
+			window.top.location.assign(href);
+		};
 
 		document.addEventListener('click', handler, true);
 		ddg.iframeLinkPolicyBound = true;
@@ -683,7 +697,7 @@
 				else node.textContent = String(next);
 			});
 			if (anyHitZero && ddg.confetti && typeof ddg.confetti.trigger === 'function') {
-				try { ddg.confetti.trigger(); } catch {}
+				try { ddg.confetti.trigger(); } catch { }
 			}
 		};
 
@@ -695,11 +709,11 @@
 			}
 		};
 
-			const onShareClick = async (event) => {
-				const el = event.target.closest(selectors.btn);
-				if (!el) return;
-				if (event.button && event.button !== 0) return;
-				event.preventDefault();
+		const onShareClick = async (event) => {
+			const el = event.target.closest(selectors.btn);
+			if (!el) return;
+			if (event.button && event.button !== 0) return;
+			event.preventDefault();
 			if (el.shareLock) return;
 			el.shareLock = true;
 			setTimeout(() => { el.shareLock = false; }, 400);
@@ -773,8 +787,8 @@
 			}
 		};
 
-			document.addEventListener('click', onShareClick, true);
-			ddg.shareClickHandler = onShareClick;
+		document.addEventListener('click', onShareClick, true);
+		ddg.shareClickHandler = onShareClick;
 
 	}
 
@@ -2495,5 +2509,5 @@
 		});
 	}
 
-    ddg.boot = initSite;
+	ddg.boot = initSite;
 })();
