@@ -5,35 +5,36 @@
 	});
 
 	ddg.utils = {
-		// Debounce: delays execution until silence for X ms
+
 		debounce: (fn, ms = 150) => {
-			if (typeof fn !== 'function') throw new Error('ddg: debounce expects function');
 			let t;
-			return (...a) => {
+			return (...args) => {
 				clearTimeout(t);
-				t = setTimeout(() => fn(...a), ms);
+				t = setTimeout(() => fn(...args), ms);
 			};
 		},
-		// Throttle: runs at most once per X ms
-		throttle: (fn, ms = 150) => {
-			if (typeof fn !== 'function') throw new Error('ddg: throttle expects function');
-			let last = 0;
-			return (...a) => {
+
+		throttle: (fn, ms = 150, useRAF = false) => {
+			let last = 0, raf;
+			return (...args) => {
 				const now = Date.now();
-				if (now - last >= ms) {
+				if (useRAF) {
+					if (!raf) {
+						raf = requestAnimationFrame(() => {
+							raf = null;
+							fn(...args);
+						});
+					}
+				} else if (now - last >= ms) {
 					last = now;
-					fn(...a);
+					fn(...args);
 				}
 			};
 		},
-		// Wait: Promise-based delay
-		wait: (ms = 0) => {
-			if (typeof ms !== 'number' || ms < 0) throw new Error('ddg: wait expects positive number');
-			return new Promise((resolve) => setTimeout(resolve, ms));
-		},
-		// Shuffle: Fisher–Yates; returns a new shuffled array
+
+		wait: (ms = 0) => new Promise(resolve => setTimeout(resolve, ms)),
+
 		shuffle: (arr) => {
-			if (!Array.isArray(arr)) throw new Error('ddg: shuffle expects array');
 			const a = arr.slice();
 			for (let i = a.length - 1; i > 0; i--) {
 				const j = Math.floor(Math.random() * (i + 1));
@@ -41,12 +42,28 @@
 			}
 			return a;
 		},
-		on: (event, fn) => document.addEventListener(event, fn),
-		emit: (event, detail) => document.dispatchEvent(new CustomEvent(event, { detail })),
-		fail: (msg) => { throw new Error('ddg: ' + msg); },
-		assert: (cond, msg) => { if (!cond) throw new Error('ddg: ' + (msg || 'assertion failed')); },
+
+		on: (event, fn, el = document) => el.addEventListener(event, fn),
+		off: (event, fn, el = document) => el.removeEventListener(event, fn),
+		emit: (event, detail, el = document) =>
+			el.dispatchEvent(new CustomEvent(event, { detail })),
+
 		log: (...a) => console.log('[ddg]', ...a),
-		warn: (...a) => console.warn('[ddg]', ...a)
+		warn: (...a) => console.warn('[ddg]', ...a),
+
+		fontsReady: async (timeoutMs = 3000) => {
+			if (!document.fonts?.ready) {
+				await new Promise(r => requestAnimationFrame(r));
+				return;
+			}
+			try {
+				await Promise.race([
+					document.fonts.ready,
+					new Promise(r => setTimeout(r, timeoutMs))
+				]);
+				await new Promise(r => requestAnimationFrame(r));
+			} catch { }
+		}
 	};
 
 	ddg.iframeBridge ??= (() => {
@@ -543,9 +560,6 @@
 		if (!navEl) return;
 		if (ddg.navInitialized) return;
 
-		ddg.utils.assert(typeof ScrollTrigger !== 'undefined' && typeof ScrollTrigger.create === 'function', 'nav requires ScrollTrigger');
-		ddg.utils.assert(typeof gsap !== 'undefined', 'nav requires gsap');
-
 		ddg.navInitialized = true;
 
 		const showThreshold = 50; // px from top to start hiding nav
@@ -586,108 +600,97 @@
 	}
 
 	function homelistSplit() {
-		const homelistContainer = document.querySelector('.home-list') || document.querySelector('[fs-list-element="list"]');
-		if (!homelistContainer) return;
-		
-		const tapeSpeed = 5000;
-		const getWraps = () => gsap.utils.toArray('.home-list_item-wrap');
-
-		const clearLineState = (line) => {
-			if (!line) return;
-			delete line.__ddgTapeWidth;
-			line.style.removeProperty('--tape-dur');
-		};
-
-		const revertWrap = (wrap) => {
-			const item = wrap?.querySelector('.home-list_item');
-			if (!item?.split) return;
-			item.split.revert();
-			item.split.lines?.forEach(clearLineState);
-			delete item.split;
-			delete item.dataset.splitInit;
-		};
-
-		const splitWrap = (wrap) => {
-			const item = wrap?.querySelector('.home-list_item');
-			if (!item || item.dataset.splitInit) return;
-			const split = new SplitText(item, {
-				type: 'lines',
-				linesClass: 'home-list_split-line',
-				autoSplit: true
-			});
-			item.split = split;
-			item.dataset.splitInit = 'true';
-			gsap.set(split.lines, { display: 'inline-block' });
-			if (wrap.querySelector('[data-coming-soon]')) wrap.dataset.comingSoon = 'true';
-			else delete wrap.dataset.comingSoon;
-		};
-
-		let tapeRaf = null;
-		const setTapeDurations = () => {
-			if (tapeRaf) return;
-			tapeRaf = requestAnimationFrame(() => {
-				tapeRaf = null;
-				gsap.utils.toArray('.home-list_split-line').forEach((line) => {
-					const width = Math.round(line.offsetWidth || 0);
-					if (line.__ddgTapeWidth === width) return;
-					line.__ddgTapeWidth = width;
-					const dur = gsap.utils.clamp(0.3, 2, width / tapeSpeed);
-					line.style.setProperty('--tape-dur', `${dur}s`);
-				});
-			});
-		};
-
-		const applyMobile = () => {
-			getWraps().forEach(revertWrap);
-		};
-
-		const applyDesktop = () => {
-			getWraps().forEach(splitWrap);
-			setTapeDurations();
-		};
-
-		const handleResize = () => {
-			const mobileNow = window.innerWidth <= 767;
-			const wasMobile = !!ddg.homelistSplitIsMobile;
-			ddg.homelistSplitIsMobile = mobileNow;
-			if (mobileNow) {
-				applyMobile();
-				return;
-			}
-			if (wasMobile) {
-				applyDesktop();
-				return;
-			}
-			setTapeDurations();
-		};
-
-		if (!ddg.homelistSplitInitialized) {
-			ddg.homelistSplitInitialized = true;
-			if (!ddg.homelistSplitResizeUnsub) {
-				ddg.homelistSplitResizeUnsub = ddg.resizeEvent.on(handleResize);
-			}
-			if (!ddg.homelistSplitRenderBound) {
-				ddg.homelistSplitRenderBound = true;
-				const sync = ddg.utils.debounce(() => homelistSplit(), 120);
-				const boundLists = (ddg.homelistSplitHookedLists ||= new WeakSet());
-				const bind = (list) => {
-					if (!list || typeof list.addHook !== 'function' || boundLists.has(list)) return;
-					boundLists.add(list);
-					list.addHook('afterRender', sync);
-				};
-				if (ddg.fs?.whenReady) ddg.fs.whenReady().then(bind);
-				ddg.utils.on('ddg:list-ready', (e) => bind(e.detail?.list));
-			}
-		}
-
-		const isMobile = window.innerWidth <= 767;
-		ddg.homelistSplitIsMobile = isMobile;
-		if (isMobile) {
-			applyMobile();
+		const list = document.querySelector('.home-list_list');
+		if (!list) {
+			(window.ddg?.utils?.warn || console.warn)('homelistSplit: .home-list_list not found');
 			return;
 		}
 
-		applyDesktop();
+		const MOBILE_BP = 767;
+		const TAPE_SPEED = 5000;
+
+		let split = null;
+		let resizeObs = null;
+
+		const hasDeps = () => {
+			if (!window.gsap) {
+				(ddg?.utils?.warn || console.warn)('homelistSplit: gsap missing');
+				return false;
+			}
+			if (typeof window.SplitText !== 'function') {
+				(ddg?.utils?.warn || console.warn)('homelistSplit: SplitText missing');
+				return false;
+			}
+			if (!ddg?.utils) {
+				console.warn('[ddg] utils missing');
+				return false;
+			}
+			return true;
+		};
+
+		const isMobile = () => window.innerWidth <= MOBILE_BP;
+
+		const revertSplit = () => {
+			if (!split) return;
+			try { split.revert(); } catch (e) {
+				(ddg?.utils?.warn || console.warn)('homelistSplit: revert failed', e);
+			} finally { split = null; }
+		};
+
+		const applySplit = () => {
+			const items = gsap.utils.toArray(list.querySelectorAll('.home-list_item'));
+			if (!items.length) return;
+
+			split = new SplitText(items, { type: 'lines', linesClass: 'home-list_split-line' });
+
+			split.lines.forEach(line => {
+				const dur = gsap.utils.clamp(0.3, 2, (line.offsetWidth || 0) / TAPE_SPEED);
+				line.style.setProperty('--tape-dur', `${dur}s`);
+			});
+		};
+
+		const update = () => {
+			if (!hasDeps()) return;
+			revertSplit();
+			if (isMobile()) return;
+			try { applySplit(); } catch (e) {
+				(ddg?.utils?.warn || console.warn)('homelistSplit: split failed', e);
+			}
+		};
+
+		const onResize = ddg.utils.debounce(update, 150);
+
+		const init = async () => {
+			await (ddg.utils.fontsReady?.() ?? Promise.resolve());
+			update();
+
+			// use ddg.utils.on/off for consistency
+			ddg.utils.on('resize', onResize, window);
+
+			// hook fin-sweet list renders
+			ddg.fs?.whenReady?.().then(listInstance => {
+				if (typeof listInstance?.addHook === 'function') {
+					listInstance.addHook('afterRender', update);
+				}
+			});
+
+			// watch container size/content changes
+			if ('ResizeObserver' in window) {
+				resizeObs = new ResizeObserver(ddg.utils.throttle(() => {
+					if (!isMobile()) update();
+				}, 150));
+				resizeObs.observe(list);
+			}
+		};
+
+		init();
+
+		// expose a cleanup if you ever need to tear down
+		return () => {
+			ddg.utils.off('resize', onResize, window);
+			if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
+			revertSplit();
+		};
 	}
 
 	function share() {
@@ -832,9 +835,6 @@
 		const modalRoot = document.querySelector('[data-modal-el]') || document.querySelector('[data-modal-trigger]');
 		if (!modalRoot) return;
 		if (ddg.modalsInitialized) return;
-
-		ddg.utils.assert(typeof $ === 'function', 'modals requires $');
-		ddg.utils.assert(typeof gsap !== 'undefined', 'modals requires gsap');
 
 		ddg.modalsInitialized = true;
 
@@ -1231,8 +1231,6 @@
 		if (!embedEl) return;
 		if (ddg.ajaxStoriesInitialized) return;
 
-		ddg.utils.assert(typeof $ === 'function', 'ajaxStories requires $');
-
 		ddg.ajaxStoriesInitialized = true;
 
 
@@ -1515,8 +1513,6 @@
 	function marquee(root = document) {
 		const firstMarquee = root?.querySelector?.('[data-marquee]');
 		if (!firstMarquee) return;
-		ddg.utils.assert(typeof gsap !== 'undefined', 'marquee requires gsap');
-		ddg.utils.assert(typeof IntersectionObserver !== 'undefined', 'marquee requires IntersectionObserver');
 
 		const els = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
 		if (!els.length) return;
@@ -1707,8 +1703,6 @@
 		const storyModal = document.querySelector('[data-modal-el="story"]');
 		if (!storyModal) return;
 		if (ddg.storiesAudioPlayerInitialized) return;
-
-		ddg.utils.assert(typeof WaveSurfer !== 'undefined', 'storiesAudioPlayer requires WaveSurfer');
 
 		ddg.storiesAudioPlayerInitialized = true;
 
