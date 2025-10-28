@@ -5,7 +5,42 @@
 	});
 
 	ddg.utils = {
-		debounce: (fn, ms = 150) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; },
+		// Debounce: delays execution until silence for X ms
+		debounce: (fn, ms = 150) => {
+			if (typeof fn !== 'function') throw new Error('ddg: debounce expects function');
+			let t;
+			return (...a) => {
+				clearTimeout(t);
+				t = setTimeout(() => fn(...a), ms);
+			};
+		},
+		// Throttle: runs at most once per X ms
+		throttle: (fn, ms = 150) => {
+			if (typeof fn !== 'function') throw new Error('ddg: throttle expects function');
+			let last = 0;
+			return (...a) => {
+				const now = Date.now();
+				if (now - last >= ms) {
+					last = now;
+					fn(...a);
+				}
+			};
+		},
+		// Wait: Promise-based delay
+		wait: (ms = 0) => {
+			if (typeof ms !== 'number' || ms < 0) throw new Error('ddg: wait expects positive number');
+			return new Promise((resolve) => setTimeout(resolve, ms));
+		},
+		// Shuffle: Fisher–Yates; returns a new shuffled array
+		shuffle: (arr) => {
+			if (!Array.isArray(arr)) throw new Error('ddg: shuffle expects array');
+			const a = arr.slice();
+			for (let i = a.length - 1; i > 0; i--) {
+				const j = Math.floor(Math.random() * (i + 1));
+				[a[i], a[j]] = [a[j], a[i]];
+			}
+			return a;
+		},
 		on: (event, fn) => document.addEventListener(event, fn),
 		emit: (event, detail) => document.dispatchEvent(new CustomEvent(event, { detail })),
 		fail: (msg) => { throw new Error('ddg: ' + msg); },
@@ -14,7 +49,69 @@
 		warn: (...a) => console.warn('[ddg]', ...a)
 	};
 
-	ddg.scrollLock = ddg.scrollLock || (() => {
+	ddg.iframeBridge ??= (() => {
+		const PREFIX = 'ddg:';
+		const listeners = new Map();
+
+		function post(type, data = {}, target = 'parent') {
+			if (!type) return;
+			try {
+				const t = target === 'parent' ? window.parent : target;
+				if (!t || typeof t.postMessage !== 'function') return;
+				t.postMessage({ type: PREFIX + type, data }, '*');
+			} catch (err) {
+				ddg.utils?.warn?.('[iframeBridge] post failed', err);
+			}
+		}
+
+		function on(type, fn) {
+			if (!type || typeof fn !== 'function') return () => {};
+			const key = PREFIX + type;
+			const handler = (e) => { if (e?.data?.type === key) fn(e.data.data, e); };
+			window.addEventListener('message', handler);
+			listeners.set(fn, handler);
+			return () => { window.removeEventListener('message', handler); listeners.delete(fn); };
+		}
+
+		return { post, on };
+	})();
+
+	ddg.net ??= {
+		// Fetch and return parsed HTMLDocument
+		async fetchHTML(url) {
+			if (!url || typeof url !== 'string') throw new Error('ddg.net.fetchHTML: invalid URL');
+			const res = await fetch(url, { credentials: 'same-origin' });
+			if (!res.ok) throw new Error(`ddg.net.fetchHTML: HTTP ${res.status}`);
+			const text = await res.text();
+			return new DOMParser().parseFromString(text, 'text/html');
+		},
+		// Fetch and parse JSON safely
+		async fetchJSON(url) {
+			if (!url || typeof url !== 'string') throw new Error('ddg.net.fetchJSON: invalid URL');
+			const res = await fetch(url, { credentials: 'same-origin' });
+			if (!res.ok) throw new Error(`ddg.net.fetchJSON: HTTP ${res.status}`);
+			try {
+				return await res.json();
+			} catch {
+				throw new Error('ddg.net.fetchJSON: invalid JSON');
+			}
+		},
+		// Prefetch (HTML or JSON) after delay, cancellable
+		prefetch(url, delay = 250) {
+			if (!url) throw new Error('ddg.net.prefetch: missing URL');
+			const controller = new AbortController();
+			const timeout = setTimeout(async () => {
+				try {
+					await fetch(url, { signal: controller.signal, credentials: 'same-origin' });
+				} catch (err) {
+					if (err && err.name !== 'AbortError') console.warn('ddg.net.prefetch failed:', err);
+				}
+			}, delay);
+			return () => { clearTimeout(timeout); controller.abort(); };
+		}
+	};
+
+	ddg.scrollLock ??= (() => {
 		const held = new Set();
 		let saved = null;
 		const docEl = document.documentElement;
@@ -63,9 +160,7 @@
 		return { lock, unlock, isLocked, isHolding };
 	})();
 
-	ddg.resizeEvent = ddg.resizeEvent || (() => {
-		// Only emit when viewport WIDTH changes (ignore height-only resizes)
-		// Gate with rAF + debounce for efficiency under continuous resizing
+	ddg.resizeEvent ??= (() => {
 		let lastW = window.innerWidth || 0;
 		let pendingW = lastW;
 		let ticking = false;
@@ -113,7 +208,7 @@
 		return { on };
 	})();
 
-	ddg.fs = ddg.fs || (() => {
+	ddg.fs ??= (() => {
 		let readyPromise = null;
 		let firstResolved = false;
 		let currentList = null;
@@ -243,30 +338,6 @@
 			});
 		}
 
-		function toPlainCondition(c = {}) {
-			return {
-				id: String(c.id ?? ''),
-				type: String(c.type ?? 'checkbox'),
-				fieldKey: String(c.fieldKey ?? ''),
-				value: String(c.value ?? ''),
-				op: String(c.op ?? 'equal'),
-				interacted: Boolean(c.interacted ?? true),
-			};
-		}
-
-		function toPlainGroup(g = {}) {
-			const conditions = Array.isArray(g.conditions) ? g.conditions.map(toPlainCondition) : [];
-			return {
-				id: String(g.id ?? ''),
-				conditionsMatch: String(g.conditionsMatch ?? 'or'),
-				conditions,
-			};
-		}
-
-		function firstFieldKey(g = {}) {
-			return g?.conditions?.[0]?.fieldKey || '';
-		}
-
 		async function applyCheckboxFilters(valuesByField, opts = {}) {
 			const {
 				formSel = '[fs-list-element="filters"]',
@@ -347,7 +418,7 @@
 		return { whenReady, items, valuesForItemSafe, applyCheckboxFilters, afterNextRender };
 	})();
 
-	ddg.confetti = (() => {
+	ddg.confetti ??= (() => {
 		let js = null;
 		let canvas = null;
 
@@ -395,8 +466,7 @@
 		data.siteBooted = true;
 
 		requestAnimationFrame(() => {
-			syncFrameUrl();
-			iframeLinkPolicy();
+			iframe();
 			nav();
 			modals();
 			currentItem();
@@ -411,67 +481,61 @@
 		});
 	}
 
-	function syncFrameUrl() {
-		if (ddg.syncFrameUrlBound) return;
-		ddg.syncFrameUrlBound = true;
-
-		// In child (iframe): notify parent whenever URL changes via history or hash
-		if (window !== window.parent) {
-			const notify = ddg.utils.debounce(() => {
+	function iframe() {
+		// --- parent: accept URL sync from children
+		if (window === window.parent) {
+			ddg.iframeBridge.on('sync-url', ({ url, title }) => {
 				try {
-					window.parent.postMessage({
-						type: 'iframe:url-change',
-						url: window.location.href,
-						title: document.title
-					}, '*');
+					if (url && url !== location.href) {
+						const u = new URL(url, location.href);
+						if (u.origin === location.origin) history.replaceState(history.state, '', u.toString());
+						else location.assign(u.toString());
+					}
+					if (title) document.title = title;
 				} catch (err) {
-					ddg.utils.warn('[sync] postMessage failed', err);
+					ddg.utils?.warn?.('[iframe] parent sync failed', err);
 				}
-			}, 0);
-
-			const wrap = (method) => {
-				try {
-					const orig = history[method];
-					if (typeof orig !== 'function' || orig.__ddgWrapped) return;
-					history[method] = function () {
-						const res = orig.apply(this, arguments);
-						notify();
-						return res;
-					};
-					history[method].__ddgWrapped = true;
-				} catch { }
-			};
-			wrap('pushState');
-			wrap('replaceState');
-			window.addEventListener('popstate', notify);
-			window.addEventListener('hashchange', notify);
-			// Send initial state so parent reflects the starting URL
-			setTimeout(notify, 0);
-			return;
+			});
+			return ddg.iframeBridge;
 		}
 
-		// In parent (top): update our URL/title when the iframe reports a change
-		window.addEventListener('message', (event) => {
-			const data = event && event.data;
-			if (!data || data.type !== 'iframe:url-change') return;
-			const { url, title } = data;
+		// --- child: notify parent on URL changes
+		const notify = ddg.utils.debounce(
+			() => ddg.iframeBridge.post('sync-url', { url: location.href, title: document.title }), 50
+		);
+
+		const wrap = (name) => {
 			try {
-				if (url && url !== window.location.href) {
-					const u = new URL(String(url), window.location.href);
-					if (u.origin === window.location.origin) {
-						window.history.replaceState(window.history.state, '', u.toString());
-					} else {
-						// Cross-origin: navigate instead of replaceState (which would throw)
-						window.location.assign(u.toString());
-					}
-				}
-				if (typeof title === 'string' && title.length) {
-					document.title = title;
-				}
-			} catch (err) {
-				ddg.utils.warn('[sync] parent update failed', err);
-			}
-		}, false);
+				const orig = history[name];
+				if (typeof orig !== 'function' || orig.__ddgWrapped) return;
+				history[name] = function () { const r = orig.apply(this, arguments); notify(); return r; };
+				history[name].__ddgWrapped = true;
+			} catch {}
+		};
+
+		wrap('pushState'); wrap('replaceState');
+		window.addEventListener('popstate', notify);
+		window.addEventListener('hashchange', notify);
+		setTimeout(notify, 0);
+
+		// --- child: link policy (navigate top on same-origin normal clicks)
+		if (!ddg.iframeLinkPolicyBound) {
+			ddg.iframeLinkPolicyBound = true;
+			document.addEventListener('click', (e) => {
+				if (e.defaultPrevented || e.button !== 0) return;
+				if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+				const a = e.target.closest?.('a[href]');
+				if (!a) return;
+				const href = a.getAttribute('href');
+				if (!href || href.startsWith('#')) return;
+				if (a.closest('[data-modal-trigger],[data-ajax-modal],[data-share]')) return;
+				e.preventDefault();
+				try { window.top.location.assign(href); } catch { location.assign(href); }
+			}, true);
+		}
+
+		ddg.utils?.log?.('[ddg] iframe booted');
+		return ddg.iframeBridge;
 	}
 
 	function nav() {
@@ -521,38 +585,10 @@
 		});
 	}
 
-	function iframeLinkPolicy() {
-		if (window === window.parent) return;
-		if (ddg.iframeLinkPolicyBound) return;
-
-		ddg.utils.assert(window.top && window.top.location && typeof window.top.location.assign === 'function', 'iframe link policy requires parent');
-
-		const handler = (event) => {
-			if (event.defaultPrevented) return;
-			if (event.button !== 0) return;
-			if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-			const target = event.target;
-			if (!(target instanceof Element)) return;
-			const anchor = target.closest('a[href]');
-			if (!anchor) return;
-			const href = anchor.getAttribute('href') || '';
-			if (!href || href.startsWith('#')) return;
-			if (anchor.closest('[data-modal-trigger],[data-ajax-modal],[data-share]')) return;
-			event.preventDefault();
-			window.top.location.assign(href);
-		};
-
-		document.addEventListener('click', handler, true);
-		ddg.iframeLinkPolicyBound = true;
-	}
-
 	function homelistSplit() {
 		const homelistContainer = document.querySelector('.home-list') || document.querySelector('[fs-list-element="list"]');
 		if (!homelistContainer) return;
-
-		ddg.utils.assert(typeof gsap !== 'undefined', 'homelistSplit requires gsap');
-		ddg.utils.assert(typeof SplitText !== 'undefined', 'homelistSplit requires SplitText');
-
+		
 		const tapeSpeed = 5000;
 		const getWraps = () => gsap.utils.toArray('.home-list_item-wrap');
 
@@ -802,7 +838,7 @@
 
 		ddg.modalsInitialized = true;
 
-		ddg.modals = ddg.modals || {};
+		ddg.modals ??= {};
 		ddg.modalsKeydownBound = Boolean(ddg.modalsKeydownBound);
 
 		const selectors = {
@@ -1238,10 +1274,9 @@
 		let prefetchEnabled = false;
 		setTimeout(() => { prefetchEnabled = true; }, 2000);
 
-		const parseStory = (html) => {
-			const doc = new DOMParser().parseFromString(html, 'text/html');
-			const node = doc.querySelector('[data-ajax-modal="content"]');
-			return { title: doc.title || '', contentHTML: node ? node.outerHTML : ERROR_HTML };
+		const storyFromDoc = (doc) => {
+			const node = doc?.querySelector?.('[data-ajax-modal="content"]');
+			return { title: (doc?.title || ''), contentHTML: node ? node.outerHTML : ERROR_HTML };
 		};
 
 		const renderEmbed = (html) => {
@@ -1272,11 +1307,7 @@
 					}
 					// Notify parent of new URL if in iframe
 					if (window !== window.parent) {
-						window.parent.postMessage({
-							type: 'iframe:url-change',
-							url,
-							title: document.title
-						}, '*');
+						try { ddg.iframeBridge.post('sync-url', { url, title: document.title }); } catch { }
 					}
 					ddg.fs.whenReady()
 						.then(() => dispatchStoryOpened(url))
@@ -1298,10 +1329,8 @@
 					return;
 				}
 				if (options.showSkeleton !== false) renderEmbed(SKELETON_HTML);
-				const response = await fetch(url, { credentials: 'same-origin' });
-				if (!response.ok) throw new Error('story request failed');
-				const text = await response.text();
-				const parsed = parseStory(text);
+				const doc = await ddg.net.fetchHTML(url);
+				const parsed = storyFromDoc(doc);
 				cacheSet(url, parsed);
 				openStory(url, parsed.title, parsed.contentHTML, options);
 			} catch {
@@ -1316,11 +1345,7 @@
 			document.title = originalTitle;
 			history.pushState({}, '', homeUrl);
 			if (window !== window.parent) {
-				window.parent.postMessage({
-					type: 'iframe:url-change',
-					url: homeUrl,
-					title: originalTitle
-				}, '*');
+				try { ddg.iframeBridge.post('sync-url', { url: homeUrl, title: originalTitle }); } catch { }
 			}
 
 		});
@@ -1350,31 +1375,16 @@
 			await loadAndOpenStory(url, { stateMode: 'push' });
 		};
 
-		let prefetchTimer = null;
-		let prefetchTarget = null;
-		const schedulePrefetch = (url) => {
-			if (!prefetchEnabled || !url || cacheGet(url)) return;
-			clearTimeout(prefetchTimer);
-			prefetchTimer = setTimeout(async () => {
-				try {
-					const response = await fetch(url, { credentials: 'same-origin' });
-					if (!response.ok) return;
-					const text = await response.text();
-					if (cacheGet(url)) return;
-					cacheSet(url, parseStory(text));
-				} catch (err) {
-					ddg.utils.warn('[ajaxStories] prefetch failed', err);
-				}
-			}, 120);
-		};
+		let prefetchCancel = null;
 
 		const onStoryLinkPointerOver = (event) => {
 			const root = event.target.closest('[data-ajax-modal="link"]');
 			if (!root) return;
-			if (prefetchTarget === root) return;
-			prefetchTarget = root;
 			const url = resolveLinkHref(root, event.target);
-			schedulePrefetch(url);
+			if (prefetchCancel) { try { prefetchCancel(); } catch { } }
+			if (prefetchEnabled && url && !cacheGet(url)) {
+				try { prefetchCancel = ddg.net.prefetch(url, 120); } catch { prefetchCancel = null; }
+			}
 		};
 
 		const onStoryLinkPointerOut = (event) => {
@@ -1382,16 +1392,17 @@
 			if (!root) return;
 			const related = event.relatedTarget;
 			if (related && root.contains(related)) return;
-			if (prefetchTarget === root) prefetchTarget = null;
-			clearTimeout(prefetchTimer);
-			prefetchTimer = null;
+			if (prefetchCancel) { try { prefetchCancel(); } catch { } prefetchCancel = null; }
 		};
 
 		const onStoryLinkTouchStart = (event) => {
 			const root = event.target.closest('[data-ajax-modal="link"]');
 			if (!root) return;
 			const url = resolveLinkHref(root, event.target);
-			schedulePrefetch(url);
+			if (prefetchCancel) { try { prefetchCancel(); } catch { } }
+			if (prefetchEnabled && url && !cacheGet(url)) {
+				try { prefetchCancel = ddg.net.prefetch(url, 120); } catch { prefetchCancel = null; }
+			}
 		};
 
 		document.addEventListener('click', onStoryLinkClick);
@@ -1399,14 +1410,10 @@
 		document.addEventListener('mouseout', onStoryLinkPointerOut);
 		document.addEventListener('touchstart', onStoryLinkTouchStart, { passive: true });
 		document.addEventListener('touchend', () => {
-			clearTimeout(prefetchTimer);
-			prefetchTimer = null;
-			prefetchTarget = null;
+			if (prefetchCancel) { try { prefetchCancel(); } catch { } prefetchCancel = null; }
 		}, { passive: true });
 		document.addEventListener('touchcancel', () => {
-			clearTimeout(prefetchTimer);
-			prefetchTimer = null;
-			prefetchTarget = null;
+			if (prefetchCancel) { try { prefetchCancel(); } catch { } prefetchCancel = null; }
 		}, { passive: true });
 
 		window.addEventListener('popstate', () => {
@@ -1444,25 +1451,23 @@
 		const state = (ddg.randomFilters ||= { bag: [] });
 		if (!state.scheduleApply) {
 			state.scheduleApply = (() => {
-				let timer = null;
 				let pendingValues = null;
 				let resolvers = [];
+				const run = ddg.utils.debounce(async () => {
+					const toApply = pendingValues;
+					pendingValues = null;
+					try {
+						await ddg.fs.applyCheckboxFilters(toApply, { merge: false });
+					} finally {
+						const pending = resolvers.slice();
+						resolvers = [];
+						pending.forEach(r => r());
+					}
+				}, 90);
 				return (values) => new Promise((resolve) => {
 					pendingValues = values;
 					resolvers.push(resolve);
-					clearTimeout(timer);
-					timer = setTimeout(async () => {
-						const toApply = pendingValues;
-						pendingValues = null;
-						timer = null;
-						try {
-							await ddg.fs.applyCheckboxFilters(toApply, { merge: false });
-						} finally {
-							const pending = resolvers.slice();
-							resolvers = [];
-							pending.forEach(r => r());
-						}
-					}, 90);
+					run();
 				});
 			})();
 		}
@@ -1476,11 +1481,7 @@
 
 		const rebuildBag = (all, excludeKey) => {
 			const ids = all.map((_, i) => i).filter(i => keyOf(all[i]) !== excludeKey);
-			for (let i = ids.length - 1; i > 0; i--) {
-				const j = Math.floor(Math.random() * (i + 1));
-				[ids[i], ids[j]] = [ids[j], ids[i]];
-			}
-			state.bag = ids;
+			state.bag = ddg.utils.shuffle(ids);
 		};
 
 		const nextIndex = (all) => {
@@ -2038,12 +2039,11 @@
 			setMessage('Ready?'); setTimerMs(0); syncButtons();
 		}
 
-		function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 		async function countdownThen(fn) {
-			setMessage('3'); await delay(1000);
-			setMessage('2'); await delay(1000);
-			setMessage('1'); await delay(1000);
-			beep(); await delay(700);
+			setMessage('3'); await ddg.utils.wait(1000);
+			setMessage('2'); await ddg.utils.wait(1000);
+			setMessage('1'); await ddg.utils.wait(1000);
+			beep(); await ddg.utils.wait(700);
 			fn();
 		}
 
@@ -2145,9 +2145,8 @@
 		}
 
 		async function checkExistingSubmission(id) {
-			const res = await fetch(`https://hook.eu2.make.com/82eitnupdvhl1yn3agge1riqmonwlvg3?ddg_id=${encodeURIComponent(id)}`);
-			if (!res.ok) throw new Error('check failed');
-			const data = await res.json();
+			const url = `https://hook.eu2.make.com/82eitnupdvhl1yn3agge1riqmonwlvg3?ddg_id=${encodeURIComponent(id)}`;
+			const data = await ddg.net.fetchJSON(url);
 			if (data?.status === 'recording') go(`/share-your-story-success?ddg_id=${encodeURIComponent(id)}`);
 		}
 
@@ -2209,7 +2208,7 @@
 	function currentItem() {
 		const logPrefix = '[currentItem]';
 
-		ddg.currentItem = ddg.currentItem || { item: null, url: null, list: null };
+		ddg.currentItem ??= { item: null, url: null, list: null };
 
 		let lastKey = null;
 		let pendingUrl = null;   // last seen story url (can arrive before list is ready)
@@ -2309,26 +2308,6 @@
 			tryResolve(pendingUrl);
 		});
 
-		if (window.location.pathname.startsWith('/stories/')) {
-			// On direct story load: kick both sides; whichever resolves last triggers tryResolve
-			ensureList().then(() => tryResolve());
-		} else {
-			ensureList().then(() => tryResolve('/'));
-		}
-
-		// Force reconciliation after list becomes ready (critical for /stories/ pages)
-		ddg.utils.on('ddg:list-ready', (e) => {
-			const newList = e.detail?.list;
-			if (newList && newList !== ddg.currentItem.list) {
-				ddg.currentItem.list = newList;
-				hooksBound = false;          // allow rebinding on the new instance
-				bindListHooks(newList);
-			}
-			if (window.location.pathname.startsWith('/stories/')) {
-				tryResolve(window.location.href);
-			}
-		});
-
 	}
 
 	function relatedFilters() {
@@ -2418,12 +2397,8 @@
 				}
 			}
 
-			for (let i = entries.length - 1; i > 0; i--) {
-				const j = Math.floor(Math.random() * (i + 1));
-				[entries[i], entries[j]] = [entries[j], entries[i]];
-			}
 
-			const limited = entries.slice(0, MAX_FILTERS);
+			const limited = ddg.utils.shuffle(entries).slice(0, MAX_FILTERS);
 			limited.forEach(({ field, value }, idx) => {
 				const clone = tpl.cloneNode(true);
 				const input = clone.querySelector(selectors.input);
