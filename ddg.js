@@ -1,3 +1,4 @@
+
 (function () {
 	const ddg = (window.ddg ??= {});
 	const data = (ddg.data ??= {
@@ -14,24 +15,6 @@
 			};
 		},
 
-		throttle: (fn, ms = 150, useRAF = false) => {
-			let last = 0, raf;
-			return (...args) => {
-				const now = Date.now();
-				if (useRAF) {
-					if (!raf) {
-						raf = requestAnimationFrame(() => {
-							raf = null;
-							fn(...args);
-						});
-					}
-				} else if (now - last >= ms) {
-					last = now;
-					fn(...args);
-				}
-			};
-		},
-
 		wait: (ms = 0) => new Promise(resolve => setTimeout(resolve, ms)),
 
 		shuffle: (arr) => {
@@ -43,8 +26,6 @@
 			return a;
 		},
 
-		on: (event, fn, el = document) => el.addEventListener(event, fn),
-		off: (event, fn, el = document) => el.removeEventListener(event, fn),
 		emit: (event, detail, el = document) =>
 			el.dispatchEvent(new CustomEvent(event, { detail })),
 
@@ -82,7 +63,7 @@
 		}
 
 		function on(type, fn) {
-			if (!type || typeof fn !== 'function') return () => {};
+			if (!type || typeof fn !== 'function') return () => { };
 			const key = PREFIX + type;
 			const handler = (e) => { if (e?.data?.type === key) fn(e.data.data, e); };
 			window.addEventListener('message', handler);
@@ -218,7 +199,7 @@
 		const on = (fn) => {
 			if (typeof fn !== 'function') return () => { };
 			const handler = (e) => fn(e?.detail || { width: window.innerWidth, height: window.innerHeight });
-			ddg.utils.on('ddg:resize', handler);
+			document.addEventListener('ddg:resize', handler);
 			return () => document.removeEventListener('ddg:resize', handler);
 		};
 
@@ -315,7 +296,7 @@
 			return Array.isArray(v?.value) ? v.value : (Array.isArray(v) ? v : []);
 		};
 
-		const valuesForItemSafe = (item) => {
+		const itemsValues = (item) => {
 			const normalize = (value) => {
 				if (value == null) return [];
 				const arrayValue = Array.isArray(value) ? value : [value];
@@ -432,50 +413,7 @@
 			await afterNextRender(list);
 		}
 
-		return { whenReady, items, valuesForItemSafe, applyCheckboxFilters, afterNextRender };
-	})();
-
-	ddg.confetti ??= (() => {
-		let js = null;
-		let canvas = null;
-
-		function ensureCanvas() {
-			if (canvas) return canvas;
-			canvas = document.createElement('canvas');
-			canvas.id = 'ddg-confetti-canvas';
-			Object.assign(canvas.style, {
-				position: 'fixed',
-				inset: 0,
-				width: '100%',
-				height: '100%',
-				zIndex: 999999, // 🔝 absolutely on top of everything
-				pointerEvents: 'none',
-			});
-			document.body.appendChild(canvas);
-			return canvas;
-		}
-
-		function getInstance() {
-			if (!window.JSConfetti) {
-				ddg.utils.warn('Confetti library missing');
-				return null;
-			}
-			if (!js) js = new JSConfetti({ canvas: ensureCanvas() });
-			return js;
-		}
-
-		function trigger(options = {}) {
-			const inst = getInstance();
-			if (!inst) return;
-			inst.addConfetti({
-				emojis: ['🎉', '✨', '💥'],
-				confettiRadius: 6,
-				confettiNumber: 150,
-				...options,
-			});
-		}
-
-		return { trigger };
+		return { whenReady, items, itemsValues, applyCheckboxFilters, afterNextRender };
 	})();
 
 	function initSite() {
@@ -527,7 +465,7 @@
 				if (typeof orig !== 'function' || orig.__ddgWrapped) return;
 				history[name] = function () { const r = orig.apply(this, arguments); notify(); return r; };
 				history[name].__ddgWrapped = true;
-			} catch {}
+			} catch { }
 		};
 
 		wrap('pushState'); wrap('replaceState');
@@ -610,23 +548,6 @@
 		const TAPE_SPEED = 5000;
 
 		let split = null;
-		let resizeObs = null;
-
-		const hasDeps = () => {
-			if (!window.gsap) {
-				(ddg?.utils?.warn || console.warn)('homelistSplit: gsap missing');
-				return false;
-			}
-			if (typeof window.SplitText !== 'function') {
-				(ddg?.utils?.warn || console.warn)('homelistSplit: SplitText missing');
-				return false;
-			}
-			if (!ddg?.utils) {
-				console.warn('[ddg] utils missing');
-				return false;
-			}
-			return true;
-		};
 
 		const isMobile = () => window.innerWidth <= MOBILE_BP;
 
@@ -650,7 +571,6 @@
 		};
 
 		const update = () => {
-			if (!hasDeps()) return;
 			revertSplit();
 			if (isMobile()) return;
 			try { applySplit(); } catch (e) {
@@ -664,8 +584,8 @@
 			await (ddg.utils.fontsReady?.() ?? Promise.resolve());
 			update();
 
-			// use ddg.utils.on/off for consistency
-			ddg.utils.on('resize', onResize, window);
+			// bind native resize
+			window.addEventListener('resize', onResize);
 
 			// hook fin-sweet list renders
 			ddg.fs?.whenReady?.().then(listInstance => {
@@ -674,21 +594,12 @@
 				}
 			});
 
-			// watch container size/content changes
-			if ('ResizeObserver' in window) {
-				resizeObs = new ResizeObserver(ddg.utils.throttle(() => {
-					if (!isMobile()) update();
-				}, 150));
-				resizeObs.observe(list);
-			}
 		};
 
 		init();
 
-		// expose a cleanup if you ever need to tear down
 		return () => {
-			ddg.utils.off('resize', onResize, window);
-			if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
+			window.removeEventListener('resize', onResize);
 			revertSplit();
 		};
 	}
@@ -714,6 +625,44 @@
 		};
 
 
+		// Inline confetti utility (scoped to share only)
+		let confettiInstance = null;
+		let confettiCanvas = null;
+		const ensureConfettiCanvas = () => {
+			if (confettiCanvas) return confettiCanvas;
+			const c = document.createElement('canvas');
+			c.id = 'ddg-confetti-canvas';
+			Object.assign(c.style, {
+				position: 'fixed',
+				inset: 0,
+				width: '100%',
+				height: '100%',
+				zIndex: 999999,
+				pointerEvents: 'none',
+			});
+			document.body.appendChild(c);
+			confettiCanvas = c;
+			return c;
+		};
+
+		const triggerConfetti = (options = {}) => {
+			try {
+				if (!window.JSConfetti) {
+					(ddg.utils?.warn || console.warn)('Confetti library missing');
+					return;
+				}
+				if (!confettiInstance) confettiInstance = new JSConfetti({ canvas: ensureConfettiCanvas() });
+				confettiInstance.addConfetti({
+					emojis: ['🎉', '✨', '💥'],
+					confettiRadius: 6,
+					confettiNumber: 150,
+					...options,
+				});
+			} catch (err) {
+				(ddg.utils?.warn || console.warn)('Confetti failed', err);
+			}
+		};
+
 		const updateCountdowns = () => {
 			let anyHitZero = false;
 			document.querySelectorAll('[data-share-countdown]').forEach((node) => {
@@ -735,9 +684,7 @@
 				if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.value = String(next);
 				else node.textContent = String(next);
 			});
-			if (anyHitZero && ddg.confetti && typeof ddg.confetti.trigger === 'function') {
-				try { ddg.confetti.trigger(); } catch { }
-			}
+			if (anyHitZero) triggerConfetti();
 		};
 
 		const clearShareStateTimer = (el) => {
@@ -827,17 +774,15 @@
 		};
 
 		document.addEventListener('click', onShareClick, true);
-		ddg.shareClickHandler = onShareClick;
 
 	}
 
 	function modals() {
-		const modalRoot = document.querySelector('[data-modal-el]') || document.querySelector('[data-modal-trigger]');
+		const modalRoot = document.querySelector('[data-modal-el]');
 		if (!modalRoot) return;
 		if (ddg.modalsInitialized) return;
 
 		ddg.modalsInitialized = true;
-
 		ddg.modals ??= {};
 		ddg.modalsKeydownBound = Boolean(ddg.modalsKeydownBound);
 
@@ -850,7 +795,7 @@
 			scrollAny: '[data-modal-scroll]',
 		};
 
-		// Ensure a stable baseline: reflect closed state on load before any interaction
+		// --- Existing baseline state setup ---
 		const docRoot = document.documentElement;
 		const initiallyOpen = document.querySelector('[data-modal-el].is-open');
 		if (docRoot) {
@@ -871,13 +816,11 @@
 				open ? el.classList.add('is-open') : el.classList.remove('is-open');
 			});
 
-			// Also reflect a global state for CSS with [data-modal-state]
 			const root = document.documentElement;
 			if (open) {
 				root.setAttribute('data-modal-state', 'open');
 				root.setAttribute('data-modal-id', String(id || ''));
 			} else {
-				// Only mark closed if no other modal is currently open
 				const anyOpen = !!document.querySelector('[data-modal-el].is-open');
 				if (!anyOpen) {
 					root.setAttribute('data-modal-state', 'closed');
@@ -946,9 +889,7 @@
 			};
 
 			const resolveScrollContainer = () => {
-				// Prefer the modal's inner wrapper which is the actual scrollable region
 				if ($inner && $inner[0]) return $inner[0];
-				// Fallbacks for custom containers if explicitly keyed to this modal id
 				const $global = $(`[data-modal-scroll="${id}"]`).first();
 				if ($global.length) return $global[0];
 				const $scoped = $modal.find(`[data-modal-scroll="${id}"]`).first();
@@ -960,7 +901,6 @@
 				if (!hash) return;
 				const target = $modal.find(`#${CSS.escape(hash)}`).first()[0] || null;
 				if (!target) return;
-
 				const container = resolveScrollContainer();
 				if (!container) return;
 
@@ -969,10 +909,9 @@
 				const cs = getComputedStyle(target);
 				const smt = parseFloat(cs.scrollMarginTop || cs.scrollMargin || '0') || 0;
 				const nextTop = container.scrollTop + (tRect.top - cRect.top) - smt;
-
 				container.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' });
 
-				const guard = (ev) => { if (!container.contains(ev.target)) { ev.preventDefault?.(); } };
+				const guard = (ev) => { if (!container.contains(ev.target)) ev.preventDefault?.(); };
 				window.addEventListener('wheel', guard, { capture: true, passive: false });
 				window.addEventListener('touchmove', guard, { capture: true, passive: false });
 				setTimeout(() => {
@@ -981,8 +920,7 @@
 				}, 900);
 			};
 
-
-			// Internal anchor links should scroll the modal's scroll container
+			// Internal anchor scrolls (delegate inside this modal)
 			$modal.on('click.modalAnchor', 'a[href^="#"], button[href^="#"]', (e) => {
 				const href = e.currentTarget.getAttribute('href') || '';
 				const hash = href.replace(/^#/, '').trim();
@@ -996,12 +934,7 @@
 			});
 
 			const open = ({ skipAnimation = false, afterOpen } = {}) => {
-
-				// Lock body scroll immediately on trigger
-				if (!ddg.scrollLock.isHolding(id)) {
-					ddg.scrollLock.lock(id);
-				}
-
+				if (!ddg.scrollLock.isHolding(id)) ddg.scrollLock.lock(id);
 				Object.keys(ddg.modals).forEach(k => {
 					if (k !== id && ddg.modals[k]?.isOpen?.()) ddg.modals[k].close({ skipAnimation: true });
 				});
@@ -1041,10 +974,7 @@
 				if (closing) return closingTl;
 
 				closing = true;
-
-				// Unlock body scroll immediately on close trigger
 				ddg.scrollLock.unlock(id);
-
 				gsap.killTweensOf([$anim[0], $bg[0]]);
 
 				const finish = () => {
@@ -1061,53 +991,34 @@
 				};
 
 				if (skipAnimation) {
-					$bg[0]?.classList.remove('is-open'); // remove bg first
+					$bg[0]?.classList.remove('is-open');
 					gsap.set([$bg[0], $anim[0]], { autoAlpha: 0, y: 40 });
 					return finish();
 				}
 
 				setAnimating(true);
-
 				$bg[0]?.classList.remove('is-open');
-
 				gsap.set([$modal[0], $inner[0], $bg[0]], { pointerEvents: 'none' });
 
-				closingTl = gsap.timeline({
-					onComplete: () => { setAnimating(false); finish(); }
-				});
-
-				closingTl.to($anim[0], {
-					y: 40,
-					autoAlpha: 0,
-					duration: 0.32,
-					ease: 'power2.in',
-					overwrite: 'auto'
-				}, 0);
-
-				closingTl.to($bg[0], {
-					autoAlpha: 0,
-					duration: 0.18,
-					ease: 'power1.inOut',
-					overwrite: 'auto'
-				}, 0);
-
+				closingTl = gsap.timeline({ onComplete: () => { setAnimating(false); finish(); } });
+				closingTl.to($anim[0], { y: 40, autoAlpha: 0, duration: 0.32, ease: 'power2.in', overwrite: 'auto' }, 0);
+				closingTl.to($bg[0], { autoAlpha: 0, duration: 0.18, ease: 'power1.inOut', overwrite: 'auto' }, 0);
 				return closingTl;
 			};
 
 			const isOpen = () => $modal.hasClass('is-open');
-
 			const modal = { open, close, isOpen, $modal, $bg, $inner };
 			ddg.modals[id] = modal;
 
 			const initial = $modal.hasClass('is-open');
 			syncCssState($modal, initial, id);
-
 			ddg.utils.emit('ddg:modal-created', id);
 			return modal;
 		};
 
 		ddg.createModal = createModal;
 
+		// --- Existing open logic ---
 		$(document).on('click.modal', selectors.trigger, (e) => {
 			const node = e.currentTarget;
 			if (node.hasAttribute('data-ajax-modal')) return;
@@ -1117,6 +1028,7 @@
 			modal?.open();
 		});
 
+		// --- Close buttons ---
 		$(document).on('click.modal', selectors.close, (e) => {
 			e.preventDefault();
 			const id = e.currentTarget.getAttribute('data-modal-close');
@@ -1124,24 +1036,36 @@
 			else Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
 		});
 
+		// --- Story modal: clicking the inner container itself closes it (not its children)
+		$(document).on('click.modal', '[data-modal-inner="story"]', (e) => {
+			if (e.target !== e.currentTarget) return; // only close when clicking empty space on the inner
+			const root = e.currentTarget.closest('[data-modal-el]');
+			const id = root?.getAttribute('data-modal-el') || 'story';
+			(ddg.modals[id] || createModal(id))?.close();
+		});
+
+		// --- Background clicks ---
 		$(document).on('click.modal', selectors.bg, (e) => {
 			if (e.target !== e.currentTarget) return;
 			const id = e.currentTarget.getAttribute('data-modal-bg');
 			(ddg.modals[id] || createModal(id))?.close();
 		});
 
-		// If a close button exists inside a same-origin iframe within the modal,
-		// delegate its click to the parent close logic.
+		// ✅ NEW: click anywhere *not inside modal content* closes it
+		$(document).on('click.modal', (e) => {
+			const isInner = e.target.closest(selectors.inner);
+			const isModal = e.target.closest(selectors.modal);
+			if (isInner || !isModal) return; // ignore clicks inside content or outside modals entirely
+			const id = isModal.getAttribute('data-modal-el');
+			if (id) (ddg.modals[id] || createModal(id))?.close();
+		});
+
+		// --- Iframe + escape logic remain unchanged ---
 		const getFrameDocument = (frame) => {
-			if (!frame) return null;
-			try {
-				return frame.contentDocument || frame.contentWindow?.document || null;
-			} catch (err) {
-				return null;
-			}
+			try { return frame.contentDocument || frame.contentWindow?.document || null; } catch { return null; }
 		};
 
-		ddg.utils.on('ddg:modal-opened', (ev) => {
+		document.addEventListener('ddg:modal-opened', (ev) => {
 			const id = ev.detail?.id;
 			if (!id) return;
 			const modalEl = document.querySelector(`[data-modal-el="${id}"]`);
@@ -1150,56 +1074,14 @@
 				const doc = getFrameDocument(frame);
 				if (!doc) return;
 				const handler = (e) => {
-					const target = e.target && (e.target.closest ? e.target.closest('[data-modal-close]') : null);
-					if (target) {
+					if (e.target.closest('[data-modal-close]')) {
 						e.preventDefault?.();
 						(ddg.modals[id] || createModal(id))?.close();
 					}
 				};
-				if (frame.__ddgIframeCloseHandler) {
-					doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
-				}
+				if (frame.__ddgIframeCloseHandler) doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
 				doc.addEventListener('click', handler);
 				frame.__ddgIframeCloseHandler = handler;
-
-				const linkHandler = (event) => {
-					const closestAnchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-					if (!closestAnchor) return;
-					if (closestAnchor.closest('[data-modal-trigger],[data-ajax-modal]')) return;
-					const href = closestAnchor.getAttribute('href');
-					if (!href) return;
-					event.preventDefault();
-					try {
-						if (window.top && window.top.location && typeof window.top.location.assign === 'function') {
-							window.top.location.assign(href);
-						} else {
-							window.location.assign(href);
-						}
-					} catch {
-						window.location.assign(href);
-					}
-				};
-				if (frame.__ddgIframeLinkHandler) {
-					doc.removeEventListener('click', frame.__ddgIframeLinkHandler);
-				}
-				doc.addEventListener('click', linkHandler);
-				frame.__ddgIframeLinkHandler = linkHandler;
-			});
-		});
-
-		ddg.utils.on('ddg:modal-closed', (ev) => {
-			const id = ev.detail?.id;
-			if (!id) return;
-			const modalEl = document.querySelector(`[data-modal-el="${id}"]`);
-			if (!modalEl) return;
-			modalEl.querySelectorAll('iframe').forEach((frame) => {
-				const doc = getFrameDocument(frame);
-				if (doc) {
-					if (frame.__ddgIframeCloseHandler) doc.removeEventListener('click', frame.__ddgIframeCloseHandler);
-					if (frame.__ddgIframeLinkHandler) doc.removeEventListener('click', frame.__ddgIframeLinkHandler);
-				}
-				delete frame.__ddgIframeCloseHandler;
-				delete frame.__ddgIframeLinkHandler;
 			});
 		});
 
@@ -1215,10 +1097,7 @@
 				const id = el.getAttribute('data-modal-el');
 				const open = el.classList.contains('is-open');
 				syncCssState($(el), open, id);
-				if (open && !ddg.scrollLock.isHolding(id)) {
-					ddg.scrollLock.lock(id);
-				}
-				// Emit an open event for any modal already open at init
+				if (open && !ddg.scrollLock.isHolding(id)) ddg.scrollLock.lock(id);
 				if (open) ddg.utils.emit('ddg:modal-opened', { id });
 			});
 		});
@@ -1338,7 +1217,7 @@
 			}
 		};
 
-		ddg.utils.on('ddg:modal-closed', (ev) => {
+		document.addEventListener('ddg:modal-closed', (ev) => {
 			if (ev.detail?.id !== storyModalId) return;
 			document.title = originalTitle;
 			history.pushState({}, '', homeUrl);
@@ -1504,13 +1383,55 @@
 
 			const idx = nextIndex(all);
 			const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
-			const values = ddg.fs.valuesForItemSafe(item);
+			const values = ddg.fs.itemsValues(item);
 
 			await state.scheduleApply(values);
 		}, true);
 	}
 
 	function marquee(root = document) {
+		// Bind global listeners once (even if no marquees yet)
+		if (!ddg.marqueeGlobalBound) {
+			ddg.marqueeGlobalBound = true;
+			document.addEventListener('ddg:modal-opened', e => {
+				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
+				if (modal) marquee(modal);
+			});
+			document.addEventListener('ddg:modal-closed', e => {
+				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
+				if (!modal) return;
+				modal.querySelectorAll('[data-marquee-init]').forEach(el => {
+					el.__ddgMarqueeCleanup?.();
+					el.removeAttribute('data-marquee-init');
+				});
+			});
+			// Cleanup for non-modal removals to prevent stray listeners
+			const attachDomObserver = () => {
+				if (ddg.marqueeDomObserver) return;
+				if (typeof MutationObserver !== 'function') return;
+				ddg.marqueeDomObserver = new MutationObserver(muts => {
+					for (const m of muts) {
+						m.removedNodes && m.removedNodes.forEach(node => {
+							if (!(node instanceof Element)) return;
+							const targets = node.matches?.('[data-marquee-init]') ? [node] : [];
+							node.querySelectorAll?.('[data-marquee-init]').forEach(el => targets.push(el));
+							targets.forEach(el => {
+								el.__ddgMarqueeCleanup?.();
+								el.removeAttribute('data-marquee-init');
+							});
+						});
+					}
+				});
+				const domRoot = document.body || document.documentElement;
+				if (domRoot) ddg.marqueeDomObserver.observe(domRoot, { childList: true, subtree: true });
+			};
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', attachDomObserver, { once: true });
+			} else {
+				attachDomObserver();
+			}
+		}
+
 		const firstMarquee = root?.querySelector?.('[data-marquee]');
 		if (!firstMarquee) return;
 
@@ -1526,6 +1447,10 @@
 		function startTween(el) {
 			const { inner, distance, duration } = el.__ddgMarqueeConfig || {};
 			if (!inner) return;
+			if (typeof window.gsap === 'undefined') { // retry when GSAP becomes available
+				setTimeout(() => startTween(el), 100);
+				return;
+			}
 			el.__ddgMarqueeTween?.kill();
 
 			const tween = gsap.to(inner, {
@@ -1560,7 +1485,51 @@
 			}
 
 			const baseWidth = el.__ddgMarqueeBaseWidth || 0;
-			if (!baseWidth) return;
+			// Try a fresh measure before deferring; if it now has size, store and proceed
+			let measuredBase = inner.scrollWidth || 0;
+			if (!baseWidth && measuredBase > 0) {
+				el.__ddgMarqueeBaseWidth = measuredBase;
+			} else if (!baseWidth) {
+				// Defer until assets (images/fonts) have dimensions
+				if (!el.__ddgMarqueeWaitAssets) {
+					el.__ddgMarqueeWaitAssets = true;
+					const imgs = Array.from(inner.querySelectorAll('img')).filter(img => !img.complete);
+					const waits = imgs.map(img => (img.decode ? img.decode().catch(() => { }) : new Promise(res => img.addEventListener('load', res, { once: true }))));
+					// Optionally include fonts readiness if available
+					try {
+						if (document.fonts && document.fonts.ready) {
+							waits.push(document.fonts.ready.catch(() => { }));
+						}
+					} catch (_) { }
+
+					if (waits.length === 0) {
+						// Nothing to wait for; yield a frame, re-measure, then rebuild
+						el.__ddgMarqueeWaitAssets = false;
+						requestAnimationFrame(() => {
+							const bw = inner.scrollWidth || 0;
+							if (bw) el.__ddgMarqueeBaseWidth = bw;
+							build(el);
+						});
+					} else {
+						Promise.race([
+							Promise.all(waits).catch(() => { }),
+							new Promise(res => setTimeout(res, 1000))
+						]).then(() => {
+							el.__ddgMarqueeWaitAssets = false;
+							// Re-measure on next frame to avoid tight microtask loops
+							requestAnimationFrame(() => {
+								const bw = inner.scrollWidth || 0;
+								if (bw) el.__ddgMarqueeBaseWidth = bw;
+								build(el);
+							});
+						});
+					}
+				} else {
+					// As a fallback, try again on next frame
+					requestAnimationFrame(() => build(el));
+				}
+				return;
+			}
 
 			// Determine desired number of copies; ensure even for seamless half-swap
 			let minTotal = Math.max(width * 2, baseWidth * 2);
@@ -1636,7 +1605,8 @@
 					for (const entry of entries) {
 						if (entry.isIntersecting) {
 							build(el);
-							obs.unobserve(el);
+							// Only unobserve once a config exists (successful build)
+							if (el.__ddgMarqueeConfig) obs.unobserve(el);
 							break;
 						}
 					}
@@ -1656,116 +1626,50 @@
 			} else requestAnimationFrame(check);
 		});
 
-		// Bind global listeners once (idempotent)
-		if (!ddg.marqueeGlobalBound) {
-			ddg.marqueeGlobalBound = true;
-			ddg.utils.on('ddg:modal-opened', e => {
-				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
-				if (modal) marquee(modal);
-			});
-			ddg.utils.on('ddg:modal-closed', e => {
-				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
-				if (!modal) return;
-				modal.querySelectorAll('[data-marquee-init]').forEach(el => {
-					el.__ddgMarqueeCleanup?.();
-					el.removeAttribute('data-marquee-init');
-				});
-			});
-			// Cleanup for non-modal removals to prevent stray listeners
-			const attachDomObserver = () => {
-				if (ddg.marqueeDomObserver) return;
-				if (typeof MutationObserver !== 'function') return;
-				ddg.marqueeDomObserver = new MutationObserver(muts => {
-					for (const m of muts) {
-						m.removedNodes && m.removedNodes.forEach(node => {
-							if (!(node instanceof Element)) return;
-							const targets = node.matches?.('[data-marquee-init]') ? [node] : [];
-							node.querySelectorAll?.('[data-marquee-init]').forEach(el => targets.push(el));
-							targets.forEach(el => {
-								el.__ddgMarqueeCleanup?.();
-								el.removeAttribute('data-marquee-init');
-							});
-						});
-					}
-				});
-				const domRoot = document.body || document.documentElement;
-				if (domRoot) ddg.marqueeDomObserver.observe(domRoot, { childList: true, subtree: true });
-			};
-			if (document.readyState === 'loading') {
-				document.addEventListener('DOMContentLoaded', attachDomObserver, { once: true });
-			} else {
-				attachDomObserver();
-			}
-		}
+
 	}
 
 	function storiesAudioPlayer() {
 		const storyModal = document.querySelector('[data-modal-el="story"]');
-		if (!storyModal) return;
-		if (ddg.storiesAudioPlayerInitialized) return;
-
+		if (!storyModal || ddg.storiesAudioPlayerInitialized) return;
 		ddg.storiesAudioPlayerInitialized = true;
 
-		const log = (...a) => ddg.utils.log('[audio]', ...a);
-		const warn = (...a) => ddg.utils.warn('[audio]', ...a);
 		let activePlayer = null;
-		// ---- Helpers ----
+
 		const disable = (btn, state = true) => { if (btn) btn.disabled = !!state; };
 
-		const setPlayState = (playBtn, playIcon, pauseIcon, playing) => {
-			playBtn.setAttribute('data-state', playing ? 'playing' : 'paused');
-			playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+		const setPlayState = (btn, playIcon, pauseIcon, playing) => {
+			btn.setAttribute('data-state', playing ? 'playing' : 'paused');
+			btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
 			if (playIcon) playIcon.style.display = playing ? 'none' : 'block';
 			if (pauseIcon) pauseIcon.style.display = playing ? 'grid' : 'none';
 		};
 
-		const setMuteState = (muteBtn, muteIcon, unmuteIcon, muted) => {
-			muteBtn.setAttribute('data-state', muted ? 'muted' : 'unmuted');
-			muteBtn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
+		const setMuteState = (btn, muteIcon, unmuteIcon, muted) => {
+			btn.setAttribute('data-state', muted ? 'muted' : 'unmuted');
+			btn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
 			if (muteIcon) muteIcon.style.display = muted ? 'none' : 'block';
 			if (unmuteIcon) unmuteIcon.style.display = muted ? 'block' : 'none';
 		};
 
 		const cleanupActive = () => {
 			if (!activePlayer) return;
-			const { el, wavesurfer } = activePlayer;
-			try { wavesurfer?.destroy(); } catch (err) { warn('cleanup failed', err); }
-			const playBtn = el.querySelector('[data-player="play"]');
-			if (playBtn) {
-				const playIcon = playBtn.querySelector('.circle-btn_icon.is-play');
-				const pauseIcon = playBtn.querySelector('.circle-btn_icon.is-pause');
-				setPlayState(playBtn, playIcon, pauseIcon, false);
-				disable(playBtn, true);
-			}
-			const muteBtn = el.querySelector('[data-player="mute"]');
-			if (muteBtn) {
-				const muteIcon = muteBtn.querySelector('.circle-btn_icon.is-mute');
-				const unmuteIcon = muteBtn.querySelector('.circle-btn_icon.is-unmute');
-				setMuteState(muteBtn, muteIcon, unmuteIcon, false);
-				disable(muteBtn, true);
-			}
-			el.removeAttribute('data-audio-init');
-			delete el.__ws;
+			try { activePlayer.wavesurfer?.destroy(); } catch (err) { ddg.utils.warn('[audio]', err); }
+			activePlayer.el.removeAttribute('data-audio-init');
 			activePlayer = null;
-			log('cleaned up');
+			ddg.utils.log('[audio] cleaned up');
 		};
 
-		// ---- Build player ----
 		const buildAudio = (modalEl) => {
-			if (!modalEl) { warn('No modal element'); return; }
 			const playerEl = modalEl.querySelector('.story-player');
-			if (!playerEl) { warn('No .story-player found'); return; }
-			if (playerEl.hasAttribute('data-audio-init')) return;
-
-			cleanupActive(); // ensure only one at a time
+			if (!playerEl || playerEl.hasAttribute('data-audio-init')) return;
+			cleanupActive();
 
 			const audioUrl = playerEl.dataset.audioUrl;
-			if (!audioUrl) { warn('Missing data-audio-url', playerEl); return; }
-
 			const waveformEl = playerEl.querySelector('.story-player_waveform');
 			const playBtn = playerEl.querySelector('[data-player="play"]');
 			const muteBtn = playerEl.querySelector('[data-player="mute"]');
-			if (!waveformEl || !playBtn || !muteBtn) { warn('Missing waveform/play/mute buttons', playerEl); return; }
+			if (!audioUrl || !waveformEl || !playBtn || !muteBtn) return;
 
 			const playIcon = playBtn.querySelector('.circle-btn_icon.is-play');
 			const pauseIcon = playBtn.querySelector('.circle-btn_icon.is-pause');
@@ -1773,34 +1677,32 @@
 			const unmuteIcon = muteBtn.querySelector('.circle-btn_icon.is-unmute');
 
 			playerEl.dataset.audioInit = 'true';
-			log('building player', audioUrl);
+			ddg.utils.log('[audio] building player', audioUrl);
 
-			let wavesurfer = null;
+			let wavesurfer;
 			let isMuted = false;
-			let isPlaying = false;
 
-			// Dynamically read the rendered height of the container
-			const containerHeight = waveformEl.offsetHeight || 42;
-
-			// ---- WaveSurfer ----
 			try {
 				if (typeof WaveSurfer === 'undefined') throw new Error('WaveSurfer not available');
 				wavesurfer = WaveSurfer.create({
 					container: waveformEl,
-					height: containerHeight,
+					height: waveformEl.offsetHeight || 42,
 					waveColor: '#b6b83b',
 					progressColor: '#2C2C2C',
 					cursorColor: '#2C2C2C',
-					normalize: true,
-					barWidth: 2,
-					barGap: 1,
+					barWidth: 3,
+					barGap: 2,
+					barAlign: 'center',
+					normalize: false,
 					dragToSeek: true,
 					interact: true,
 					url: audioUrl
 				});
-			} catch (err) { warn(err?.message || 'WaveSurfer init failed', playerEl); return; }
+			} catch (err) {
+				ddg.utils.warn('[audio]', err?.message || 'WaveSurfer init failed');
+				return;
+			}
 
-			// ---- Initial UI ----
 			disable(playBtn, true);
 			disable(muteBtn, true);
 			setPlayState(playBtn, playIcon, pauseIcon, false);
@@ -1809,65 +1711,42 @@
 			wavesurfer.once('ready', () => {
 				disable(playBtn, false);
 				disable(muteBtn, false);
-				log('waveform ready');
+
+				ddg.utils.log('[audio] waveform ready');
 			});
 
-			// ---- Events ----
 			wavesurfer.on('play', () => {
-				isPlaying = true;
 				setPlayState(playBtn, playIcon, pauseIcon, true);
-				// Pause other players
-				document.querySelectorAll('.story-player[data-audio-init]').forEach((el) => {
-					if (el !== playerEl && el.__ws && typeof el.__ws.pause === 'function') el.__ws.pause();
+				document.querySelectorAll('.story-player[data-audio-init]').forEach(el => {
+					if (el !== playerEl && el.__ws?.pause) el.__ws.pause();
 				});
 			});
 
-			wavesurfer.on('pause', () => {
-				isPlaying = false;
-				setPlayState(playBtn, playIcon, pauseIcon, false);
-			});
+			wavesurfer.on('pause', () => setPlayState(playBtn, playIcon, pauseIcon, false));
+			wavesurfer.on('finish', () => setPlayState(playBtn, playIcon, pauseIcon, false));
 
-			wavesurfer.on('finish', () => {
-				isPlaying = false;
-				setPlayState(playBtn, playIcon, pauseIcon, false);
-			});
-
-			playBtn.addEventListener('click', () => {
-				try { wavesurfer.playPause(); }
-				catch (err) { warn('playPause failed', err); }
-			});
-
+			playBtn.addEventListener('click', () => wavesurfer.playPause());
 			muteBtn.addEventListener('click', () => {
-				try {
-					isMuted = !isMuted;
-					wavesurfer.setMuted(isMuted);
-					setMuteState(muteBtn, muteIcon, unmuteIcon, isMuted);
-				} catch (err) { warn('mute toggle failed', err); }
+				isMuted = !isMuted;
+				wavesurfer.setMuted(isMuted);
+				setMuteState(muteBtn, muteIcon, unmuteIcon, isMuted);
 			});
 
 			playerEl.__ws = wavesurfer;
 			activePlayer = { el: playerEl, wavesurfer };
 		};
 
-		// ---- Modal lifecycle ----
-		const onModalOpened = (e) => {
-			const id = e.detail?.id;
-			const modal = document.querySelector(`[data-modal-el="${id}"]`);
+		document.addEventListener('ddg:modal-opened', e => {
+			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
 			if (modal) buildAudio(modal);
-		};
+		});
 
-		const onModalClosed = (e) => {
-			const id = e.detail?.id;
-			const modal = document.querySelector(`[data-modal-el="${id}"]`);
-			if (!modal) return;
-			const playerEl = modal.querySelector('.story-player[data-audio-init]');
-			if (playerEl && activePlayer && activePlayer.el === playerEl) cleanupActive();
-		};
+		document.addEventListener('ddg:modal-closed', e => {
+			const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
+			if (modal) cleanupActive();
+		});
 
-		// Attach once
-		document.addEventListener('ddg:modal-opened', onModalOpened);
-		document.addEventListener('ddg:modal-closed', onModalClosed);
-		log('storiesAudioPlayer initialized');
+		ddg.utils.log('[audio] storiesAudioPlayer initialized');
 	}
 
 	function outreach() {
@@ -2022,10 +1901,12 @@
 				const url = URL.createObjectURL(b);
 				wsPlayback = WaveSurfer.create({
 					container: pbWaveWrap,
+					height: (pbWaveWrap?.offsetHeight || 42) * 1.2,
 					waveColor: '#B1B42E',
 					progressColor: 'rgb(0,0,0)',
-					normalize: false,
-					barWidth: 4, barGap: 6, barHeight: 2.5,
+					normalize: true,
+					barWidth: 4, barGap: 2, barRadius: 2, barHeight: 2.5,
+					minPxPerSec: 100,
 					url
 				});
 				wsPlayback.on('timeupdate', (t) => setTimerSec(t));
@@ -2209,7 +2090,7 @@
 		let hooksBound = false;
 		let unresolvedWarnLogged = false;
 
-		ddg.utils.on('ddg:modal-closed', (e) => {
+		document.addEventListener('ddg:modal-closed', (e) => {
 			if (e.detail?.id === 'story') lastKey = null;
 		});
 
@@ -2297,7 +2178,7 @@
 		}
 
 		// capture early story-opened (can fire before list exists)
-		ddg.utils.on('ddg:story-opened', (e) => {
+		document.addEventListener('ddg:story-opened', (e) => {
 			pendingUrl = e.detail?.url || window.location.href;
 			tryResolve(pendingUrl);
 		});
@@ -2337,7 +2218,7 @@
 		}
 
 		function buildAll(item) {
-			const values = ddg.fs.valuesForItemSafe(item);
+			const values = ddg.fs.itemsValues(item);
 
 			// Always clear targets first; if no usable values, leave empty
 			const parents = Array.from(document.querySelectorAll(selectors.parent));
@@ -2463,7 +2344,7 @@
 			});
 		}
 
-		ddg.utils.on('ddg:current-item-changed', (e) => {
+		document.addEventListener('ddg:current-item-changed', (e) => {
 			const item = e.detail?.item;
 			if (!item) return;
 			buildAll(item);
@@ -2473,7 +2354,7 @@
 			const rebuild = () => {
 				if (ddg.currentItem?.item) buildAll(ddg.currentItem.item);
 			};
-			ddg.utils.on('ddg:list-ready', rebuild);
+			document.addEventListener('ddg:list-ready', rebuild);
 			if (typeof list.addHook === 'function') list.addHook('afterRender', rebuild);
 		});
 	}
