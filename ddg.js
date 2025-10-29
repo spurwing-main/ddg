@@ -623,12 +623,11 @@
 		if (ddg.shareInitialized) return;
 		ddg.shareInitialized = true;
 
-		const selectors = { btn: '[data-share]' };
-		const shareWebhookUrl = 'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
-		const dailyShareKey = 'share_done_date';
+		const sel = { btn: '[data-share]' };
+		const webhookUrl = 'https://hooks.airtable.com/workflows/v1/genericWebhook/appXsCnokfNjxOjon/wfl6j7YJx5joE3Fue/wtre1W0EEjNZZw0V9';
+		const dailyKey = 'share_done_date';
 
-
-		const shareUrlMap = {
+		const urlFor = {
 			clipboard: ({ url }) => url,
 			x: ({ url, text }) => `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
 			facebook: ({ url }) => `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}`,
@@ -639,157 +638,155 @@
 			telegram: ({ url, text }) => `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`
 		};
 
-
-		// Inline confetti utility (scoped to share only)
-		let confettiInstance = null;
-		let confettiCanvas = null;
-		const ensureConfettiCanvas = () => {
-			if (confettiCanvas) return confettiCanvas;
-			const c = document.createElement('canvas');
-			c.id = 'ddg-confetti-canvas';
-			Object.assign(c.style, {
-				position: 'fixed',
-				inset: 0,
-				width: '100%',
-				height: '100%',
-				zIndex: 999999,
-				pointerEvents: 'none',
-			});
-			document.body.appendChild(c);
-			confettiCanvas = c;
-			return c;
+		// ---------- tiny helpers ----------
+		const toNum = (v) => {
+			const n = parseInt(String(v ?? '').trim(), 10);
+			return Number.isFinite(n) ? n : 0;
 		};
 
-		const triggerConfetti = (options = {}) => {
+		const buildDest = (platform, url, text) =>
+			(urlFor[platform] ? urlFor[platform]({ url, text }) : url);
+
+		const navigateStub = (winRef, url) => {
 			try {
-				if (!window.JSConfetti) {
-					(ddg.utils?.warn || console.warn)('Confetti library missing');
+				if (winRef && !winRef.closed) {
+					winRef.opener = null;
+					winRef.location.href = url;
 					return;
 				}
-				if (!confettiInstance) confettiInstance = new JSConfetti({ canvas: ensureConfettiCanvas() });
-				confettiInstance.addConfetti({
-					emojis: ['🎉', '✨', '💥'],
-					confettiRadius: 6,
-					confettiNumber: 150,
-					...options,
-				});
-			} catch (err) {
-				(ddg.utils?.warn || console.warn)('Confetti failed', err);
+			} catch { /* noop */ }
+			window.open(url, '_blank') || (location.href = url);
+		};
+
+		// ---------- confetti (uses utils + always returns a Promise) ----------
+		let confettiInstance, confettiCanvas;
+		const ensureCanvas = () => {
+			if (confettiCanvas) return confettiCanvas;
+			const c = document.createElement('canvas');
+			Object.assign(c.style, {
+				position: 'fixed', inset: 0, width: '100%', height: '100%',
+				zIndex: 999999, pointerEvents: 'none'
+			});
+			c.id = 'ddg-confetti-canvas';
+			document.body.appendChild(c);
+			return (confettiCanvas = c);
+		};
+
+		const confetti = (opts = {}) => {
+			try {
+				if (!window.JSConfetti) {
+					ddg.utils.warn('Confetti library missing');
+					return Promise.resolve();
+				}
+				if (!confettiInstance) confettiInstance = new JSConfetti({ canvas: ensureCanvas() });
+				// fun but simple: shuffle emojis so it varies
+				const emojis = ddg.utils.shuffle(['🎉', '✨', '💥', '🎊']).slice(0, 3);
+				ddg.utils.emit('ddg:share:confetti:start');
+				return confettiInstance.addConfetti({
+					emojis, confettiRadius: 6, confettiNumber: 150, ...opts
+				}).finally(() => ddg.utils.emit('ddg:share:confetti:end'));
+			} catch (e) {
+				ddg.utils.warn('Confetti failed', e);
+				return Promise.resolve();
 			}
 		};
 
-		const updateCountdowns = () => {
-			let anyHitZero = false;
+		// ---------- countdown (returns true when any hits zero) ----------
+		const tickCountdowns = () => {
+			let hitZero = false;
 			document.querySelectorAll('[data-share-countdown]').forEach((node) => {
-				const attrVal = node.getAttribute('data-share-countdown');
-				let current = Number.parseInt(attrVal ?? '', 10);
-				if (!Number.isFinite(current)) {
-					// Fallback to visible text/value if attribute was not set
-					const raw = (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)
-						? node.value
-						: node.textContent;
-					current = Number.parseInt(String(raw || '').trim(), 10);
-				}
-				if (!Number.isFinite(current)) current = 0;
-
-				const next = Math.max(0, current - 1);
-				if (current > 0 && next === 0) anyHitZero = true;
+				const cur = toNum(
+					node.getAttribute('data-share-countdown') ||
+					(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node.value : node.textContent)
+				);
+				const next = Math.max(0, cur - 1);
+				if (cur > 0 && next === 0) hitZero = true;
 
 				node.setAttribute('data-share-countdown', String(next));
 				if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.value = String(next);
 				else node.textContent = String(next);
 			});
-			if (anyHitZero) triggerConfetti();
+			return hitZero;
 		};
 
-		const clearShareStateTimer = (el) => {
-			if (!el) return;
-			if (el.__shareStateTimer) {
-				clearTimeout(el.__shareStateTimer);
-				el.__shareStateTimer = null;
-			}
+		// ---------- webhook (unchanged behavior, clearer shape) ----------
+		const postDailyWebhookIfNeeded = (platform) => {
+			const today = new Date().toISOString().slice(0, 10);
+			const cookieRow = document.cookie.split('; ').find(r => r.startsWith(dailyKey + '=')) || '';
+			const cookieVal = cookieRow.split('=')[1] || null;
+			const done = [localStorage.getItem(dailyKey), sessionStorage.getItem(dailyKey), cookieVal].includes(today);
+			if (done) return;
+
+			const form = document.createElement('form');
+			const iframe = document.createElement('iframe');
+			const name = 'wf_' + Math.random().toString(36).slice(2);
+			iframe.name = name; iframe.style.display = 'none';
+			form.target = name; form.method = 'POST'; form.action = webhookUrl; form.style.display = 'none';
+			[['platform', platform], ['date', today]].forEach(([k, v]) => {
+				const input = document.createElement('input');
+				input.type = 'hidden'; input.name = k; input.value = v;
+				form.appendChild(input);
+			});
+			document.body.append(iframe, form);
+			form.submit();
+
+			const exp = new Date(); exp.setHours(24, 0, 0, 0);
+			localStorage.setItem(dailyKey, today);
+			sessionStorage.setItem(dailyKey, today);
+			document.cookie = `${dailyKey}=${today}; expires=${exp.toUTCString()}; path=/; SameSite=Lax`;
+
+			// cleanup without blocking
+			(async () => { await ddg.utils.wait(800); form.remove(); iframe.remove(); })();
 		};
 
-		const onShareClick = async (event) => {
-			const el = event.target.closest(selectors.btn);
+		// ---------- click handler ----------
+		const onShareClick = async (e) => {
+			const el = e.target.closest(sel.btn);
 			if (!el) return;
-			if (event.button && event.button !== 0) return;
-			event.preventDefault();
+			if (e.button && e.button !== 0) return; // left-click only
+			e.preventDefault();
+
 			if (el.shareLock) return;
 			el.shareLock = true;
-			setTimeout(() => { el.shareLock = false; }, 400);
+			(async () => { await ddg.utils.wait(350); el.shareLock = false; })();
 
 			const platform = (el.getAttribute('data-share') || '').toLowerCase();
 			const shareUrl = el.getAttribute('data-share-url') || window.location.href;
 			const shareText = el.getAttribute('data-share-text') || document.title;
-			const resolver = shareUrlMap[platform];
-			const destination = resolver ? resolver({ url: shareUrl, text: shareText }) : shareUrl;
+			const destination = buildDest(platform, shareUrl, shareText);
 
-			const realClick = event.isTrusted && document.hasFocus();
-			updateCountdowns();
+			const realClick = e.isTrusted && document.hasFocus();
 
-			if (realClick) {
-				const today = new Date().toISOString().slice(0, 10);
-				const cookieRow = document.cookie.split('; ').find(r => r.startsWith(dailyShareKey + '=')) || '';
-				const cookieVal = cookieRow.split('=')[1] || null;
-				const done = [localStorage.getItem(dailyShareKey), sessionStorage.getItem(dailyShareKey), cookieVal].includes(today);
-				if (!done) {
-					const form = document.createElement('form');
-					const iframe = document.createElement('iframe');
-					const frameName = 'wf_' + Math.random().toString(36).slice(2);
-					iframe.name = frameName;
-					iframe.style.display = 'none';
-					form.target = frameName;
-					form.method = 'POST';
-					form.action = shareWebhookUrl;
-					form.style.display = 'none';
-					[['platform', platform], ['date', today]].forEach(([name, value]) => {
-						const input = document.createElement('input');
-						input.type = 'hidden';
-						input.name = name;
-						input.value = value;
-						form.appendChild(input);
-					});
-					document.body.append(iframe, form);
-					form.submit();
-					const exp = new Date();
-					exp.setHours(24, 0, 0, 0);
-					localStorage.setItem(dailyShareKey, today);
-					sessionStorage.setItem(dailyShareKey, today);
-					document.cookie = `${dailyShareKey}=${today}; expires=${exp.toUTCString()}; path=/; SameSite=Lax`;
-					setTimeout(() => { form.remove(); iframe.remove(); }, 800);
-				}
-			}
-
+			// clipboard path is quick feedback, no tab needed
 			if (platform === 'clipboard') {
 				try {
 					await navigator.clipboard.writeText(destination);
 					el.setAttribute('data-share-state', 'copied');
-					clearShareStateTimer(el);
-					el.__shareStateTimer = setTimeout(() => {
-						el.removeAttribute('data-share-state');
-						el.__shareStateTimer = null;
-					}, 2000);
+					ddg.utils.emit('ddg:share:copied', { platform });
 				} catch {
 					el.setAttribute('data-share-state', 'error');
-					clearShareStateTimer(el);
-					el.__shareStateTimer = setTimeout(() => {
-						el.removeAttribute('data-share-state');
-						el.__shareStateTimer = null;
-					}, 2000);
 				}
+				(async () => { await ddg.utils.wait(2000); el.removeAttribute('data-share-state'); })();
 				return;
 			}
 
-			const w = window.open('about:blank', '_blank');
-			if (w) {
-				w.opener = null;
-				w.location.href = destination;
-			}
+			// open stub immediately for popup blockers
+			const stub = window.open('about:blank', '_blank');
+
+			// countdown + optional confetti
+			const shouldConfetti = tickCountdowns();
+			const confettiDone = shouldConfetti ? confetti() : Promise.resolve();
+
+			// fire webhook once/day
+			if (realClick) postDailyWebhookIfNeeded(platform);
+
+			ddg.utils.emit('ddg:share:start', { platform, destination });
+			await confettiDone; // wait if any confetti
+			navigateStub(stub, destination);
+			ddg.utils.emit('ddg:share:end', { platform, destination });
 		};
 
 		document.addEventListener('click', onShareClick, true);
-
 	}
 
 	function modals() {
@@ -1408,12 +1405,16 @@
 		// Bind global listeners once (even if no marquees yet)
 		if (!ddg.marqueeGlobalBound) {
 			ddg.marqueeGlobalBound = true;
+
 			document.addEventListener('ddg:modal-opened', e => {
 				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
 				if (modal) marquee(modal);
+
 			});
+
 			document.addEventListener('ddg:modal-closed', e => {
 				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
+
 				if (!modal) return;
 				modal.querySelectorAll('[data-marquee-init]').forEach(el => {
 					el.__ddgMarqueeCleanup?.();
@@ -1444,7 +1445,11 @@
 				document.addEventListener('DOMContentLoaded', attachDomObserver, { once: true });
 			} else {
 				attachDomObserver();
+
+
 			}
+
+
 		}
 
 		const firstMarquee = root?.querySelector?.('[data-marquee]');
@@ -1475,6 +1480,7 @@
 				repeat: -1,
 				paused: true,
 				overwrite: 'auto'
+
 			});
 			tween.timeScale(0);
 			gsap.to(tween, { timeScale: 1, duration: accelTime, ease: 'power1.out', overwrite: 'auto' });
@@ -1544,6 +1550,7 @@
 					requestAnimationFrame(() => build(el));
 				}
 				return;
+
 			}
 
 			// Determine desired number of copies; ensure even for seamless half-swap
@@ -1566,6 +1573,7 @@
 					while (toRemove-- > 0 && inner.lastChild) inner.removeChild(inner.lastChild);
 				}
 				el.__ddgMarqueeCopies = targetCopies;
+
 			}
 
 			// Compute animation metrics (distance and duration)
@@ -1640,8 +1648,6 @@
 				els.forEach(el => el.__ddgMarqueeReady?.());
 			} else requestAnimationFrame(check);
 		});
-
-
 	}
 
 	function storiesAudioPlayer() {
