@@ -544,12 +544,12 @@
 			return;
 		}
 
-		const MOBILE_BP = 767;
-		const TAPE_SPEED = 5000;
+		const mobileBp = 767;
+		const tapeSpeed = 5000;
 
 		let split = null;
 
-		const isMobile = () => window.innerWidth <= MOBILE_BP;
+		const isMobile = () => window.innerWidth <= mobileBp;
 
 		const revertSplit = () => {
 			if (!split) return;
@@ -565,35 +565,50 @@
 			split = new SplitText(items, { type: 'lines', linesClass: 'home-list_split-line' });
 
 			split.lines.forEach(line => {
-				const dur = gsap.utils.clamp(0.3, 2, (line.offsetWidth || 0) / TAPE_SPEED);
+				const dur = gsap.utils.clamp(0.3, 2, (line.offsetWidth || 0) / tapeSpeed);
 				line.style.setProperty('--tape-dur', `${dur}s`);
 			});
 		};
 
+		// flags wrappers that contain a [data-coming-soon] descendant
+		const flagComingSoon = () => {
+			const wraps = list.querySelectorAll('.home-list_item-wrap');
+			wraps.forEach(wrap => {
+				const hasMarker = !!wrap.querySelector('[data-coming-soon]');
+				if (hasMarker) {
+					wrap.setAttribute('data-coming-soon', 'true');
+				} else {
+					wrap.removeAttribute('data-coming-soon');
+				}
+			});
+		};
+
 		const update = () => {
+			try { flagComingSoon(); } catch (e) {
+				(ddg?.utils?.warn || console.warn)('homelistSplit: flagComingSoon failed', e);
+			}
+
 			revertSplit();
 			if (isMobile()) return;
+
 			try { applySplit(); } catch (e) {
 				(ddg?.utils?.warn || console.warn)('homelistSplit: split failed', e);
 			}
 		};
 
-		const onResize = ddg.utils.debounce(update, 150);
+		const onResize = ddg?.utils?.debounce ? ddg.utils.debounce(update, 150) : update;
 
 		const init = async () => {
-			await (ddg.utils.fontsReady?.() ?? Promise.resolve());
+			await (ddg?.utils?.fontsReady?.() ?? Promise.resolve());
 			update();
 
-			// bind native resize
 			window.addEventListener('resize', onResize);
 
-			// hook fin-sweet list renders
-			ddg.fs?.whenReady?.().then(listInstance => {
+			ddg?.fs?.whenReady?.().then(listInstance => {
 				if (typeof listInstance?.addHook === 'function') {
 					listInstance.addHook('afterRender', update);
 				}
 			});
-
 		};
 
 		init();
