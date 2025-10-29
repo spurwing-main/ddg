@@ -759,10 +759,19 @@
 
 			// clipboard path is quick feedback, no tab needed
 			if (platform === 'clipboard') {
+				// treat clipboard like a share: emit start, copy, tick countdown, maybe confetti, emit end
+				ddg.utils.emit('ddg:share:start', { platform, destination });
 				try {
 					await navigator.clipboard.writeText(destination);
 					el.setAttribute('data-share-state', 'copied');
 					ddg.utils.emit('ddg:share:copied', { platform });
+					// countdown + optional confetti for clipboard too
+					const shouldConfetti = tickCountdowns();
+					if (shouldConfetti) {
+						await confetti();
+					}
+					if (realClick) postDailyWebhookIfNeeded(platform);
+					ddg.utils.emit('ddg:share:end', { platform, destination });
 				} catch {
 					el.setAttribute('data-share-state', 'error');
 				}
@@ -1554,7 +1563,8 @@
 			}
 
 			// Determine desired number of copies; ensure even for seamless half-swap
-			let minTotal = Math.max(width * 2, baseWidth * 2);
+			// Increase duplication to reduce chances of visible gaps during initial play
+			let minTotal = Math.max(width * 3, baseWidth * 3);
 			let targetCopies = Math.ceil(minTotal / Math.max(1, baseWidth));
 			if (targetCopies % 2 !== 0) targetCopies += 1;
 			if (targetCopies < 2) targetCopies = 2;
