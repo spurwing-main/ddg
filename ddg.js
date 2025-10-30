@@ -427,7 +427,6 @@
 			currentItem();
 			relatedFilters();
 			ajaxStories();
-			marquee();
 			homelistSplit();
 			outreach();
 			share();
@@ -1123,6 +1122,13 @@
 			});
 		});
 
+		document.addEventListener('ddg:modal-opened', () => {
+			window.Marquee.rescan(document);
+		});
+		document.addEventListener('ddg:modal-closed', () => {
+			window.Marquee.rescan(document);
+		});
+
 		ddg.utils.emit('ddg:modals-ready');
 	}
 
@@ -1210,7 +1216,6 @@
 					ddg.fs.whenReady()
 						.then(() => dispatchStoryOpened(url))
 						.catch(() => dispatchStoryOpened(url))
-						.finally(() => marquee?.($embed[0]));
 
 				}
 			});
@@ -1408,256 +1413,6 @@
 
 			await state.scheduleApply(values);
 		}, true);
-	}
-
-	function marquee(root = document) {
-		// Bind global listeners once (even if no marquees yet)
-		if (!ddg.marqueeGlobalBound) {
-			ddg.marqueeGlobalBound = true;
-
-			document.addEventListener('ddg:modal-opened', e => {
-				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
-				if (modal) marquee(modal);
-
-			});
-
-			document.addEventListener('ddg:modal-closed', e => {
-				const modal = document.querySelector(`[data-modal-el="${e.detail?.id}"]`);
-
-				if (!modal) return;
-				modal.querySelectorAll('[data-marquee-init]').forEach(el => {
-					el.__ddgMarqueeCleanup?.();
-					el.removeAttribute('data-marquee-init');
-				});
-			});
-			// Cleanup for non-modal removals to prevent stray listeners
-			const attachDomObserver = () => {
-				if (ddg.marqueeDomObserver) return;
-				if (typeof MutationObserver !== 'function') return;
-				ddg.marqueeDomObserver = new MutationObserver(muts => {
-					for (const m of muts) {
-						m.removedNodes && m.removedNodes.forEach(node => {
-							if (!(node instanceof Element)) return;
-							const targets = node.matches?.('[data-marquee-init]') ? [node] : [];
-							node.querySelectorAll?.('[data-marquee-init]').forEach(el => targets.push(el));
-							targets.forEach(el => {
-								el.__ddgMarqueeCleanup?.();
-								el.removeAttribute('data-marquee-init');
-							});
-						});
-					}
-				});
-				const domRoot = document.body || document.documentElement;
-				if (domRoot) ddg.marqueeDomObserver.observe(domRoot, { childList: true, subtree: true });
-			};
-			if (document.readyState === 'loading') {
-				document.addEventListener('DOMContentLoaded', attachDomObserver, { once: true });
-			} else {
-				attachDomObserver();
-
-
-			}
-
-
-		}
-
-		const firstMarquee = root?.querySelector?.('[data-marquee]');
-		if (!firstMarquee) return;
-
-		const els = root.querySelectorAll('[data-marquee]:not([data-marquee-init])');
-		if (!els.length) return;
-
-		const MIN_W = 320;
-		const MAX_W = 1440;
-		const vwPerSec = 12; // viewport-width units per second (fixed for all marquees)
-		const fixedPxPerSec = 100; // legacy fixed speed (px/s) baseline
-		const accelTime = 1.2; // s to reach full speed
-
-		function startTween(el) {
-			const { inner, distance, duration } = el.__ddgMarqueeConfig || {};
-			if (!inner) return;
-			if (typeof window.gsap === 'undefined') { // retry when GSAP becomes available
-				setTimeout(() => startTween(el), 100);
-				return;
-			}
-			el.__ddgMarqueeTween?.kill();
-
-			const tween = gsap.to(inner, {
-				x: -distance,
-				duration,
-				ease: 'none',
-				repeat: -1,
-				paused: true,
-				overwrite: 'auto'
-
-			});
-			tween.timeScale(0);
-			gsap.to(tween, { timeScale: 1, duration: accelTime, ease: 'power1.out', overwrite: 'auto' });
-			tween.play();
-			el.__ddgMarqueeTween = tween;
-		}
-
-		function build(el) {
-			const inner = el.querySelector('.marquee-inner');
-			if (!inner || !el.offsetParent) return;
-
-			const width = el.offsetWidth || 0;
-			if (!width) return;
-
-			// Capture original content once, then re-clone only as needed.
-			if (!el.__ddgMarqueeOriginal) {
-				el.__ddgMarqueeOriginal = Array.from(inner.children).map(n => n.cloneNode(true));
-				// Reset to one set for base measurements
-				inner.textContent = '';
-				el.__ddgMarqueeOriginal.forEach(n => inner.appendChild(n.cloneNode(true)));
-				el.__ddgMarqueeBaseWidth = inner.scrollWidth || 0;
-				el.__ddgMarqueeCopies = 1;
-			}
-
-			const baseWidth = el.__ddgMarqueeBaseWidth || 0;
-			// Try a fresh measure before deferring; if it now has size, store and proceed
-			let measuredBase = inner.scrollWidth || 0;
-			if (!baseWidth && measuredBase > 0) {
-				el.__ddgMarqueeBaseWidth = measuredBase;
-			} else if (!baseWidth) {
-				// Defer until assets (images/fonts) have dimensions
-				if (!el.__ddgMarqueeWaitAssets) {
-					el.__ddgMarqueeWaitAssets = true;
-					const imgs = Array.from(inner.querySelectorAll('img')).filter(img => !img.complete);
-					const waits = imgs.map(img => (img.decode ? img.decode().catch(() => { }) : new Promise(res => img.addEventListener('load', res, { once: true }))));
-					// Optionally include fonts readiness if available
-					try {
-						if (document.fonts && document.fonts.ready) {
-							waits.push(document.fonts.ready.catch(() => { }));
-						}
-					} catch (_) { }
-
-					if (waits.length === 0) {
-						// Nothing to wait for; yield a frame, re-measure, then rebuild
-						el.__ddgMarqueeWaitAssets = false;
-						requestAnimationFrame(() => {
-							const bw = inner.scrollWidth || 0;
-							if (bw) el.__ddgMarqueeBaseWidth = bw;
-							build(el);
-						});
-					} else {
-						Promise.race([
-							Promise.all(waits).catch(() => { }),
-							new Promise(res => setTimeout(res, 1000))
-						]).then(() => {
-							el.__ddgMarqueeWaitAssets = false;
-							// Re-measure on next frame to avoid tight microtask loops
-							requestAnimationFrame(() => {
-								const bw = inner.scrollWidth || 0;
-								if (bw) el.__ddgMarqueeBaseWidth = bw;
-								build(el);
-							});
-						});
-					}
-				} else {
-					// As a fallback, try again on next frame
-					requestAnimationFrame(() => build(el));
-				}
-				return;
-
-			}
-
-			// Determine desired number of copies; ensure even for seamless half-swap
-			// Increase duplication to reduce chances of visible gaps during initial play
-			let minTotal = Math.max(width * 3, baseWidth * 3);
-			let targetCopies = Math.ceil(minTotal / Math.max(1, baseWidth));
-			if (targetCopies % 2 !== 0) targetCopies += 1;
-			if (targetCopies < 2) targetCopies = 2;
-
-			const currentCopies = el.__ddgMarqueeCopies || 1;
-			if (currentCopies !== targetCopies) {
-				if (currentCopies < targetCopies) {
-					const addSets = targetCopies - currentCopies;
-					for (let k = 0; k < addSets; k++) {
-						el.__ddgMarqueeOriginal.forEach(n => inner.appendChild(n.cloneNode(true)));
-					}
-				} else {
-					const removeSets = currentCopies - targetCopies;
-					const perSet = el.__ddgMarqueeOriginal.length;
-					let toRemove = removeSets * perSet;
-					while (toRemove-- > 0 && inner.lastChild) inner.removeChild(inner.lastChild);
-				}
-				el.__ddgMarqueeCopies = targetCopies;
-
-			}
-
-			// Compute animation metrics (distance and duration)
-			const totalWidth = inner.scrollWidth;
-			const distance = totalWidth / 2;
-			const effW = Math.min(MAX_W, Math.max(MIN_W, window.innerWidth));
-			const speedPxPerSec = (vwPerSec / 100) * effW;
-			const dynamicDuration = distance / Math.max(1, speedPxPerSec);
-			const fixedDuration = distance / fixedPxPerSec;
-			const duration = Math.max(fixedDuration, dynamicDuration);
-
-			gsap.set(inner, { x: 0 });
-			el.__ddgMarqueeConfig = { inner, distance, duration, copies: el.__ddgMarqueeCopies, baseWidth };
-			el.__ddgMarqueeLastWidth = width;
-			startTween(el);
-		}
-
-		els.forEach(el => {
-			el.setAttribute('data-marquee-init', '');
-			el.querySelector('.marquee-inner')?.remove();
-
-			const inner = document.createElement('div');
-			inner.className = 'marquee-inner';
-			while (el.firstChild) inner.appendChild(el.firstChild);
-			el.appendChild(inner);
-
-			Object.assign(el.style, { overflow: 'hidden' });
-			Object.assign(inner.style, {
-				display: 'flex',
-				gap: getComputedStyle(el).gap || '0px',
-				whiteSpace: 'nowrap',
-				willChange: 'transform'
-			});
-
-			const unsubResize = ddg.resizeEvent.on(() => build(el));
-			el.__ddgMarqueeCleanup = () => {
-				el.__ddgMarqueeTween?.kill();
-				if (typeof unsubResize === 'function') unsubResize();
-				if (el.__ddgMarqueeIO && typeof el.__ddgMarqueeIO.disconnect === 'function') el.__ddgMarqueeIO.disconnect();
-				delete el.__ddgMarqueeTween;
-				delete el.__ddgMarqueeConfig;
-				delete el.__ddgMarqueeOriginal;
-				delete el.__ddgMarqueeBaseWidth;
-				delete el.__ddgMarqueeCopies;
-				delete el.__ddgMarqueeLastWidth;
-			};
-
-			// Defer building until element is visible to avoid wasted work
-			el.__ddgMarqueeReady = () => {
-				if (el.__ddgMarqueeIO) el.__ddgMarqueeIO.disconnect();
-				const observer = new IntersectionObserver((entries, obs) => {
-					for (const entry of entries) {
-						if (entry.isIntersecting) {
-							build(el);
-							// Only unobserve once a config exists (successful build)
-							if (el.__ddgMarqueeConfig) obs.unobserve(el);
-							break;
-						}
-					}
-				}, { root: null, rootMargin: '100px', threshold: 0 });
-				el.__ddgMarqueeIO = observer;
-				observer.observe(el);
-			};
-		});
-
-		let stable = 0, last = performance.now();
-		requestAnimationFrame(function check(now) {
-			const fps = 1000 / (now - last);
-			last = now;
-			stable = fps > 20 ? stable + 1 : 0;
-			if (stable > 10) {
-				els.forEach(el => el.__ddgMarqueeReady?.());
-			} else requestAnimationFrame(check);
-		});
 	}
 
 	function storiesAudioPlayer() {
