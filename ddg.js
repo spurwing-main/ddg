@@ -2143,12 +2143,13 @@
 		const stickyButton = document.querySelector('.join_sticky');
 		const staticButton = document.querySelector('.join-cta_btn .button');
 
-		gsap.set('.join_sticky', { autoAlpha: 1 });
+		// Initially: show sticky, hide static
+		gsap.set(stickyButton, { autoAlpha: 1 });
+		gsap.set(staticButton, { autoAlpha: 0 });
 
 		ScrollTrigger.create({
 			trigger: staticButton,
 			start: () => {
-				// Calculate 1rem dynamically
 				const remInPx = parseFloat(getComputedStyle(document.documentElement).fontSize);
 				return `bottom bottom-=${remInPx}px`;
 			},
@@ -2156,10 +2157,33 @@
 				const remInPx = parseFloat(getComputedStyle(document.documentElement).fontSize);
 				return `bottom bottom-=${remInPx}px`;
 			},
-			onEnter: () => gsap.set(stickyButton, { autoAlpha: 0 }),
-			onLeaveBack: () => gsap.set(stickyButton, { autoAlpha: 1 }),
-			invalidateOnRefresh: true,
-			markers: false
+			onEnter: () => {
+				// Animate swap with scale
+				gsap.to(stickyButton, {
+					autoAlpha: 0,
+					duration: 0,
+					ease: "none"
+				});
+				gsap.to(staticButton, {
+					autoAlpha: 1,
+					duration: 0,
+					ease: "none"
+				});
+			},
+			onLeaveBack: () => {
+				// Animate reverse swap with scale
+				gsap.to(stickyButton, {
+					autoAlpha: 1,
+					duration: 0,
+					ease: "none"
+				});
+				gsap.to(staticButton, {
+					autoAlpha: 0,
+					duration: 0,
+					ease: "none"
+				});
+			},
+			invalidateOnRefresh: true
 		});
 	}
 
