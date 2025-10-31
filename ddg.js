@@ -336,77 +336,34 @@
 			});
 		}
 
-		async function applyCheckboxFilters(valuesByField, opts = {}) {
-			const {
-				formSel = '[fs-list-element="filters"]',
-				merge = false,
-			} = opts;
-
+		async function applyCheckboxFilters(valuesByField) {
 			const list = await whenReady();
 
 			// Build a map of what values we want per field
 			const targetValuesByField = {};
 			for (const [field, vals = []] of Object.entries(valuesByField || {})) {
-				targetValuesByField[field] = new Set((vals || []).map(String));
+				const values = Array.from(new Set((vals || []).map(String))).filter(Boolean);
+				if (values.length === 0) continue;
+				targetValuesByField[field] = values;
 			}
 
-			// Get or create groups - but PRESERVE existing group references
-			const existingGroups = list.filters.value.groups || [];
-
-			// Update existing groups in place
-			for (const [field, targetValues] of Object.entries(targetValuesByField)) {
-				// Find existing group for this field
-				let group = existingGroups.find(g =>
-					g.conditions.some(c => c.fieldKey === field)
-				);
-
-				// If no group exists, create one
-				if (!group) {
-					group = {
-						id: `auto-${field}`,
-						conditionsMatch: 'or',
-						conditions: []
-					};
-					existingGroups.push(group);
-				}
-
-				// Find or create the condition for this field
-				let condition = group.conditions.find(c =>
-					c.fieldKey === field && (c.op === 'equal' || !c.op)
-				);
-
-				if (!condition) {
-					// Create new condition
-					condition = {
-						id: `${field}_equal`,  // ← Use consistent ID format
+			// Clear ALL existing filters by creating a fresh filters object
+			list.filters.value = {
+				groupsMatch: 'and',
+				groups: [{
+					id: '0',
+					conditionsMatch: 'and',
+					conditions: Object.entries(targetValuesByField).map(([field, values]) => ({
+						id: `${field}_equal`,
 						type: 'checkbox',
 						fieldKey: field,
-						value: [],
+						value: values,
 						op: 'equal',
 						interacted: true,
-					};
-					group.conditions.push(condition);
-				}
-
-				// Update the condition's value IN PLACE (critical!)
-				condition.value = Array.from(targetValues);
-				condition.interacted = true;
-			}
-
-			// If not merging, remove groups for fields not in targetValuesByField
-			if (!merge) {
-				const fieldsToKeep = new Set(Object.keys(targetValuesByField));
-
-				// Remove groups that don't match any target fields
-				for (let i = existingGroups.length - 1; i >= 0; i--) {
-					const group = existingGroups[i];
-					const hasMatchingField = group.conditions.some(c => fieldsToKeep.has(c.fieldKey));
-
-					if (!hasMatchingField) {
-						existingGroups.splice(i, 1);
-					}
-				}
-			}
+						showTag: true
+					}))
+				}]
+			};
 
 			// Trigger the filter lifecycle
 			await list.triggerHook('filter');
@@ -1360,7 +1317,7 @@
 					const toApply = pendingValues;
 					pendingValues = null;
 					try {
-						await ddg.fs.applyCheckboxFilters(toApply, { merge: false });
+						await ddg.fs.applyCheckboxFilters(toApply);
 					} finally {
 						const pending = resolvers.slice();
 						resolvers = [];
@@ -2126,7 +2083,7 @@
 				e.preventDefault();
 				const values = collectSelections(parent);
 				if (!Object.keys(values).length) { return; }
-				await ddg.fs.applyCheckboxFilters(values, { merge: true });
+				await ddg.fs.applyCheckboxFilters(values);
 			});
 		}
 
