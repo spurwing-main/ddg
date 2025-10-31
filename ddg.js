@@ -389,6 +389,7 @@
 			share();
 			randomFilters();
 			storiesAudioPlayer();
+			joinButtons();
 		});
 	}
 
@@ -853,7 +854,7 @@
 				const el = $anim[0];
 				if (!el) return;
 				['transform', 'translate', 'rotate', 'scale', 'opacity', 'visibility', 'y', 'x'].forEach((prop) => {
-					try { el.style.removeProperty(prop); } catch { try { el.style[prop] = ''; } catch {} }
+					try { el.style.removeProperty(prop); } catch { try { el.style[prop] = ''; } catch { } }
 				});
 				if (el.getAttribute('style') && el.getAttribute('style').trim() === '') {
 					el.removeAttribute('style');
@@ -895,7 +896,7 @@
 			const resetScrollTop = () => {
 				const container = resolveScrollContainer();
 				if (!container) return;
-				try { container.scrollTop = 0; } catch {}
+				try { container.scrollTop = 0; } catch { }
 			};
 
 			const scrollToAnchor = (hash) => {
@@ -971,11 +972,11 @@
 						afterOpen && afterOpen();
 					}
 				})
-					.to($bg[0], { 
-						autoAlpha: 1, 
-						duration: 0.12, 
-						ease: 'power1.out', 
-						overwrite: 'auto' 
+					.to($bg[0], {
+						autoAlpha: 1,
+						duration: 0.12,
+						ease: 'power1.out',
+						overwrite: 'auto'
 					}, 0)
 					.fromTo($anim[0], { y: '25%' }, { y: '0%', duration: 0.32, ease: 'power2.out', overwrite: 'auto' }, 0)
 					.fromTo($anim[0], { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.16, ease: 'power1.out', overwrite: 'auto' }, 0);
@@ -2135,6 +2136,30 @@
 			};
 			document.addEventListener('ddg:list-ready', rebuild);
 			if (typeof list.addHook === 'function') list.addHook('afterRender', rebuild);
+		});
+	}
+
+	function joinButtons() {
+		const stickyButton = document.querySelector('.join_sticky');
+		const staticButton = document.querySelector('.join-cta_btn .button');
+
+		gsap.set('.join_sticky', { autoAlpha: 1 });
+
+		ScrollTrigger.create({
+			trigger: staticButton,
+			start: () => {
+				// Calculate 1rem dynamically
+				const remInPx = parseFloat(getComputedStyle(document.documentElement).fontSize);
+				return `bottom bottom-=${remInPx}px`;
+			},
+			end: () => {
+				const remInPx = parseFloat(getComputedStyle(document.documentElement).fontSize);
+				return `bottom bottom-=${remInPx}px`;
+			},
+			onEnter: () => gsap.set(stickyButton, { autoAlpha: 0 }),
+			onLeaveBack: () => gsap.set(stickyButton, { autoAlpha: 1 }),
+			invalidateOnRefresh: true,
+			markers: false
 		});
 	}
 
