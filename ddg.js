@@ -520,9 +520,27 @@
 
 			split = new SplitText(items, { type: 'lines', linesClass: 'home-list_split-line' });
 
+			// helper to measure 1ch in pixels for a given element (inherits font)
+			const measureChPx = (el) => {
+				try {
+					const probe = document.createElement('span');
+					probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;margin:0;padding:0;border:0;width:1ch;height:0;font:inherit;white-space:normal;';
+					el.appendChild(probe);
+					const w = probe.getBoundingClientRect().width || 0;
+					probe.remove();
+					return w || 1; // avoid divide-by-zero
+				} catch { return 1; }
+			};
+
 			split.lines.forEach(line => {
 				const dur = gsap.utils.clamp(0.3, 2, (line.offsetWidth || 0) / tapeSpeed);
 				line.style.setProperty('--tape-dur', `${dur}s`);
+
+				// set a per-line CSS var with its width expressed in `ch`
+				const chPx = measureChPx(line);
+				const widthPx = line.getBoundingClientRect().width || 0;
+				const chUnits = chPx ? (widthPx / chPx) : 0;
+				line.style.setProperty('--line-ch', `${chUnits.toFixed(2)}ch`);
 			});
 		};
 
@@ -834,8 +852,8 @@
 			const clearInlineTransforms = () => {
 				const el = $anim[0];
 				if (!el) return;
-				['transform', 'translate', 'rotate', 'scale', 'opacity', 'visibility'].forEach((prop) => {
-					try { el.style.removeProperty(prop); } catch { el.style[prop] = ''; }
+				['transform', 'translate', 'rotate', 'scale', 'opacity', 'visibility', 'y', 'x'].forEach((prop) => {
+					try { el.style.removeProperty(prop); } catch { try { el.style[prop] = ''; } catch {} }
 				});
 				if (el.getAttribute('style') && el.getAttribute('style').trim() === '') {
 					el.removeAttribute('style');
@@ -872,6 +890,12 @@
 				const $scoped = $modal.find(`[data-modal-scroll="${id}"]`).first();
 				if ($scoped.length) return $scoped[0];
 				return $modal[0];
+			};
+
+			const resetScrollTop = () => {
+				const container = resolveScrollContainer();
+				if (!container) return;
+				try { container.scrollTop = 0; } catch {}
 			};
 
 			const scrollToAnchor = (hash) => {
@@ -919,10 +943,12 @@
 				lastActiveEl = document.activeElement;
 				gsap.killTweensOf([$anim[0], $bg[0]]);
 				syncCssState($modal, true, id);
+				resetScrollTop();
 
 				if (skipAnimation) {
 					gsap.set([$bg[0], $anim[0]], { autoAlpha: 1, y: 0 });
 					requestAnimationFrame(clearInlineTransforms);
+					requestAnimationFrame(resetScrollTop);
 					document.addEventListener('keydown', onKeydownTrap, true);
 					requestAnimationFrame(focusModal);
 					ddg.utils.emit('ddg:modal-opened', { id });
@@ -932,18 +958,27 @@
 				setAnimating(true);
 				gsap.set($bg[0], { autoAlpha: 0 });
 
+				// Use transform-based slide for performance; no stacking context issues
+
 				gsap.timeline({
 					onComplete: () => {
 						setAnimating(false);
 						requestAnimationFrame(clearInlineTransforms);
+						requestAnimationFrame(resetScrollTop);
 						document.addEventListener('keydown', onKeydownTrap, true);
 						requestAnimationFrame(focusModal);
 						ddg.utils.emit('ddg:modal-opened', { id });
 						afterOpen && afterOpen();
 					}
 				})
-					.to($bg[0], { autoAlpha: 1, duration: 0.18, ease: 'power1.out', overwrite: 'auto' }, 0)
-					.fromTo($anim[0], { y: 40, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, ease: 'power2.out', overwrite: 'auto' }, 0);
+					.to($bg[0], { 
+						autoAlpha: 1, 
+						duration: 0.12, 
+						ease: 'power1.out', 
+						overwrite: 'auto' 
+					}, 0)
+					.fromTo($anim[0], { y: '25%' }, { y: '0%', duration: 0.32, ease: 'power2.out', overwrite: 'auto' }, 0)
+					.fromTo($anim[0], { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.16, ease: 'power1.out', overwrite: 'auto' }, 0);
 			};
 
 			const close = ({ skipAnimation = false, afterClose } = {}) => {
@@ -956,7 +991,7 @@
 
 				const finish = () => {
 					[$modal[0], $inner[0]].forEach(el => el?.classList.remove('is-open'));
-					gsap.set([$anim[0], $bg[0], $modal[0], $inner[0]], { clearProps: 'transform,opacity,autoAlpha,pointerEvents,willChange' });
+					gsap.set([$anim[0], $bg[0], $modal[0], $inner[0]], { clearProps: 'all' });
 					document.removeEventListener('keydown', onKeydownTrap, true);
 					if (lastActiveEl) lastActiveEl.focus();
 					lastActiveEl = null;
@@ -969,7 +1004,7 @@
 
 				if (skipAnimation) {
 					$bg[0]?.classList.remove('is-open');
-					gsap.set([$bg[0], $anim[0]], { autoAlpha: 0, y: 40 });
+					gsap.set([$bg[0], $anim[0]], { autoAlpha: 0, y: '25%' });
 					return finish();
 				}
 
@@ -978,8 +1013,9 @@
 				gsap.set([$modal[0], $inner[0], $bg[0]], { pointerEvents: 'none' });
 
 				closingTl = gsap.timeline({ onComplete: () => { setAnimating(false); finish(); } });
-				closingTl.to($anim[0], { y: 40, autoAlpha: 0, duration: 0.32, ease: 'power2.in', overwrite: 'auto' }, 0);
-				closingTl.to($bg[0], { autoAlpha: 0, duration: 0.18, ease: 'power1.inOut', overwrite: 'auto' }, 0);
+				closingTl.to($anim[0], { y: '25%', duration: 0.32, ease: 'power2.in', overwrite: 'auto' }, 0);
+				closingTl.to($anim[0], { autoAlpha: 0, duration: 0.16, ease: 'power1.in', overwrite: 'auto' }, 0);
+				closingTl.to($bg[0], { autoAlpha: 0, duration: 0.12, ease: 'power1.inOut', overwrite: 'auto' }, 0);
 				return closingTl;
 			};
 
