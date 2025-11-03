@@ -250,42 +250,6 @@
 					}
 				};
 				attemptLoad();
-				if (!fa?.modules?.list && typeof MutationObserver === 'function') {
-					const wait = new MutationObserver(() => {
-						if (window.FinsweetAttributes?.modules?.list) {
-							wait.disconnect();
-							attemptLoad();
-						}
-					});
-					wait.observe(document.documentElement, { childList: true, subtree: true });
-				}
-
-				if (typeof MutationObserver === 'function') {
-					const observer = new MutationObserver(() => {
-						const listEl = document.querySelector('[fs-list-element="list"]');
-						if (listEl && window.FinsweetAttributes?.modules?.list) {
-							const loader = window.FinsweetAttributes?.load;
-							if (typeof loader === 'function') {
-								try {
-									const r = loader('list');
-									if (r && typeof r.then === 'function') {
-										r.then((i) => finish(i, 'observer')).catch((err) => ddg.utils.warn('[fs] observer load failed', err));
-									}
-								} catch (err) {
-									ddg.utils.warn('[fs] observer load threw', err);
-								}
-							}
-							if (firstResolved) observer.disconnect();
-						}
-					});
-					if (document.body) {
-						observer.observe(document.body, { childList: true, subtree: true });
-					} else {
-						document.addEventListener('DOMContentLoaded', () => {
-							observer.observe(document.body, { childList: true, subtree: true });
-						}, { once: true });
-					}
-				}
 
 			});
 			return readyPromise;
@@ -390,19 +354,40 @@
 			randomFilters();
 			storiesAudioPlayer();
 			joinButtons();
+			debugEvents();
 		});
 	}
 
 	function iframe() {
 		// --- parent: accept URL sync from children
 		if (window === window.parent) {
-			ddg.iframeBridge.on('sync-url', ({ url, title }) => {
+			let childSyncSession = false; // active while parent is following a child-driven story journey
+			const norm = (p) => { try { const s = String(p || ''); return (s.replace(/\/+$/, '') || '/'); } catch { return '/'; } };
+			ddg.iframeBridge.on('sync-url', ({ url, title }, ev) => {
 				try {
+					const parentPath = norm(location.pathname);
+					let nextUrl = null, nextPath = null;
+					if (url) {
+						nextUrl = new URL(url, location.href);
+						nextPath = norm(nextUrl.pathname);
+					}
+
+					const allowNow = childSyncSession || parentPath === '/';
+					if (!allowNow) return;
+
+					// Start session when following child from home to a different path
+					if (!childSyncSession && parentPath === '/' && nextPath && nextPath !== '/') { childSyncSession = true; }
 					if (url && url !== location.href) {
 						const u = new URL(url, location.href);
-						if (u.origin === location.origin) history.replaceState(history.state, '', u.toString());
-						else location.assign(u.toString());
+						if (u.origin === location.origin) {
+							history.replaceState(history.state, '', u.toString());
+						} else {
+							location.assign(u.toString());
+						}
 					}
+
+					// End session when returning to home
+					if (childSyncSession && nextPath === '/') { childSyncSession = false; }
 					if (title) document.title = title;
 				} catch (err) {
 					ddg.utils?.warn?.('[iframe] parent sync failed', err);
@@ -521,28 +506,38 @@
 
 			split = new SplitText(items, { type: 'lines', linesClass: 'home-list_split-line' });
 
-			// helper to measure 1ch in pixels for a given element (inherits font)
-			const measureChPx = (el) => {
-				try {
-					const probe = document.createElement('span');
-					probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;margin:0;padding:0;border:0;width:1ch;height:0;font:inherit;white-space:normal;';
-					el.appendChild(probe);
-					const w = probe.getBoundingClientRect().width || 0;
-					probe.remove();
-					return w || 1; // avoid divide-by-zero
-				} catch { return 1; }
-			};
+			// Create a single reusable probe element for measuring 1ch
+			const probe = document.createElement('span');
+			probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;margin:0;padding:0;border:0;width:1ch;height:0;font:inherit;white-space:normal;';
 
-			split.lines.forEach(line => {
-				const dur = gsap.utils.clamp(0.3, 2, (line.offsetWidth || 0) / tapeSpeed);
-				line.style.setProperty('--tape-dur', `${dur}s`);
+			try {
+				// Phase 1: Batch all DOM reads (measurements) to minimize layout thrashing
+				const measurements = split.lines.map(line => {
+					// Measure ch-width in this line's font context
+					line.appendChild(probe);
+					const chPx = probe.getBoundingClientRect().width || 1;
+					line.removeChild(probe);
 
-				// set a per-line CSS var with its width expressed in `ch`
-				const chPx = measureChPx(line);
-				const widthPx = line.getBoundingClientRect().width || 0;
-				const chUnits = chPx ? (widthPx / chPx) : 0;
-				line.style.setProperty('--line-ch', `${chUnits.toFixed(2)}ch`);
-			});
+					// Read all needed dimensions
+					const offsetWidth = line.offsetWidth || 0;
+					const widthPx = line.getBoundingClientRect().width || 0;
+
+					return { line, chPx, offsetWidth, widthPx };
+				});
+
+				// Phase 2: Batch all DOM writes (style updates)
+				measurements.forEach(({ line, chPx, offsetWidth, widthPx }) => {
+					const dur = gsap.utils.clamp(0.3, 2, offsetWidth / tapeSpeed);
+					line.style.setProperty('--tape-dur', `${dur}s`);
+
+					const chUnits = chPx ? (widthPx / chPx) : 0;
+					line.style.setProperty('--line-ch', `${chUnits.toFixed(2)}ch`);
+				});
+			} catch (err) {
+				// Clean up probe if error occurs
+				if (probe.parentNode) probe.parentNode.removeChild(probe);
+				throw err;
+			}
 		};
 
 		// flags wrappers that contain a [data-coming-soon] descendant
@@ -630,7 +625,7 @@
 					return;
 				}
 			} catch { /* noop */ }
-			window.open(url, '_blank') || (location.href = url);
+			if (!window.open(url, '_blank')) { location.href = url; }
 		};
 
 		// ---------- confetti (uses utils + always returns a Promise) ----------
@@ -791,20 +786,6 @@
 			scrollAny: '[data-modal-scroll]',
 		};
 
-		// --- Existing baseline state setup ---
-		const docRoot = document.documentElement;
-		const initiallyOpen = document.querySelector('[data-modal-el].is-open');
-		if (docRoot) {
-			if (initiallyOpen) {
-				const id = initiallyOpen.getAttribute('data-modal-el') || '';
-				docRoot.setAttribute('data-modal-state', 'open');
-				if (id) docRoot.setAttribute('data-modal-id', id);
-			} else {
-				docRoot.setAttribute('data-modal-state', 'closed');
-				docRoot.removeAttribute('data-modal-id');
-			}
-		}
-
 		const syncCssState = ($modal, open, id) => {
 			const $bg = $(`[data-modal-bg="${id}"]`);
 			const $inner = $modal.find(selectors.inner).first();
@@ -838,6 +819,14 @@
 			let lastActiveEl = null;
 			let closing = false;
 			let closingTl = null;
+			let keydownListenerActive = false;
+			let openedAnnounced = false; // ensures ddg:modal-opened fires once per open cycle
+
+			const announceOpen = () => {
+				if (openedAnnounced) return;
+				openedAnnounced = true;
+				ddg.utils.emit('ddg:modal-opened', { id });
+			};
 
 			const ensureTabIndex = (el) => {
 				if (el && !el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
@@ -936,39 +925,46 @@
 			});
 
 			const open = ({ skipAnimation = false, afterOpen } = {}) => {
+				// Combine: on-load, skipAnimation, and existing is-open are treated as "already open" (instant)
+				const alreadyOpen = $modal.hasClass('is-open');
+
 				if (!ddg.scrollLock.isHolding(id)) ddg.scrollLock.lock(id);
 				Object.keys(ddg.modals).forEach(k => {
 					if (k !== id && ddg.modals[k]?.isOpen?.()) ddg.modals[k].close({ skipAnimation: true });
 				});
 
-				lastActiveEl = document.activeElement;
+				if (!alreadyOpen) lastActiveEl = document.activeElement;
 				gsap.killTweensOf([$anim[0], $bg[0]]);
 				syncCssState($modal, true, id);
 				resetScrollTop();
 
-				if (skipAnimation) {
+				if (skipAnimation || alreadyOpen) {
 					gsap.set([$bg[0], $anim[0]], { autoAlpha: 1, y: 0 });
 					requestAnimationFrame(clearInlineTransforms);
 					requestAnimationFrame(resetScrollTop);
-					document.addEventListener('keydown', onKeydownTrap, true);
+					if (!keydownListenerActive) {
+						document.addEventListener('keydown', onKeydownTrap, true);
+						keydownListenerActive = true;
+					}
 					requestAnimationFrame(focusModal);
-					ddg.utils.emit('ddg:modal-opened', { id });
+					announceOpen();
 					return afterOpen && afterOpen();
 				}
 
 				setAnimating(true);
 				gsap.set($bg[0], { autoAlpha: 0 });
 
-				// Use transform-based slide for performance; no stacking context issues
-
 				gsap.timeline({
 					onComplete: () => {
 						setAnimating(false);
 						requestAnimationFrame(clearInlineTransforms);
 						requestAnimationFrame(resetScrollTop);
-						document.addEventListener('keydown', onKeydownTrap, true);
+						if (!keydownListenerActive) {
+							document.addEventListener('keydown', onKeydownTrap, true);
+							keydownListenerActive = true;
+						}
 						requestAnimationFrame(focusModal);
-						ddg.utils.emit('ddg:modal-opened', { id });
+						announceOpen();
 						afterOpen && afterOpen();
 					}
 				})
@@ -987,17 +983,20 @@
 				if (closing) return closingTl;
 
 				closing = true;
-				ddg.scrollLock.unlock(id);
+				// Only unlock if this modal applied the lock
+				if (ddg.scrollLock.isHolding(id)) ddg.scrollLock.unlock(id);
 				gsap.killTweensOf([$anim[0], $bg[0]]);
 
 				const finish = () => {
 					[$modal[0], $inner[0]].forEach(el => el?.classList.remove('is-open'));
 					gsap.set([$anim[0], $bg[0], $modal[0], $inner[0]], { clearProps: 'all' });
 					document.removeEventListener('keydown', onKeydownTrap, true);
+					keydownListenerActive = false;
 					if (lastActiveEl) lastActiveEl.focus();
 					lastActiveEl = null;
 					syncCssState($modal, false, id);
 					ddg.utils.emit('ddg:modal-closed', { id });
+					openedAnnounced = false;
 					closing = false;
 					closingTl = null;
 					afterClose && afterClose();
@@ -1021,11 +1020,10 @@
 			};
 
 			const isOpen = () => $modal.hasClass('is-open');
-			const modal = { open, close, isOpen, $modal, $bg, $inner };
+			const modal = { open, close, isOpen, $modal, $bg, $inner, announceOpen };
 			ddg.modals[id] = modal;
 
-			const initial = $modal.hasClass('is-open');
-			syncCssState($modal, initial, id);
+			// Do not re-sync initial state on creation; assume markup is authoritative.
 			ddg.utils.emit('ddg:modal-created', id);
 			return modal;
 		};
@@ -1102,24 +1100,52 @@
 		if (!ddg.modalsKeydownBound) {
 			ddg.modalsKeydownBound = true;
 			$(document).on('keydown.modal', (e) => {
-				if (e.key === 'Escape') Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
+				if (e.key !== 'Escape') return;
+				// Close all open modals, creating controllers on-demand
+				const openEls = document.querySelectorAll('[data-modal-el].is-open');
+				openEls.forEach((el) => {
+					const id = el.getAttribute('data-modal-el');
+					if (!id) return;
+					(ddg.modals[id] || createModal(id))?.close();
+				});
 			});
 		}
 
+		// Emit modal-opened for any modals already open on load (no styling/locking).
 		requestAnimationFrame(() => {
-			$(selectors.modal).each((_, el) => {
+			document.querySelectorAll('[data-modal-el].is-open').forEach((el) => {
 				const id = el.getAttribute('data-modal-el');
-				const open = el.classList.contains('is-open');
-				syncCssState($(el), open, id);
-				if (open && !ddg.scrollLock.isHolding(id)) ddg.scrollLock.lock(id);
-				if (open) ddg.utils.emit('ddg:modal-opened', { id });
+				if (!id) return;
+				const m = ddg.modals[id] || createModal(id);
+				m?.announceOpen?.();
+				if (id === 'story') {
+					try { ddg.utils.emit('ddg:story-opened', { url: window.location.href }); } catch { }
+				}
 			});
 		});
 
-		document.addEventListener('ddg:modal-opened', () => {
+		document.addEventListener('ddg:modal-opened', (e) => {
+			if (!window.Marquee?.rescan) return;
+			const id = e.detail?.id;
+			if (id) {
+				const modal = document.querySelector(`[data-modal-el="${id}"]`);
+				if (modal) {
+					window.Marquee.rescan(modal);
+					return;
+				}
+			}
 			window.Marquee.rescan(document);
 		});
-		document.addEventListener('ddg:modal-closed', () => {
+		document.addEventListener('ddg:modal-closed', (e) => {
+			if (!window.Marquee?.rescan) return;
+			const id = e.detail?.id;
+			if (id) {
+				const modal = document.querySelector(`[data-modal-el="${id}"]`);
+				if (modal) {
+					window.Marquee.rescan(modal);
+					return;
+				}
+			}
 			window.Marquee.rescan(document);
 		});
 
@@ -1324,17 +1350,7 @@
 			loadAndOpenStory(window.location.href, { stateMode: 'none', showSkeleton: true, force: true });
 		});
 
-		const tryOpenDirectStory = () => {
-			if (!window.location.pathname.startsWith('/stories/')) return;
-			loadAndOpenStory(window.location.href, { stateMode: 'replace', showSkeleton: true, force: true });
-		};
-
-		// If modals are already initialized, run immediately; otherwise, wait.
-		if (ddg.createModal || (ddg.modals && Object.keys(ddg.modals).length)) {
-			tryOpenDirectStory();
-		} else {
-			document.addEventListener('ddg:modals-ready', tryOpenDirectStory, { once: true });
-		}
+		// No direct open on load; server controls initial state.
 	}
 
 	function randomFilters() {
@@ -1456,7 +1472,6 @@
 			const muteIcon = muteBtn.querySelector('.circle-btn_icon.is-mute');
 			const unmuteIcon = muteBtn.querySelector('.circle-btn_icon.is-unmute');
 
-			playerEl.dataset.audioInit = 'true';
 			ddg.utils.log('[audio] building player', audioUrl);
 
 			let wavesurfer;
@@ -1478,6 +1493,8 @@
 					interact: true,
 					url: audioUrl
 				});
+				// mark as initialized only after successful create
+				playerEl.dataset.audioInit = 'true';
 			} catch (err) {
 				ddg.utils.warn('[audio]', err?.message || 'WaveSurfer init failed');
 				return;
@@ -2186,6 +2203,42 @@
 			invalidateOnRefresh: true
 		});
 	}
+
+	function debugEvents() {
+		ddg.debug ||= {};
+		const events = [
+			'ddg:modal-opened',
+			'ddg:modal-closed',
+			'ddg:story-opened',
+			'ddg:modals-ready',
+			'ddg:list-ready',
+			'ddg:current-item-changed',
+			'ddg:share:start',
+			'ddg:share:copied',
+			'ddg:share:end',
+			'ddg:resize'
+		];
+		// cleanup previous
+		try { ddg.debug.__cleanup && ddg.debug.__cleanup(); } catch { }
+		const cleanups = [];
+		// attach listeners
+		events.forEach((type) => {
+			const handler = (e) => { try { console.log('[ddg][event]', type, e?.detail ?? null); } catch { } };
+			document.addEventListener(type, handler);
+			cleanups.push(() => document.removeEventListener(type, handler));
+		});
+		// wrap ddg.utils.emit
+		if (ddg.utils && typeof ddg.utils.emit === 'function') {
+			const orig = ddg.utils.emit;
+			ddg.utils.emit = (event, detail, el = document) => {
+				try { if (String(event).startsWith('ddg:')) console.log('[ddg][emit]', event, detail ?? null); } catch { }
+				return orig(event, detail, el);
+			};
+			cleanups.push(() => { try { ddg.utils.emit = orig; } catch { } });
+		}
+		ddg.debug.__cleanup = () => { const fns = cleanups.splice(0); fns.forEach(fn => { try { fn(); } catch { } }); };
+		return ddg.debug.__cleanup;
+	};
 
 	ddg.boot = initSite;
 })();
