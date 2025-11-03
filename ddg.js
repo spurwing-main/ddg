@@ -15,6 +15,17 @@
 			};
 		},
 
+		throttle: (fn, ms = 150) => {
+			let lastCall = 0;
+			return (...args) => {
+				const now = Date.now();
+				if (now - lastCall >= ms) {
+					lastCall = now;
+					fn(...args);
+				}
+			};
+		},
+
 		wait: (ms = 0) => new Promise(resolve => setTimeout(resolve, ms)),
 
 		shuffle: (arr) => {
@@ -449,33 +460,36 @@
 		let lastY = window.scrollY;
 		let revealDistance = 0;
 
-		// Ensure a ScrollTrigger instance
+		// Throttled update function for better scroll performance
+		const updateNav = () => {
+			const y = ScrollTrigger?.scroll?.() ?? window.scrollY;
+			const delta = y - lastY;
+
+			if (y <= showThreshold) {
+				navEl.classList.remove('is-hidden', 'is-past-threshold');
+				revealDistance = 0;
+			} else if (delta > 0 && y > hideThreshold) {
+				navEl.classList.add('is-hidden', 'is-past-threshold');
+				revealDistance = 0;
+			} else if (delta < 0) {
+				revealDistance -= delta;
+				if (revealDistance >= revealBuffer) {
+					navEl.classList.remove('is-hidden');
+					revealDistance = 0;
+				}
+			}
+
+			navEl.classList.toggle('is-past-threshold', y > hideThreshold);
+
+			lastY = y;
+		};
+
+		// Ensure a ScrollTrigger instance with throttled updates
 		ScrollTrigger.create({
 			trigger: document.body,
 			start: 'top top',
 			end: 'bottom bottom',
-			onUpdate: () => {
-				const y = ScrollTrigger?.scroll?.() ?? window.scrollY;
-				const delta = y - lastY;
-
-				if (y <= showThreshold) {
-					navEl.classList.remove('is-hidden', 'is-past-threshold');
-					revealDistance = 0;
-				} else if (delta > 0 && y > hideThreshold) {
-					navEl.classList.add('is-hidden', 'is-past-threshold');
-					revealDistance = 0;
-				} else if (delta < 0) {
-					revealDistance -= delta;
-					if (revealDistance >= revealBuffer) {
-						navEl.classList.remove('is-hidden');
-						revealDistance = 0;
-					}
-				}
-
-				navEl.classList.toggle('is-past-threshold', y > hideThreshold);
-
-				lastY = y;
-			}
+			onUpdate: ddg.utils.throttle(updateNav, 16) // Throttle to ~60fps
 		});
 	}
 
@@ -912,17 +926,22 @@
 			};
 
 			// Internal anchor scrolls (delegate inside this modal)
-			$modal.on('click.modalAnchor', 'a[href^="#"], button[href^="#"]', (e) => {
-				const href = e.currentTarget.getAttribute('href') || '';
-				const hash = href.replace(/^#/, '').trim();
-				if (!hash) return;
-				e.preventDefault();
-				e.stopPropagation();
-				scrollToAnchor(hash);
-				const u = new URL(window.location.href);
-				u.hash = hash;
-				window.history.replaceState(window.history.state, '', u.toString());
-			});
+			const modalEl = $modal[0];
+			if (modalEl) {
+				modalEl.addEventListener('click', (e) => {
+					const target = e.target.closest('a[href^="#"], button[href^="#"]');
+					if (!target) return;
+					const href = target.getAttribute('href') || '';
+					const hash = href.replace(/^#/, '').trim();
+					if (!hash) return;
+					e.preventDefault();
+					e.stopPropagation();
+					scrollToAnchor(hash);
+					const u = new URL(window.location.href);
+					u.hash = hash;
+					window.history.replaceState(window.history.state, '', u.toString());
+				});
+			}
 
 			const open = ({ skipAnimation = false, afterOpen } = {}) => {
 				// Combine: on-load, skipAnimation, and existing is-open are treated as "already open" (instant)
@@ -1030,9 +1049,10 @@
 
 		ddg.createModal = createModal;
 
-		// --- Existing open logic ---
-		$(document).on('click.modal', selectors.trigger, (e) => {
-			const node = e.currentTarget;
+		// --- Existing open logic (converted to vanilla JS for better performance) ---
+		document.addEventListener('click', (e) => {
+			const node = e.target.closest(selectors.trigger);
+			if (!node) return;
 			if (node.hasAttribute('data-ajax-modal')) return;
 			e.preventDefault();
 			const id = node.getAttribute('data-modal-trigger');
@@ -1041,30 +1061,34 @@
 		});
 
 		// --- Close buttons ---
-		$(document).on('click.modal', selectors.close, (e) => {
+		document.addEventListener('click', (e) => {
+			const node = e.target.closest(selectors.close);
+			if (!node) return;
 			e.preventDefault();
-			const id = e.currentTarget.getAttribute('data-modal-close');
+			const id = node.getAttribute('data-modal-close');
 			if (id) (ddg.modals[id] || createModal(id))?.close();
 			else Object.values(ddg.modals).forEach(m => m.isOpen() && m.close());
 		});
 
 		// --- Story modal: clicking the inner container itself closes it (not its children)
-		$(document).on('click.modal', '[data-modal-inner="story"]', (e) => {
-			if (e.target !== e.currentTarget) return; // only close when clicking empty space on the inner
-			const root = e.currentTarget.closest('[data-modal-el]');
+		document.addEventListener('click', (e) => {
+			const node = e.target.closest('[data-modal-inner="story"]');
+			if (!node || e.target !== node) return;
+			const root = node.closest('[data-modal-el]');
 			const id = root?.getAttribute('data-modal-el') || 'story';
 			(ddg.modals[id] || createModal(id))?.close();
 		});
 
 		// --- Background clicks ---
-		$(document).on('click.modal', selectors.bg, (e) => {
-			if (e.target !== e.currentTarget) return;
-			const id = e.currentTarget.getAttribute('data-modal-bg');
+		document.addEventListener('click', (e) => {
+			const node = e.target.closest(selectors.bg);
+			if (!node || e.target !== node) return;
+			const id = node.getAttribute('data-modal-bg');
 			(ddg.modals[id] || createModal(id))?.close();
 		});
 
 		// ✅ NEW: click anywhere *not inside modal content* closes it
-		$(document).on('click.modal', (e) => {
+		document.addEventListener('click', (e) => {
 			const isInner = e.target.closest(selectors.inner);
 			const isModal = e.target.closest(selectors.modal);
 			if (isInner || !isModal) return; // ignore clicks inside content or outside modals entirely
@@ -1099,7 +1123,7 @@
 
 		if (!ddg.modalsKeydownBound) {
 			ddg.modalsKeydownBound = true;
-			$(document).on('keydown.modal', (e) => {
+			document.addEventListener('keydown', (e) => {
 				if (e.key !== 'Escape') return;
 				// Close all open modals, creating controllers on-demand
 				const openEls = document.querySelectorAll('[data-modal-el].is-open');
@@ -1193,6 +1217,19 @@
 				}
 			}
 		};
+		// Proactive cleanup of expired cache entries every minute to prevent memory bloat
+		const cleanupCache = () => {
+			const now = Date.now();
+			for (const [url, entry] of storyCache.entries()) {
+				if (now - entry.t > STORY_CACHE_TTL) {
+					storyCache.delete(url);
+				}
+			}
+		};
+		const cleanupInterval = setInterval(cleanupCache, 60 * 1000); // Run every minute
+		// Clean up interval when page unloads
+		window.addEventListener('beforeunload', () => clearInterval(cleanupInterval), { once: true });
+
 		let lock = false;
 
 		let prefetchEnabled = false;
@@ -1328,9 +1365,13 @@
 			}
 		};
 
+		// Throttle mouseover/mouseout to max 60fps (16ms) to reduce CPU overhead
+		const throttledPointerOver = ddg.utils.throttle(onStoryLinkPointerOver, 16);
+		const throttledPointerOut = ddg.utils.throttle(onStoryLinkPointerOut, 16);
+
 		document.addEventListener('click', onStoryLinkClick);
-		document.addEventListener('mouseover', onStoryLinkPointerOver);
-		document.addEventListener('mouseout', onStoryLinkPointerOut);
+		document.addEventListener('mouseover', throttledPointerOver);
+		document.addEventListener('mouseout', throttledPointerOut);
 		document.addEventListener('touchstart', onStoryLinkTouchStart, { passive: true });
 		document.addEventListener('touchend', () => {
 			if (prefetchCancel) { try { prefetchCancel(); } catch { } prefetchCancel = null; }
@@ -1349,8 +1390,6 @@
 			}
 			loadAndOpenStory(window.location.href, { stateMode: 'none', showSkeleton: true, force: true });
 		});
-
-		// No direct open on load; server controls initial state.
 	}
 
 	function randomFilters() {
@@ -1431,6 +1470,7 @@
 		ddg.storiesAudioPlayerInitialized = true;
 
 		let activePlayer = null;
+		const wavesurferPool = new Map(); // Cache WaveSurfer instances by audio URL
 
 		const disable = (btn, state = true) => { if (btn) btn.disabled = !!state; };
 
@@ -1450,35 +1490,52 @@
 
 		const cleanupActive = () => {
 			if (!activePlayer) return;
-			try { activePlayer.wavesurfer?.destroy(); } catch (err) { ddg.utils.warn('[audio]', err); }
-			activePlayer.el.removeAttribute('data-audio-init');
+			const { wavesurfer, audioUrl, el } = activePlayer;
+			// Destroy the instance and remove from pool so we don't reuse a detached container
+			try { wavesurfer?.destroy?.(); } catch (err) { ddg.utils.warn('[audio] destroy failed', err); }
+			if (audioUrl && wavesurferPool.has(audioUrl)) {
+				const ws = wavesurferPool.get(audioUrl);
+				if (ws === wavesurfer) wavesurferPool.delete(audioUrl);
+			}
+			el.removeAttribute('data-audio-init');
 			activePlayer = null;
-			ddg.utils.log('[audio] cleaned up');
+			ddg.utils.log('[audio] destroyed active player');
 		};
 
 		const buildAudio = (modalEl) => {
 			const playerEl = modalEl.querySelector('.story-player');
-			if (!playerEl || playerEl.hasAttribute('data-audio-init')) return;
-			cleanupActive();
+			if (!playerEl) return;
 
 			const audioUrl = playerEl.dataset.audioUrl;
+			if (!audioUrl) return;
+
+			// If same audio is already loaded, don't rebuild
+			if (playerEl.hasAttribute('data-audio-init') && activePlayer?.audioUrl === audioUrl) return;
+
+			cleanupActive();
+
 			const waveformEl = playerEl.querySelector('.story-player_waveform');
 			const playBtn = playerEl.querySelector('[data-player="play"]');
 			const muteBtn = playerEl.querySelector('[data-player="mute"]');
-			if (!audioUrl || !waveformEl || !playBtn || !muteBtn) return;
+			if (!waveformEl || !playBtn || !muteBtn) return;
 
 			const playIcon = playBtn.querySelector('.circle-btn_icon.is-play');
 			const pauseIcon = playBtn.querySelector('.circle-btn_icon.is-pause');
 			const muteIcon = muteBtn.querySelector('.circle-btn_icon.is-mute');
 			const unmuteIcon = muteBtn.querySelector('.circle-btn_icon.is-unmute');
 
-			ddg.utils.log('[audio] building player', audioUrl);
-
 			let wavesurfer;
 			let isMuted = false;
 
+			// Always create a fresh WaveSurfer instance per render to ensure correct container & lifecycle
+			ddg.utils.log('[audio] creating new player', audioUrl);
 			try {
 				if (typeof WaveSurfer === 'undefined') throw new Error('WaveSurfer not available');
+				// If a stale instance for this URL exists in the pool, destroy it first
+				if (wavesurferPool.has(audioUrl)) {
+					try { wavesurferPool.get(audioUrl)?.destroy?.(); } catch (e) { }
+					wavesurferPool.delete(audioUrl);
+				}
 				wavesurfer = WaveSurfer.create({
 					container: waveformEl,
 					height: waveformEl.offsetHeight || 42,
@@ -1493,12 +1550,21 @@
 					interact: true,
 					url: audioUrl
 				});
-				// mark as initialized only after successful create
-				playerEl.dataset.audioInit = 'true';
+				// Track active instances to coordinate play state across players; keep pool small
+				if (wavesurferPool.size >= 3) {
+					const firstKey = wavesurferPool.keys().next().value;
+					const oldInstance = wavesurferPool.get(firstKey);
+					try { oldInstance?.destroy?.(); } catch (e) { }
+					wavesurferPool.delete(firstKey);
+				}
+				wavesurferPool.set(audioUrl, wavesurfer);
 			} catch (err) {
 				ddg.utils.warn('[audio]', err?.message || 'WaveSurfer init failed');
 				return;
 			}
+
+			// mark as initialized only after successful create/reuse
+			playerEl.dataset.audioInit = 'true';
 
 			disable(playBtn, true);
 			disable(muteBtn, true);
@@ -1514,8 +1580,11 @@
 
 			wavesurfer.on('play', () => {
 				setPlayState(playBtn, playIcon, pauseIcon, true);
-				document.querySelectorAll('.story-player[data-audio-init]').forEach(el => {
-					if (el !== playerEl && el.__ws?.pause) el.__ws.pause();
+				// Pause other active players
+				wavesurferPool.forEach((ws, url) => {
+					if (ws !== wavesurfer && ws?.isPlaying?.()) {
+						try { ws.pause(); } catch (e) { }
+					}
 				});
 			});
 
@@ -1530,7 +1599,7 @@
 			});
 
 			playerEl.__ws = wavesurfer;
-			activePlayer = { el: playerEl, wavesurfer };
+			activePlayer = { el: playerEl, wavesurfer, audioUrl };
 		};
 
 		document.addEventListener('ddg:modal-opened', e => {
@@ -2164,16 +2233,14 @@
 		gsap.set(stickyButton, { autoAlpha: 1 });
 		gsap.set(staticButton, { autoAlpha: 0 });
 
+		// Calculate REM once instead of on every scroll calculation
+		const remInPx = parseFloat(getComputedStyle(document.documentElement).fontSize);
+		const scrollOffset = `bottom bottom-=${remInPx}px`;
+
 		ScrollTrigger.create({
 			trigger: staticButton,
-			start: () => {
-				const remInPx = parseFloat(getComputedStyle(document.documentElement).fontSize);
-				return `bottom bottom-=${remInPx}px`;
-			},
-			end: () => {
-				const remInPx = parseFloat(getComputedStyle(document.documentElement).fontSize);
-				return `bottom bottom-=${remInPx}px`;
-			},
+			start: scrollOffset,
+			end: scrollOffset,
 			onEnter: () => {
 				// Animate swap with scale
 				gsap.to(stickyButton, {
