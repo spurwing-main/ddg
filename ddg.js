@@ -223,6 +223,7 @@
 		let currentList = null;
 
 		function whenReady() {
+			try { if (!firstResolved) ddg.utils?.log?.('[fs] whenReady called; waiting for list…'); } catch { }
 			if (firstResolved && currentList) return Promise.resolve(currentList);
 			if (readyPromise) return readyPromise;
 			readyPromise = new Promise((resolve) => {
@@ -235,8 +236,9 @@
 					if (inst !== currentList) {
 						currentList = inst;
 						ddg.utils.emit('ddg:list-ready', { list: inst, via });
+						try { ddg.utils?.log?.('[fs] list ready', { via }); } catch { }
 					}
-					if (!firstResolved) { firstResolved = true; resolve(inst); }
+					if (!firstResolved) { firstResolved = true; try { ddg.utils?.log?.('[fs] resolved first list instance'); } catch { } resolve(inst); }
 				};
 
 				if (Array.isArray(window.FinsweetAttributes)) {
@@ -322,6 +324,7 @@
 				targetValuesByField[field] = values;
 			}
 
+			try { ddg.utils?.log?.('[fs] applyCheckboxFilters input', valuesByField); } catch { }
 			// Clear ALL existing filters by creating a fresh filters object
 			list.filters.value = {
 				groupsMatch: 'and',
@@ -341,8 +344,10 @@
 			};
 
 			// Trigger the filter lifecycle
+			try { ddg.utils?.log?.('[fs] triggerHook: filter'); } catch { }
 			await list.triggerHook('filter');
 			await afterNextRender(list);
+			try { ddg.utils?.log?.('[fs] filters applied and rendered'); } catch { }
 		}
 
 		return { whenReady, items, itemsValues, applyCheckboxFilters, afterNextRender };
@@ -1149,27 +1154,9 @@
 		});
 
 		document.addEventListener('ddg:modal-opened', (e) => {
-			if (!window.Marquee?.rescan) return;
-			const id = e.detail?.id;
-			if (id) {
-				const modal = document.querySelector(`[data-modal-el="${id}"]`);
-				if (modal) {
-					window.Marquee.rescan(modal);
-					return;
-				}
-			}
 			window.Marquee.rescan(document);
 		});
 		document.addEventListener('ddg:modal-closed', (e) => {
-			if (!window.Marquee?.rescan) return;
-			const id = e.detail?.id;
-			if (id) {
-				const modal = document.querySelector(`[data-modal-el="${id}"]`);
-				if (modal) {
-					window.Marquee.rescan(modal);
-					return;
-				}
-			}
 			window.Marquee.rescan(document);
 		});
 
@@ -1398,6 +1385,7 @@
 		if (!triggerEl) return;
 		if (ddg.randomFiltersInitialized) return;
 		ddg.randomFiltersInitialized = true;
+		try { ddg.utils?.log?.('[randomFilters] init', { trigger: triggerSelector }); } catch { }
 
 		const selectors = { trigger: triggerSelector };
 		const state = (ddg.randomFilters ||= { bag: [] });
@@ -1409,6 +1397,7 @@
 					const toApply = pendingValues;
 					pendingValues = null;
 					try {
+						try { ddg.utils?.log?.('[randomFilters] scheduleApply run', toApply); } catch { }
 						await ddg.fs.applyCheckboxFilters(toApply);
 					} finally {
 						const pending = resolvers.slice();
@@ -1434,13 +1423,16 @@
 		const rebuildBag = (all, excludeKey) => {
 			const ids = all.map((_, i) => i).filter(i => keyOf(all[i]) !== excludeKey);
 			state.bag = ddg.utils.shuffle(ids);
+			try { ddg.utils?.log?.('[randomFilters] rebuild bag', { size: state.bag.length, excludeKey }); } catch { }
 		};
 
 		const nextIndex = (all) => {
 			const excludeKey = ddg.currentItem?.item ? keyOf(ddg.currentItem.item) : null;
 			if (!Array.isArray(state.bag) || !state.bag.length) rebuildBag(all, excludeKey);
 			if (!state.bag.length) rebuildBag(all, null);
-			return state.bag.shift();
+			const idx = state.bag.shift();
+			try { ddg.utils?.log?.('[randomFilters] next index', { idx, remain: state.bag.length, excludeKey }); } catch { }
+			return idx;
 		};
 
 		document.addEventListener('click', async (e) => {
@@ -1459,7 +1451,7 @@
 			const idx = nextIndex(all);
 			const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
 			const values = ddg.fs.itemsValues(item);
-
+			try { ddg.utils?.log?.('[randomFilters] click apply', { idx, key: keyOf(item), values }); } catch { }
 			await state.scheduleApply(values);
 		}, true);
 	}
@@ -2058,6 +2050,7 @@
 		if (!rootParent) return;
 		if (ddg.relatedFiltersInitialized) return;
 		ddg.relatedFiltersInitialized = true;
+		try { ddg.utils?.log?.('[relatedFilters] init', { parentSelector, targetSelector }); } catch { }
 
 		const selectors = {
 			parent: parentSelector,
@@ -2085,6 +2078,7 @@
 
 		function buildAll(item) {
 			const values = ddg.fs.itemsValues(item);
+			try { ddg.utils?.log?.('[relatedFilters] build from item', { fields: Object.keys(values || {}).length }); } catch { }
 
 			// Always clear targets first; if no usable values, leave empty
 			const parents = Array.from(document.querySelectorAll(selectors.parent));
@@ -2140,6 +2134,7 @@
 
 
 			const limited = ddg.utils.shuffle(entries).slice(0, MAX_FILTERS);
+			try { ddg.utils?.log?.('[relatedFilters] render entries', { total: entries.length, showing: limited.length }); } catch { }
 			limited.forEach(({ field, value }, idx) => {
 				const clone = tpl.cloneNode(true);
 				const input = clone.querySelector(selectors.input);
@@ -2205,7 +2200,8 @@
 			btn.addEventListener('click', async (e) => {
 				e.preventDefault();
 				const values = collectSelections(parent);
-				if (!Object.keys(values).length) { return; }
+				if (!Object.keys(values).length) { try { ddg.utils?.log?.('[relatedFilters] search clicked with no selections'); } catch { } return; }
+				try { ddg.utils?.log?.('[relatedFilters] search apply', values); } catch { }
 				await ddg.fs.applyCheckboxFilters(values);
 			});
 		}
@@ -2213,6 +2209,7 @@
 		document.addEventListener('ddg:current-item-changed', (e) => {
 			const item = e.detail?.item;
 			if (!item) return;
+			try { ddg.utils?.log?.('[relatedFilters] current item changed'); } catch { }
 			buildAll(item);
 		});
 
@@ -2222,6 +2219,7 @@
 			};
 			document.addEventListener('ddg:list-ready', rebuild);
 			if (typeof list.addHook === 'function') list.addHook('afterRender', rebuild);
+			try { ddg.utils?.log?.('[relatedFilters] wired FS hooks'); } catch { }
 		});
 	}
 
@@ -2229,46 +2227,41 @@
 		const stickyButton = document.querySelector('.join_sticky');
 		const staticButton = document.querySelector('.join-cta_btn .button');
 
-		// Initially: show sticky, hide static
-		gsap.set(stickyButton, { autoAlpha: 1 });
-		gsap.set(staticButton, { autoAlpha: 0 });
+		if (!stickyButton || !staticButton || !window.gsap || !window.ScrollTrigger) return;
 
-		// Calculate REM once instead of on every scroll calculation
+		// keep static in layout for ScrollTrigger, but hide it visually
+		stickyButton.style.display = 'flex';
+		staticButton.style.display = 'flex';
+		staticButton.style.visibility = 'hidden';
+		staticButton.setAttribute('aria-hidden', 'true');
+
 		const remInPx = parseFloat(getComputedStyle(document.documentElement).fontSize);
 		const scrollOffset = `bottom bottom-=${remInPx}px`;
 
-		ScrollTrigger.create({
+		const showStaticHideSticky = () => {
+			// flip both in the same task to avoid any perceived fade
+			stickyButton.style.display = 'none';
+			staticButton.style.visibility = 'visible';
+			staticButton.removeAttribute('aria-hidden');
+		};
+
+		const showStickyHideStatic = () => {
+			stickyButton.style.display = 'flex';
+			staticButton.style.visibility = 'hidden';
+			staticButton.setAttribute('aria-hidden', 'true');
+		};
+
+		const trigger = ScrollTrigger.create({
 			trigger: staticButton,
 			start: scrollOffset,
 			end: scrollOffset,
-			onEnter: () => {
-				// Animate swap with scale
-				gsap.to(stickyButton, {
-					autoAlpha: 0,
-					duration: 0,
-					ease: "none"
-				});
-				gsap.to(staticButton, {
-					autoAlpha: 1,
-					duration: 0,
-					ease: "none"
-				});
-			},
-			onLeaveBack: () => {
-				// Animate reverse swap with scale
-				gsap.to(stickyButton, {
-					autoAlpha: 1,
-					duration: 0,
-					ease: "none"
-				});
-				gsap.to(staticButton, {
-					autoAlpha: 0,
-					duration: 0,
-					ease: "none"
-				});
-			},
+			onEnter: showStaticHideSticky,
+			onLeaveBack: showStickyHideStatic,
 			invalidateOnRefresh: true
 		});
+
+		// optional cleanup if you need it elsewhere
+		return () => trigger.kill();
 	}
 
 	function debugEvents() {
