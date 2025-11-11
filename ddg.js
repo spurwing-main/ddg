@@ -559,24 +559,7 @@
 			}
 		};
 
-		// flags wrappers that contain a [data-coming-soon] descendant
-		const flagComingSoon = () => {
-			const wraps = list.querySelectorAll('.home-list_item-wrap');
-			wraps.forEach(wrap => {
-				const hasMarker = !!wrap.querySelector('[data-coming-soon]');
-				if (hasMarker) {
-					wrap.setAttribute('data-coming-soon', 'true');
-				} else {
-					wrap.removeAttribute('data-coming-soon');
-				}
-			});
-		};
-
 		const update = () => {
-			try { flagComingSoon(); } catch (e) {
-				(ddg?.utils?.warn || console.warn)('homelistSplit: flagComingSoon failed', e);
-			}
-
 			revertSplit();
 			if (isMobile()) return;
 
