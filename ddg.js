@@ -1,4 +1,3 @@
-
 (function () {
 	const ddg = (window.ddg ??= {});
 	const data = (ddg.data ??= {
@@ -216,141 +215,760 @@
 
 		return { on };
 	})();
-
+	
 	ddg.fs ??= (() => {
-		let readyPromise = null;
-		let firstResolved = false;
-		let currentList = null;
+		const log = (...args) => ddg.utils?.log?.('[fs]', ...args);
+		const warn = (...args) => ddg.utils?.warn?.('[fs]', ...args);
 
-		function whenReady() {
-			try { if (!firstResolved) ddg.utils?.log?.('[fs] whenReady called; waiting for list…'); } catch { }
-			if (firstResolved && currentList) return Promise.resolve(currentList);
-			if (readyPromise) return readyPromise;
-			readyPromise = new Promise((resolve) => {
-				window.FinsweetAttributes ||= [];
+		// ============================================
+		// CORE - Get List Instance
+		// ============================================
+		const readyList = (() => {
+			let resolve, hasResolved = false;
+			const promise = new Promise(r => resolve = r);
 
-				const finish = (instances, via) => {
-					const arr = Array.isArray(instances) ? instances : [instances];
-					const inst = arr.find(i => i && i.items);
-					if (!inst) return;
-					if (inst !== currentList) {
-						currentList = inst;
-						ddg.utils.emit('ddg:list-ready', { list: inst, via });
-						try { ddg.utils?.log?.('[fs] list ready', { via }); } catch { }
-					}
-					if (!firstResolved) { firstResolved = true; try { ddg.utils?.log?.('[fs] resolved first list instance'); } catch { } resolve(inst); }
-				};
+			window.FinsweetAttributes ||= [];
+			window.FinsweetAttributes.push(['list', (instances) => {
+				if (hasResolved) return;
 
-				if (Array.isArray(window.FinsweetAttributes)) {
-					window.FinsweetAttributes.push(['list', (instances) => finish(instances, 'push')]);
+				const list = Array.isArray(instances) ? (instances.find(Boolean) ?? instances[0]) : instances;
+
+				log('list ready', { instances });
+
+				try {
+					window.dispatchEvent(new CustomEvent('fs:list-ready', { detail: { listInstance: list } }));
+				} catch (err) {
+					warn('event dispatch failed', err);
 				}
 
-				const mod = window.FinsweetAttributes?.modules?.list;
-				if (mod?.loading?.then) {
-					mod.loading.then((i) => finish(i, 'module.loading')).catch((err) => ddg.utils.warn('[fs] module.loading failed', err));
+				if (resolve) {
+					resolve(list);
+					resolve = null;
+					hasResolved = true;
+				}
+			}]);
+
+			return () => promise;
+		})();
+
+		// ============================================
+		// UTILS - Shared helper functions
+		// ============================================
+		const utils = {
+			getItemFields: (item) => {
+				const normalize = (val) =>
+					(val == null ? [] : (Array.isArray(val) ? val : [val]))
+						.flatMap(e => String(e ?? '').split(','))
+						.map(s => s.trim())
+						.filter(Boolean);
+
+				const out = {};
+				const source = item?.fields || item?.fieldData;
+
+				if (!source || typeof source !== 'object') return out;
+
+				for (const [name, field] of Object.entries(source)) {
+					out[name] = normalize(field?.value ?? field?.rawValue ?? field);
 				}
 
-				const fa = window.FinsweetAttributes;
-				const attemptLoad = () => {
-					if (typeof fa?.load !== 'function') return;
-					try {
-						const res = fa.load('list');
-						if (res && typeof res.then === 'function') {
-							res.then(i => finish(i, 'load()')).catch((err) => ddg.utils.warn('[fs] load(list) failed', err));
-						}
-					} catch (err) {
-						ddg.utils.warn('[fs] load(list) threw', err);
-					}
+				return out;
+			},
+
+			applyFilters: async (list, valuesByField) => {
+				if (!list) { warn('applyFilters: no list'); return; }
+
+				const conditions = Object.entries(valuesByField || {})
+					.map(([field, vals]) => {
+						const values = [...new Set((vals || []).map(String))].filter(Boolean);
+						return values.length ? {
+							id: `${field}_equal`,
+							type: 'checkbox',
+							fieldKey: field,
+							value: values,
+							op: 'equal',
+							filterMatch: 'or',
+							interacted: true,
+							showTag: true
+						} : null;
+					})
+					.filter(Boolean);
+
+				log('applyFilters', valuesByField);
+
+				list.filters.value = {
+					groupsMatch: 'and',
+					groups: conditions.length ? [{ id: '0', conditionsMatch: 'and', conditions }] : []
 				};
-				attemptLoad();
+			},
 
-			});
-			return readyPromise;
-		}
+			collectFilterValues: (filters) => {
+				if (!filters?.groups) return [];
 
-		const items = (list) => {
-			const v = list?.items;
-			return Array.isArray(v?.value) ? v.value : (Array.isArray(v) ? v : []);
+				return [...new Set(
+					filters.groups.flatMap(g =>
+						(g?.conditions || []).flatMap(({ value, op } = {}) => {
+							if (op === 'empty' || op === 'not-empty') return [];
+							return (Array.isArray(value) ? value : [value])
+								.map(v => String(v || '').trim())
+								.filter(Boolean);
+						})
+					)
+				)];
+			}
 		};
 
-		const itemsValues = (item) => {
-			const normalize = (value) => {
-				if (value == null) return [];
-				const arrayValue = Array.isArray(value) ? value : [value];
-				const outValues = [];
-				for (const entry of arrayValue) {
-					if (entry == null) continue;
-					const parts = String(entry).split(',');
-					for (const part of parts) {
-						const trimmed = part.trim();
-						if (trimmed) outValues.push(trimmed);
+		// ============================================
+		// HOOK INTO FINSWEET FILTER LIFECYCLE
+		// Dispatches custom fs:filters-applied event
+		// ============================================
+		(async () => {
+			const list = await readyList();
+			if (!list || typeof list.addHook !== 'function') {
+				warn('list.addHook not available');
+				return;
+			}
+
+			list.addHook('filter', () => {
+				const filters = list.filters?.value;
+				const values = utils.collectFilterValues(filters);
+
+				log('filter hook', { values });
+
+				try {
+					window.dispatchEvent(new CustomEvent('fs:filters-applied', {
+						detail: { filters, values }
+					}));
+				} catch (err) {
+					warn('fs:filters-applied dispatch failed', err);
+				}
+			});
+
+			log('filter events dispatcher initialized');
+		})();
+
+		// ============================================
+		// CURRENT ITEM TRACKER
+		// ============================================
+		const currentItem = (() => {
+			ddg.currentItem ??= { item: null, url: null, list: null };
+
+			let lastKey = null, pendingUrl = null, hooksBound = false, unresolvedWarn = false;
+
+			const getKey = (item) =>
+				item?.slug || item?.fields?.slug?.value || item?.url?.pathname || item?.id || '';
+
+			const findByUrl = (list, urlString) => {
+				log('currentItem findByUrl', { url: urlString, hasListItems: !!list?.items?.value?.length });
+
+				if (!list) {
+					log('currentItem findByUrl: no list');
+					return null;
+				}
+
+				const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
+
+				log('currentItem findByUrl: items count', items.length);
+
+				if (!items.length) {
+					log('currentItem findByUrl: no items');
+					return null;
+				}
+
+				const url = new URL(urlString || window.location.href, window.location.origin);
+				const pathname = url.pathname;
+				const slug = pathname.split('/').filter(Boolean).pop() || '';
+
+				log('currentItem findByUrl: searching', { pathname, slug });
+
+				const foundByPathname = items.find(it => it?.url?.pathname === pathname);
+
+				if (foundByPathname) {
+					log('currentItem findByUrl: found by pathname', foundByPathname);
+					return foundByPathname;
+				}
+
+				if (slug) {
+					const lower = slug.toLowerCase();
+					const foundBySlug = items.find(it => {
+						const s = typeof it?.slug === 'string' ? it.slug :
+							(typeof it?.fields?.slug?.value === 'string' ? it.fields.slug.value : '');
+						return s && s.toLowerCase() === lower;
+					});
+
+					if (foundBySlug) {
+						log('currentItem findByUrl: found by slug', foundBySlug);
+						return foundBySlug;
 					}
 				}
-				return outValues;
+
+				log('currentItem findByUrl: not found');
+				log('currentItem findByUrl: available items', items.map(it => ({
+					pathname: it?.url?.pathname,
+					slug: it?.slug || it?.fields?.slug?.value
+				})));
+
+				return null;
 			};
 
+			const update = (item, url) => {
+				const key = getKey(item);
+
+				log('currentItem update called', { key, lastKey, hasKey: !!key });
+
+				if (!key || key === lastKey) {
+					log('currentItem update: skipped (no key or same key)');
+					return;
+				}
+
+				lastKey = key;
+				ddg.currentItem.item = item;
+				ddg.currentItem.url = url;
+				unresolvedWarn = false;
+
+				log('current item changed', { key });
+				ddg.utils.emit('ddg:current-item-changed', { item, url });
+			};
+
+			const bindHooks = (list) => {
+				if (!list || hooksBound) {
+					log('currentItem bindHooks: skipped', { hasList: !!list, hooksBound });
+					return;
+				}
+				hooksBound = true;
+
+				if (typeof list.addHook === 'function') {
+					list.addHook('afterRender', () => {
+						log('currentItem: afterRender hook fired');
+						resolve();
+					});
+				}
+
+				if (typeof list.watch === 'function') {
+					list.watch(() => list.items?.value, () => {
+						log('currentItem: items changed, resolving');
+						resolve();
+					});
+				}
+
+				log('current item hooks bound');
+			};
+
+			const ensureList = async () => {
+				if (ddg.currentItem.list) {
+					log('currentItem ensureList: using cached list');
+					return ddg.currentItem.list;
+				}
+
+				log('currentItem ensureList: awaiting readyList');
+				const list = await readyList();
+				log('currentItem ensureList: got list', { hasItems: !!list?.items?.value?.length });
+
+				ddg.currentItem.list = list;
+				bindHooks(list);
+
+				return list;
+			};
+
+			const resolve = async (url) => {
+				log('currentItem resolve called', { url: url || 'current', pendingUrl });
+
+				pendingUrl = url || pendingUrl || window.location.href;
+
+				log('currentItem resolve: using url', pendingUrl);
+
+				const list = ddg.currentItem.list || await ensureList();
+
+				log('currentItem resolve: got list', { hasItems: !!list?.items?.value?.length });
+
+				const item = findByUrl(list, pendingUrl);
+
+				if (item) {
+					log('currentItem resolve: found item, calling update');
+					update(item, pendingUrl);
+					return;
+				}
+
+				if (!unresolvedWarn) {
+					try {
+						const resolved = new URL(pendingUrl, window.location.origin);
+						if (list && resolved.pathname.startsWith('/stories/')) {
+							unresolvedWarn = true;
+							warn('current item unresolved', resolved.href);
+						}
+					} catch {
+						unresolvedWarn = true;
+						warn('current item unresolved', pendingUrl);
+					}
+				}
+			};
+
+			document.addEventListener('ddg:modal-closed', (e) => {
+				if (e.detail?.id === 'story') {
+					lastKey = null;
+					log('current item reset on modal close');
+				}
+			});
+
+			return { resolve };
+		})();
+
+		// ============================================
+		// HELPER - Get Item Field Values (Finsweet pattern)
+		// ============================================
+		const getItemFieldValues = (item) => {
+			const normalize = (val) =>
+				(val == null ? [] : (Array.isArray(val) ? val : [val]))
+					.flatMap(e => String(e ?? '').split(','))
+					.map(s => s.trim())
+					.filter(Boolean);
+
 			const out = {};
-			if (item?.fields && Object.keys(item.fields).length) {
-				for (const [n, f] of Object.entries(item.fields)) {
-					const v = f?.value ?? f?.rawValue ?? [];
-					out[n] = normalize(v);
-				}
-			} else if (item?.fieldData && typeof item.fieldData === 'object') {
-				for (const [n, v] of Object.entries(item.fieldData)) {
-					out[n] = normalize(v);
-				}
+			const source = item?.fields || item?.fieldData;
+
+			if (!source || typeof source !== 'object') return out;
+
+			for (const [name, field] of Object.entries(source)) {
+				out[name] = normalize(field?.value ?? field?.rawValue ?? field);
 			}
+
 			return out;
 		};
 
-		function afterNextRender(list) {
-			return new Promise((resolve) => {
-				if (typeof list?.addHook !== 'function') return resolve();
-				let done = false;
-				list.addHook('afterRender', () => {
-					if (done) return; done = true; resolve();
-				});
-			});
-		}
+		// ============================================
+		// RELATED FILTERS
+		// ============================================
+		const relatedFilters = (() => {
+			const MAX = 6;
+			const EXCLUDED = new Set(['slug', 'name', 'title']);
 
-		async function applyCheckboxFilters(valuesByField) {
-			const list = await whenReady();
-
-			// Build a map of what values we want per field
-			const targetValuesByField = {};
-			for (const [field, vals = []] of Object.entries(valuesByField || {})) {
-				const values = Array.from(new Set((vals || []).map(String))).filter(Boolean);
-				if (values.length === 0) continue;
-				targetValuesByField[field] = values;
-			}
-
-			try { ddg.utils?.log?.('[fs] applyCheckboxFilters input', valuesByField); } catch { }
-			// Clear ALL existing filters by creating a fresh filters object
-			list.filters.value = {
-				groupsMatch: 'and',
-				groups: [{
-					id: '0',
-					conditionsMatch: 'and',
-					conditions: Object.entries(targetValuesByField).map(([field, values]) => ({
-						id: `${field}_equal`,
-						type: 'checkbox',
-						fieldKey: field,
-						value: values,
-						op: 'equal',
-						interacted: true,
-						showTag: true
-					}))
-				}]
+			const sel = {
+				parent: '[data-relatedfilters="parent"]',
+				target: '[data-relatedfilters="target"]',
+				search: '[data-relatedfilters="search"]',
+				input: 'input[type="checkbox"]',
+				span: '.checkbox_label'
 			};
 
-			// Trigger the filter lifecycle
-			try { ddg.utils?.log?.('[fs] triggerHook: filter'); } catch { }
-			await list.triggerHook('filter');
-			await afterNextRender(list);
-			try { ddg.utils?.log?.('[fs] filters applied and rendered'); } catch { }
-		}
+			const hasUsable = (vals) => {
+				if (!vals) return false;
+				for (const [k, arr] of Object.entries(vals)) {
+					if (EXCLUDED.has(k) || !Array.isArray(arr) || !arr.length) continue;
+					return true;
+				}
+				return false;
+			};
 
-		return { whenReady, items, itemsValues, applyCheckboxFilters, afterNextRender };
+			const createLabel = () => {
+				const label = document.createElement('label');
+				label.className = 'checkbox_field';
+				label.setAttribute('fs-list-emptyfacet', 'add-class');
+
+				const input = document.createElement('input');
+				input.type = 'checkbox';
+				input.className = 'u-display-none';
+				input.setAttribute('fs-list-field', '');
+				input.setAttribute('fs-list-value', '');
+
+				const span = document.createElement('span');
+				span.className = 'checkbox_label';
+
+				label.appendChild(input);
+				label.appendChild(span);
+				return label;
+			};
+
+			const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChild); };
+
+			const render = (parent, vals) => {
+				log('relatedFilters render called', { parentEl: parent, fieldCount: Object.keys(vals || {}).length });
+
+				const target = parent.querySelector(sel.target);
+				if (!target) {
+					log('relatedFilters render: no target found');
+					return;
+				}
+
+				const tpl = target.querySelector('label') || createLabel();
+				clear(target);
+
+				const entries = [];
+				for (const [field, values] of Object.entries(vals || {})) {
+					if (!Array.isArray(values) || !values.length || EXCLUDED.has(field)) continue;
+					for (const value of Array.from(new Set(values))) {
+						entries.push({ field, value: String(value) });
+					}
+				}
+
+				log('relatedFilters render: entries', { total: entries.length });
+
+				const limited = ddg.utils.shuffle(entries).slice(0, MAX);
+				log('relatedFilters render', { total: entries.length, showing: limited.length });
+
+				limited.forEach(({ field, value }, idx) => {
+					const clone = tpl.cloneNode(true);
+					const input = clone.querySelector(sel.input);
+					const span = clone.querySelector(sel.span);
+					if (!input || !span) return;
+
+					input.id = `rf-${field}-${idx}`;
+					input.name = `rf-${field}`;
+					input.setAttribute('fs-list-field', field);
+					input.setAttribute('fs-list-value', value);
+					span.textContent = value;
+					target.appendChild(clone);
+				});
+
+				wireCheckboxes(parent);
+				parent.querySelectorAll(`${sel.target} ${sel.input}`).forEach(input => {
+					const label = input.closest('label');
+					if (label) label.classList.toggle('is-list-active', input.checked);
+				});
+
+				log('relatedFilters render: complete');
+			};
+
+			const getSelected = (parent) => {
+				const checked = parent.querySelectorAll(`${sel.target} ${sel.input}:checked`);
+				const map = {};
+				checked.forEach(input => {
+					const f = input.getAttribute('fs-list-field');
+					const v = input.getAttribute('fs-list-value');
+					if (f && v) (map[f] ||= []).push(v);
+				});
+				return map;
+			};
+
+			const wireCheckboxes = (parent) => {
+				if (parent.rfWired) return;
+				parent.rfWired = true;
+
+				parent.addEventListener('change', (e) => {
+					const input = e.target;
+					if (!input || !input.matches(sel.input)) return;
+					const label = input.closest('label');
+					if (label) label.classList.toggle('is-list-active', input.checked);
+				});
+			};
+
+			const wireSearch = (parent) => {
+				const btn = parent.querySelector(sel.search);
+				if (!btn || btn.rfSearchBound) return;
+				btn.rfSearchBound = true;
+
+				btn.addEventListener('click', async (e) => {
+					e.preventDefault();
+					const vals = getSelected(parent);
+					if (!Object.keys(vals).length) {
+						log('relatedFilters search: no selections');
+						return;
+					}
+
+					log('relatedFilters search apply', vals);
+					const list = await readyList();
+					await utils.applyFilters(list, vals);
+				});
+			};
+
+			const buildAll = (item) => {
+				log('relatedFilters buildAll called', { item });
+
+				const vals = utils.getItemFields(item);
+				log('relatedFilters build', { fields: Object.keys(vals || {}).length, vals });
+
+				const parents = Array.from(document.querySelectorAll(sel.parent));
+				log('relatedFilters build: found parents', parents.length);
+
+				parents.forEach(p => {
+					const t = p.querySelector(sel.target);
+					if (t) clear(t);
+				});
+
+				if (!hasUsable(vals)) {
+					log('relatedFilters: no usable fields');
+					return;
+				}
+
+				parents.forEach(p => {
+					render(p, vals);
+					wireSearch(p);
+				});
+
+				log('relatedFilters buildAll: complete');
+			};
+
+			const init = () => {
+				const root = document.querySelector(sel.parent);
+				if (!root) {
+					log('relatedFilters: no parent element found');
+					return;
+				}
+
+				log('relatedFilters init');
+				Array.from(document.querySelectorAll(sel.target)).forEach(clear);
+
+				log('relatedFilters: adding ddg:current-item-changed listener');
+				document.addEventListener('ddg:current-item-changed', (e) => {
+					log('relatedFilters: ddg:current-item-changed received', e.detail);
+					if (e.detail?.item) {
+						log('relatedFilters: current item changed, building');
+						buildAll(e.detail.item);
+					} else {
+						log('relatedFilters: no item in event detail');
+					}
+				});
+
+				(async () => {
+					try {
+						log('relatedFilters: awaiting readyList');
+						const list = await readyList();
+						log('relatedFilters: got list');
+
+						const rebuild = () => {
+							log('relatedFilters: rebuild called', { hasCurrentItem: !!ddg.currentItem?.item });
+							if (ddg.currentItem?.item) {
+								log('relatedFilters: rebuilding from hook');
+								buildAll(ddg.currentItem.item);
+							} else {
+								log('relatedFilters: no current item to build from');
+							}
+						};
+
+						log('relatedFilters: adding ddg:list-ready listener');
+						document.addEventListener('ddg:list-ready', () => {
+							log('relatedFilters: ddg:list-ready received');
+							rebuild();
+						});
+
+						if (typeof list?.addHook === 'function') {
+							log('relatedFilters: adding afterRender hook');
+							list.addHook('afterRender', () => {
+								log('relatedFilters: afterRender hook fired');
+								rebuild();
+							});
+						}
+						log('relatedFilters wired hooks');
+					} catch (err) {
+						warn('relatedFilters init failed', err);
+					}
+				})();
+			};
+
+			return { init };
+		})();
+
+		// ============================================
+		// RANDOM FILTERS
+		// ============================================
+		const randomFilters = (() => {
+			const MAX_PER_FIELD = 2;
+			const state = { bag: [] };
+
+			const scheduleApply = (() => {
+				let pending = null, resolvers = [];
+				const run = ddg.utils.debounce(async () => {
+					const vals = pending;
+					pending = null;
+					try {
+						log('randomFilters apply', vals);
+						const list = await readyList();
+						await utils.applyFilters(list, vals);
+					} finally {
+						resolvers.forEach(r => r());
+						resolvers = [];
+					}
+				}, 90);
+				return (vals) => new Promise(resolve => {
+					pending = vals;
+					resolvers.push(resolve);
+					run();
+				});
+			})();
+
+			const getKey = (it) =>
+				it?.url?.pathname || it?.slug || it?.fields?.slug?.value || it?.id || null;
+
+			const rebuildBag = (all, exclude) => {
+				const ids = all.map((_, i) => i).filter(i => getKey(all[i]) !== exclude);
+				state.bag = ddg.utils.shuffle(ids);
+				log('randomFilters rebuild bag', { size: state.bag.length, exclude });
+			};
+
+			const getNext = (all) => {
+				const exclude = ddg.currentItem?.item ? getKey(ddg.currentItem.item) : null;
+				if (!Array.isArray(state.bag) || !state.bag.length) rebuildBag(all, exclude);
+				if (!state.bag.length) rebuildBag(all, null);
+				const idx = state.bag.shift();
+				log('randomFilters next', { idx, remain: state.bag.length });
+				return idx;
+			};
+
+			const init = () => {
+				document.addEventListener('click', async (e) => {
+					const btn = e.target.closest('[data-randomfilters]');
+					if (!btn) return;
+					e.preventDefault();
+
+					if (btn.rfLock) return;
+					btn.rfLock = true;
+					setTimeout(() => (btn.rfLock = false), 250);
+
+					const list = await readyList();
+					const all = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
+					if (!all.length) return;
+
+					const idx = getNext(all);
+					const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
+					const allVals = utils.getItemFields(item);
+
+					const limitedVals = {};
+					for (const [field, values] of Object.entries(allVals)) {
+						if (Array.isArray(values) && values.length > 0) {
+							const shuffled = ddg.utils.shuffle([...values]);
+							limitedVals[field] = shuffled.slice(0, MAX_PER_FIELD);
+						} else {
+							limitedVals[field] = values;
+						}
+					}
+
+					log('randomFilters click apply', { idx, key: getKey(item), limitedVals });
+					await scheduleApply(limitedVals);
+				}, true);
+
+				log('randomFilters init');
+			};
+
+			return { init };
+		})();
+
+		const loadingFilters = (() => {
+			const MAX_DISPLAY = 4;
+
+			const init = () => {
+				log('loadingFilters init');
+
+				const waitForWebflow = () => {
+					return new Promise((resolve) => {
+						const checkWebflow = () => {
+							const wfIx = Webflow?.require?.("ix3");
+							if (wfIx?.emit) resolve(wfIx);
+							else requestAnimationFrame(checkWebflow);
+						};
+						checkWebflow();
+					});
+				};
+
+				waitForWebflow().then((wfIx) => {
+					log('loadingFilters: Webflow IX3 ready');
+
+					const parent = document.querySelector('[data-loadingfilters="parent"]');
+					if (!parent) {
+						warn('loadingFilters: no parent element found');
+						return;
+					}
+
+					const labels = parent.querySelectorAll('label');
+					if (labels.length < 4) {
+						warn(`loadingFilters: expected 4 labels, found ${labels.length}`);
+					}
+
+					log('loadingFilters: wired and ready');
+
+					let modalOpen = false;
+					let pendingAnimation = false;
+
+					window.addEventListener('fs:filters-applied', ({ detail }) => {
+						log('loadingFilters: fs:filters-applied received', detail);
+						if (!Array.isArray(detail?.values)) return;
+
+						const values = detail.values.slice(0, MAX_DISPLAY);
+						const extraCount = Math.max(0, detail.values.length - MAX_DISPLAY);
+
+						labels.forEach((label, i) => {
+							const span = label.querySelector('span');
+							if (values[i]) {
+								// Assign value + show label
+								label.style.display = '';
+								if (span) span.textContent = values[i];
+								label.querySelector('input')?.setAttribute('fs-list-value', values[i]);
+							} else if (i === values.length && extraCount > 0) {
+								// "+N more" label
+								label.style.display = '';
+								if (span) span.textContent = `+${extraCount} more`;
+								label.querySelector('input')?.setAttribute('fs-list-value', '');
+							} else {
+								// Hide unused labels
+								label.style.display = 'none';
+								if (span) span.textContent = '';
+								label.querySelector('input')?.setAttribute('fs-list-value', '');
+							}
+						});
+
+						const hasFilters = detail.values.length > 0;
+						if (hasFilters) {
+							if (modalOpen) {
+								log('loadingFilters: queuing animation (modal open)');
+								pendingAnimation = true;
+							} else {
+								log('loadingFilters: trigger animation (modal closed)');
+								wfIx.emit("loadingFilters");
+							}
+						}
+					});
+
+					document.addEventListener('ddg:modal-opened', (e) => {
+						if (e?.detail?.id === 'filters') {
+							modalOpen = true;
+							log('loadingFilters: modal opened');
+						}
+					});
+
+					document.addEventListener('ddg:modal-closed', (e) => {
+						if (e?.detail?.id === 'filters') {
+							modalOpen = false;
+							log('loadingFilters: modal closed');
+
+							if (pendingAnimation) {
+								log('loadingFilters: trigger pending animation');
+								pendingAnimation = false;
+								wfIx.emit("loadingFilters");
+							}
+						}
+					});
+				});
+			};
+
+			return { init };
+		})();
+
+		// ============================================
+		// MAIN INITIALIZER
+		// ============================================
+		let initialized = false;
+
+		const finsweetRelated = () => {
+			if (initialized) return;
+			initialized = true;
+
+			log('finsweetRelated init');
+			log('finsweetRelated: calling currentItem.resolve()');
+			currentItem.resolve();
+			log('finsweetRelated: calling relatedFilters.init()');
+			relatedFilters.init();
+			log('finsweetRelated: calling randomFilters.init()');
+			randomFilters.init();
+			log('finsweetRelated: calling loadingFilters.init()');
+			loadingFilters.init();
+			log('finsweetRelated: init complete');
+		};
+
+		// ============================================
+		// PUBLIC API
+		// ============================================
+		return {
+			readyList,
+			finsweetRelated,
+			resolveCurrentItem: currentItem.resolve
+		};
 	})();
 
 	function initSite() {
@@ -361,16 +979,13 @@
 			iframe();
 			nav();
 			modals();
-			currentItem();
-			relatedFilters();
+			ddg.fs.finsweetRelated();
 			ajaxStories();
 			homelistSplit();
 			outreach();
 			share();
-			randomFilters();
 			storiesAudioPlayer();
 			joinButtons();
-			debugEvents();
 		});
 	}
 
@@ -568,25 +1183,19 @@
 			}
 		};
 
-		const onResize = ddg?.utils?.debounce ? ddg.utils.debounce(update, 150) : update;
+		const throttleUpdate = ddg.utils.throttle(update, 120);
 
 		const init = async () => {
 			await (ddg?.utils?.fontsReady?.() ?? Promise.resolve());
+
 			update();
-
-			window.addEventListener('resize', onResize);
-
-			ddg?.fs?.whenReady?.().then(listInstance => {
-				if (typeof listInstance?.addHook === 'function') {
-					listInstance.addHook('afterRender', update);
-				}
-			});
+			window.addEventListener('ddg:resize', throttleUpdate);
+			window.addEventListener('ddg:filters-change', throttleUpdate);
 		};
 
 		init();
 
 		return () => {
-			window.removeEventListener('resize', onResize);
 			revertSplit();
 		};
 	}
@@ -1240,9 +1849,12 @@
 					if (window !== window.parent) {
 						try { ddg.iframeBridge.post('sync-url', { url, title: document.title }); } catch { }
 					}
-					ddg.fs.whenReady()
+					ddg.fs.readyList()
 						.then(() => dispatchStoryOpened(url))
 						.catch(() => dispatchStoryOpened(url))
+						.finally(() => {
+							ddg.fs.resolveCurrentItem?.(url);
+						});
 
 				}
 			});
@@ -1274,6 +1886,7 @@
 			if (ev.detail?.id !== storyModalId) return;
 			document.title = originalTitle;
 			history.pushState({}, '', homeUrl);
+			ddg.fs.resolveCurrentItem?.(homeUrl);
 			if (window !== window.parent) {
 				try { ddg.iframeBridge.post('sync-url', { url: homeUrl, title: originalTitle }); } catch { }
 			}
@@ -1356,87 +1969,11 @@
 			if (!modal) return;
 			if (!path.startsWith('/stories/')) {
 				if (modal.isOpen()) modal.close();
+				ddg.fs.resolveCurrentItem?.(window.location.href);
 				return;
 			}
 			loadAndOpenStory(window.location.href, { stateMode: 'none', showSkeleton: true, force: true });
 		});
-	}
-
-	function randomFilters() {
-		const triggerSelector = '[data-randomfilters]';
-		const triggerEl = document.querySelector(triggerSelector);
-		if (!triggerEl) return;
-		if (ddg.randomFiltersInitialized) return;
-		ddg.randomFiltersInitialized = true;
-		try { ddg.utils?.log?.('[randomFilters] init', { trigger: triggerSelector }); } catch { }
-
-		const selectors = { trigger: triggerSelector };
-		const state = (ddg.randomFilters ||= { bag: [] });
-		if (!state.scheduleApply) {
-			state.scheduleApply = (() => {
-				let pendingValues = null;
-				let resolvers = [];
-				const run = ddg.utils.debounce(async () => {
-					const toApply = pendingValues;
-					pendingValues = null;
-					try {
-						try { ddg.utils?.log?.('[randomFilters] scheduleApply run', toApply); } catch { }
-						await ddg.fs.applyCheckboxFilters(toApply);
-					} finally {
-						const pending = resolvers.slice();
-						resolvers = [];
-						pending.forEach(r => r());
-					}
-				}, 90);
-				return (values) => new Promise((resolve) => {
-					pendingValues = values;
-					resolvers.push(resolve);
-					run();
-				});
-			})();
-		}
-
-		const keyOf = (it) => (
-			it?.url?.pathname ||
-			it?.slug ||
-			it?.fields?.slug?.value ||
-			it?.id || null
-		);
-
-		const rebuildBag = (all, excludeKey) => {
-			const ids = all.map((_, i) => i).filter(i => keyOf(all[i]) !== excludeKey);
-			state.bag = ddg.utils.shuffle(ids);
-			try { ddg.utils?.log?.('[randomFilters] rebuild bag', { size: state.bag.length, excludeKey }); } catch { }
-		};
-
-		const nextIndex = (all) => {
-			const excludeKey = ddg.currentItem?.item ? keyOf(ddg.currentItem.item) : null;
-			if (!Array.isArray(state.bag) || !state.bag.length) rebuildBag(all, excludeKey);
-			if (!state.bag.length) rebuildBag(all, null);
-			const idx = state.bag.shift();
-			try { ddg.utils?.log?.('[randomFilters] next index', { idx, remain: state.bag.length, excludeKey }); } catch { }
-			return idx;
-		};
-
-		document.addEventListener('click', async (e) => {
-			const btn = e.target.closest(selectors.trigger);
-			if (!btn) return;
-			e.preventDefault();
-
-			if (btn.rfLock) return;
-			btn.rfLock = true;
-			setTimeout(() => (btn.rfLock = false), 250);
-
-			const list = await ddg.fs.whenReady();
-			const all = ddg.fs.items(list);
-			if (!all.length) return;
-
-			const idx = nextIndex(all);
-			const item = all[idx] ?? all[Math.floor(Math.random() * all.length)];
-			const values = ddg.fs.itemsValues(item);
-			try { ddg.utils?.log?.('[randomFilters] click apply', { idx, key: keyOf(item), values }); } catch { }
-			await state.scheduleApply(values);
-		}, true);
 	}
 
 	function storiesAudioPlayer() {
@@ -1921,291 +2458,6 @@
 		}
 	}
 
-	function currentItem() {
-		const logPrefix = '[currentItem]';
-
-		ddg.currentItem ??= { item: null, url: null, list: null };
-
-		let lastKey = null;
-		let pendingUrl = null;   // last seen story url (can arrive before list is ready)
-		let hooksBound = false;
-		let unresolvedWarnLogged = false;
-
-		document.addEventListener('ddg:modal-closed', (e) => {
-			if (e.detail?.id === 'story') lastKey = null;
-		});
-
-		function keyFor(item) {
-			return (
-				(item?.slug) ||
-				(item?.fields?.slug?.value) ||
-				(item?.url?.pathname) ||
-				(item?.id) ||
-				''
-			);
-		}
-
-		function findItem(list, urlString) {
-			if (!list) return null;
-			const items = Array.isArray(list.items?.value) ? list.items.value : (list.items || []);
-			if (!items.length) return null;
-
-			const u = new URL(urlString || window.location.href, window.location.origin);
-			const pathname = u.pathname;
-			const slug = pathname.split('/').filter(Boolean).pop() || '';
-
-			let found = items.find(it => it?.url?.pathname === pathname);
-			if (found) return found;
-
-			if (slug) {
-				const lower = slug.toLowerCase();
-				found = items.find(it => {
-					const s = (typeof it?.slug === 'string' ? it.slug :
-						typeof it?.fields?.slug?.value === 'string' ? it.fields.slug.value : '');
-					return s && s.toLowerCase() === lower;
-				});
-			}
-			return found || null;
-		}
-
-		function setCurrent(item, url) {
-			const k = keyFor(item);
-			if (!k) { return; }
-			if (k === lastKey) return; // no change
-
-			lastKey = k;
-			ddg.currentItem.item = item;
-			ddg.currentItem.url = url;
-			unresolvedWarnLogged = false;
-
-			ddg.utils.emit('ddg:current-item-changed', { item, url });
-		}
-
-		function bindListHooks(list) {
-			if (hooksBound) return;
-			hooksBound = true;
-			if (typeof list.addHook === 'function') list.addHook('afterRender', () => tryResolve());
-			if (typeof list.watch === 'function') list.watch(() => list.items?.value, () => tryResolve());
-		}
-
-		async function ensureList() {
-			if (ddg.currentItem.list) return ddg.currentItem.list;
-			const list = await ddg.fs.whenReady();
-			ddg.currentItem.list = list;
-			bindListHooks(list);
-			return list;
-		}
-
-		async function tryResolve(url) {
-			pendingUrl = url || pendingUrl || window.location.href;
-			const list = ddg.currentItem.list || await ensureList();
-			const item = findItem(list, pendingUrl);
-			if (item) { setCurrent(item, pendingUrl); return; }
-
-			try {
-				const resolved = new URL(pendingUrl, window.location.origin);
-				if (!unresolvedWarnLogged && list && resolved.pathname.startsWith('/stories/')) {
-					unresolvedWarnLogged = true;
-					ddg.utils.warn(`${logPrefix} unresolved for URL ${resolved.href}`);
-				}
-			} catch (err) {
-				if (!unresolvedWarnLogged) {
-					unresolvedWarnLogged = true;
-					ddg.utils.warn(`${logPrefix} unresolved for URL ${pendingUrl}`);
-				}
-			}
-
-
-		}
-
-		// capture early story-opened (can fire before list exists)
-		document.addEventListener('ddg:story-opened', (e) => {
-			pendingUrl = e.detail?.url || window.location.href;
-			tryResolve(pendingUrl);
-		});
-
-	}
-
-	function relatedFilters() {
-		const parentSelector = '[data-relatedfilters="parent"]';
-		const targetSelector = '[data-relatedfilters="target"]';
-		const rootParent = document.querySelector(parentSelector);
-		if (!rootParent) return;
-		if (ddg.relatedFiltersInitialized) return;
-		ddg.relatedFiltersInitialized = true;
-		try { ddg.utils?.log?.('[relatedFilters] init', { parentSelector, targetSelector }); } catch { }
-
-		const selectors = {
-			parent: parentSelector,
-			target: targetSelector,
-			search: '[data-relatedfilters="search"]',
-			label: 'label[fs-list-emptyfacet]',
-			input: 'input[type="checkbox"][fs-list-field][fs-list-value]',
-			span: '.checkbox_label'
-		};
-
-		const excludeFields = new Set(['slug', 'name', 'title']);
-		const MAX_FILTERS = 6;
-
-
-		Array.from(document.querySelectorAll(selectors.target)).forEach((el) => clearTarget(el));
-
-		function hasAnyUsableValues(values) {
-			if (!values) return false;
-			for (const [k, arr] of Object.entries(values)) {
-				if (excludeFields.has(k)) continue;
-				if (Array.isArray(arr) && arr.length) return true;
-			}
-			return false;
-		}
-
-		function buildAll(item) {
-			const values = ddg.fs.itemsValues(item);
-			try { ddg.utils?.log?.('[relatedFilters] build from item', { fields: Object.keys(values || {}).length }); } catch { }
-
-			// Always clear targets first; if no usable values, leave empty
-			const parents = Array.from(document.querySelectorAll(selectors.parent));
-			parents.forEach((parent) => {
-				const target = parent.querySelector(selectors.target);
-				if (target) clearTarget(target);
-			});
-
-			if (!hasAnyUsableValues(values)) { return; }
-
-			parents.forEach((parent) => {
-				renderListForItem(parent, values);
-				wireSearch(parent);
-			});
-		}
-
-		function createLabelTemplate() {
-			const label = document.createElement('label');
-			label.className = 'checkbox_field';
-			label.setAttribute('fs-list-emptyfacet', 'add-class');
-			const input = document.createElement('input');
-			input.type = 'checkbox';
-			input.className = 'u-display-none';
-			input.setAttribute('fs-list-field', '');
-			input.setAttribute('fs-list-value', '');
-			const span = document.createElement('span');
-			span.className = 'checkbox_label';
-			label.appendChild(input);
-			label.appendChild(span);
-			return label;
-		}
-
-		function clearTarget(target) {
-			while (target.firstChild) target.removeChild(target.firstChild);
-		}
-
-		function renderListForItem(parent, itemValues) {
-			const target = parent.querySelector(selectors.target);
-			if (!target) return;
-
-			// get a template label if present in DOM, else build one
-			const tpl = target.querySelector(selectors.label) || createLabelTemplate();
-			clearTarget(target);
-
-			const entries = [];
-			for (const [field, arr] of Object.entries(itemValues || {})) {
-				if (!Array.isArray(arr) || !arr.length) continue;
-				if (excludeFields.has(field)) continue;
-				for (const val of Array.from(new Set(arr))) {
-					entries.push({ field, value: String(val) });
-				}
-			}
-
-
-			const limited = ddg.utils.shuffle(entries).slice(0, MAX_FILTERS);
-			try { ddg.utils?.log?.('[relatedFilters] render entries', { total: entries.length, showing: limited.length }); } catch { }
-			limited.forEach(({ field, value }, idx) => {
-				const clone = tpl.cloneNode(true);
-				const input = clone.querySelector(selectors.input);
-				const span = clone.querySelector(selectors.span);
-				if (!input || !span) return;
-				const id = `rf-${field}-${idx}`;
-				input.id = id;
-				input.name = `rf-${field}`;
-				input.setAttribute('fs-list-field', field);
-				input.setAttribute('fs-list-value', value);
-				span.textContent = value;
-				target.appendChild(clone);
-			});
-
-			// ensure selection wiring and initial active classes
-			wireSelectable(parent);
-			const inputs = parent.querySelectorAll(`${selectors.target} ${selectors.input}`);
-			inputs.forEach((i) => {
-				const label = i.closest('label');
-				if (!label) return;
-				label.classList.toggle('is-list-active', i.checked);
-			});
-		}
-
-		function collectSelections(parent) {
-			const selected = parent.querySelectorAll(`${selectors.target} ${selectors.input}:checked`);
-			const map = {};
-			selected.forEach((el) => {
-				const f = el.getAttribute('fs-list-field');
-				const v = el.getAttribute('fs-list-value');
-				if (!f || !v) return;
-				(map[f] ||= []).push(v);
-			});
-			return map;
-		}
-
-		function wireSelectable(parent) {
-			if (parent.rfSelectableBound) return;
-			parent.rfSelectableBound = true;
-
-			// Toggle active class when a checkbox changes
-			parent.addEventListener('change', (e) => {
-				const input = e.target;
-				if (!input || !input.matches(selectors.input)) return;
-				const label = input.closest('label');
-				if (!label) return;
-				label.classList.toggle('is-list-active', input.checked);
-			});
-
-			// Initialize current active states (in case of SSR or restored DOM)
-			const inputs = parent.querySelectorAll(`${selectors.target} ${selectors.input}`);
-			inputs.forEach((i) => {
-				const label = i.closest('label');
-				if (!label) return;
-				label.classList.toggle('is-list-active', i.checked);
-			});
-		}
-
-		function wireSearch(parent) {
-			const btn = parent.querySelector(selectors.search);
-			if (!btn || btn.rfBound) return;
-			btn.rfBound = true;
-			btn.addEventListener('click', async (e) => {
-				e.preventDefault();
-				const values = collectSelections(parent);
-				if (!Object.keys(values).length) { try { ddg.utils?.log?.('[relatedFilters] search clicked with no selections'); } catch { } return; }
-				try { ddg.utils?.log?.('[relatedFilters] search apply', values); } catch { }
-				await ddg.fs.applyCheckboxFilters(values);
-			});
-		}
-
-		document.addEventListener('ddg:current-item-changed', (e) => {
-			const item = e.detail?.item;
-			if (!item) return;
-			try { ddg.utils?.log?.('[relatedFilters] current item changed'); } catch { }
-			buildAll(item);
-		});
-
-		ddg.fs.whenReady().then(list => {
-			const rebuild = () => {
-				if (ddg.currentItem?.item) buildAll(ddg.currentItem.item);
-			};
-			document.addEventListener('ddg:list-ready', rebuild);
-			if (typeof list.addHook === 'function') list.addHook('afterRender', rebuild);
-			try { ddg.utils?.log?.('[relatedFilters] wired FS hooks'); } catch { }
-		});
-	}
-
 	function joinButtons() {
 		const stickyButton = document.querySelector('.join_sticky');
 		const staticButton = document.querySelector('.join-cta_btn .button');
@@ -2222,7 +2474,6 @@
 		const scrollOffset = `bottom bottom-=${remInPx}px`;
 
 		const showStaticHideSticky = () => {
-			// flip both in the same task to avoid any perceived fade
 			stickyButton.style.display = 'none';
 			staticButton.style.visibility = 'visible';
 			staticButton.removeAttribute('aria-hidden');
@@ -2242,46 +2493,8 @@
 			onLeaveBack: showStickyHideStatic,
 			invalidateOnRefresh: true
 		});
-
-		// optional cleanup if you need it elsewhere
 		return () => trigger.kill();
 	}
-
-	function debugEvents() {
-		ddg.debug ||= {};
-		const events = [
-			'ddg:modal-opened',
-			'ddg:modal-closed',
-			'ddg:story-opened',
-			'ddg:modals-ready',
-			'ddg:list-ready',
-			'ddg:current-item-changed',
-			'ddg:share:start',
-			'ddg:share:copied',
-			'ddg:share:end',
-			'ddg:resize'
-		];
-		// cleanup previous
-		try { ddg.debug.__cleanup && ddg.debug.__cleanup(); } catch { }
-		const cleanups = [];
-		// attach listeners
-		events.forEach((type) => {
-			const handler = (e) => { try { console.log('[ddg][event]', type, e?.detail ?? null); } catch { } };
-			document.addEventListener(type, handler);
-			cleanups.push(() => document.removeEventListener(type, handler));
-		});
-		// wrap ddg.utils.emit
-		if (ddg.utils && typeof ddg.utils.emit === 'function') {
-			const orig = ddg.utils.emit;
-			ddg.utils.emit = (event, detail, el = document) => {
-				try { if (String(event).startsWith('ddg:')) console.log('[ddg][emit]', event, detail ?? null); } catch { }
-				return orig(event, detail, el);
-			};
-			cleanups.push(() => { try { ddg.utils.emit = orig; } catch { } });
-		}
-		ddg.debug.__cleanup = () => { const fns = cleanups.splice(0); fns.forEach(fn => { try { fn(); } catch { } }); };
-		return ddg.debug.__cleanup;
-	};
 
 	ddg.boot = initSite;
 })();
