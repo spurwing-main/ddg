@@ -43,79 +43,72 @@
 		warn: (...a) => console.warn('[ddg]', ...a),
 
 		fontsReady: async (timeoutMs = 3000) => {
-			if (!document.fonts?.ready) {
-				await new Promise(r => requestAnimationFrame(r));
-				return;
+			if (!document.fonts || !document.fonts.ready) {
+				return new Promise(r => requestAnimationFrame(r));
 			}
-			try {
-				await Promise.race([
-					document.fonts.ready,
-					new Promise(r => setTimeout(r, timeoutMs))
-				]);
-				await new Promise(r => requestAnimationFrame(r));
-			} catch { }
+
+			await Promise.race([
+				document.fonts.ready,
+				new Promise(r => setTimeout(r, timeoutMs))
+			]);
+
+			return new Promise(r => requestAnimationFrame(r));
 		}
 	};
 
 	ddg.iframeBridge ??= (() => {
 		const prefix = 'ddg:';
-		const listeners = new Map();
 
 		function post(type, data = {}, target = 'parent') {
 			if (!type) return;
-			try {
-				const t = target === 'parent' ? window.parent : target;
-				if (!t || typeof t.postMessage !== 'function') return;
-				t.postMessage({ type: prefix + type, data }, '*');
-			} catch (err) {
-				ddg.utils.warn('[iframeBridge] post failed', err);
-			}
+			const t = target === 'parent' ? window.parent : target;
+			if (!t || typeof t.postMessage !== 'function') return;
+			t.postMessage({ type: prefix + type, data }, '*');
 		}
 
 		function on(type, fn) {
-			if (!type || typeof fn !== 'function') return () => { };
+			if (!type || typeof fn !== 'function') return () => {};
 			const key = prefix + type;
-			const handler = (e) => { if (e?.data?.type === key) fn(e.data.data, e); };
+			const handler = (e) => {
+				if (e && e.data && e.data.type === key) fn(e.data.data, e);
+			};
 			window.addEventListener('message', handler);
-			listeners.set(fn, handler);
-			return () => { window.removeEventListener('message', handler); listeners.delete(fn); };
+			return () => window.removeEventListener('message', handler);
 		}
 
 		return { post, on };
 	})();
 
 	ddg.net ??= {
-		// Fetch and return parsed HTMLDocument
 		async fetchHTML(url) {
-			if (!url || typeof url !== 'string') throw new Error('ddg.net.fetchHTML: invalid url');
 			const res = await fetch(url, { credentials: 'same-origin' });
-			if (!res.ok) throw new Error(`ddg.net.fetchHTML: http ${res.status}`);
+			if (!res.ok) throw new Error(`fetchHTML: HTTP ${res.status}`);
 			const text = await res.text();
 			return new DOMParser().parseFromString(text, 'text/html');
 		},
-		// Fetch and parse json safely
+
 		async fetchJSON(url) {
-			if (!url || typeof url !== 'string') throw new Error('ddg.net.fetchJSON: invalid url');
 			const res = await fetch(url, { credentials: 'same-origin' });
-			if (!res.ok) throw new Error(`ddg.net.fetchJSON: http ${res.status}`);
-			try {
-				return await res.json();
-			} catch {
-				throw new Error('ddg.net.fetchJSON: invalid json');
-			}
+			if (!res.ok) throw new Error(`fetchJSON: HTTP ${res.status}`);
+			return res.json();
 		},
-		// Prefetch (html or json) after delay, cancellable
+
 		prefetch(url, delay = 250) {
-			if (!url) throw new Error('ddg.net.prefetch: missing url');
 			const controller = new AbortController();
-			const timeout = setTimeout(async () => {
-				try {
-					await fetch(url, { signal: controller.signal, credentials: 'same-origin' });
-				} catch (err) {
-					if (err && err.name !== 'AbortError') ddg.utils.warn('ddg.net.prefetch failed:', err);
-				}
+			const timeout = setTimeout(() => {
+				fetch(url, {
+					signal: controller.signal,
+					credentials: 'same-origin'
+				}).catch((err) => {
+					if (!err || err.name === 'AbortError') return;
+					ddg.utils.warn('ddg.net.prefetch failed:', err);
+				});
 			}, delay);
-			return () => { clearTimeout(timeout); controller.abort(); };
+
+			return () => {
+				clearTimeout(timeout);
+				controller.abort();
+			};
 		}
 	};
 
@@ -181,17 +174,6 @@
 		const notify = () => {
 			lastSize = readSize();
 			const detail = { ...lastSize };
-
-			// Fire a single global custom event (on both window + document for maximum compatibility)
-			const evt = new CustomEvent('ddg:resize', { detail });
-			try {
-				window.dispatchEvent(evt);
-			} catch { /* ignore */ }
-			try {
-				document.dispatchEvent(evt);
-			} catch { /* ignore */ }
-
-			// Call registered listeners
 			listeners.forEach(fn => {
 				try {
 					fn(detail);
@@ -201,12 +183,11 @@
 			});
 		};
 
-		// One global, throttled resize handler
 		const onWinResize = ddg.utils.throttle(notify, 150);
 		window.addEventListener('resize', onWinResize, { passive: true });
 
 		const on = (fn, { immediate = false } = {}) => {
-			if (typeof fn !== 'function') return () => { };
+			if (typeof fn !== 'function') return () => {};
 			listeners.add(fn);
 
 			if (immediate) {
@@ -217,9 +198,7 @@
 				}
 			}
 
-			return () => {
-				listeners.delete(fn);
-			};
+			return () => listeners.delete(fn);
 		};
 
 		const getSize = () => ({ ...lastSize });
@@ -245,20 +224,18 @@
 			listPromise = new Promise((resolve) => {
 				window.FinsweetAttributes ||= [];
 				window.FinsweetAttributes.push(['list', (instances) => {
-					const list = Array.isArray(instances) ? (instances.find(Boolean) ?? instances[0]) : instances;
+					const list = Array.isArray(instances)
+						? (instances.find(Boolean) || instances[0])
+						: instances;
 
 					if (!list) {
-						throw new Error('ddg.fs.readyList: Finsweet list instance is missing or invalid');
+						warn('readyList: Finsweet list instance missing');
+						resolve(null);
+						return;
 					}
 
 					log('list ready', { instances });
-
-					try {
-						ddg.utils.emit('fs:list-ready', { list });
-					} catch (err) {
-						warn('event dispatch failed', err);
-					}
-
+					ddg.utils.emit('fs:list-ready', { list });
 					resolve(list);
 				}]);
 			});
@@ -273,17 +250,18 @@
 				resolve: async (url = window.location.href) => {
 					const list = await readyList();
 					if (!list || !list.items) {
-						throw new Error('ddg.fs.currentItem.resolve: list or list.items missing');
+						warn('currentItem.resolve: list or items missing');
+						return;
 					}
 
 					const itemsArr = getItemsArray(list);
 					if (!itemsArr.length) {
-						throw new Error('ddg.fs.currentItem.resolve: items is empty');
+						warn('currentItem.resolve: no items');
+						return;
 					}
 
 					const resolved = new URL(url, window.location.origin);
 
-					// Use Finsweet's native item matching
 					const item = itemsArr.find(item => {
 						if (!item.url) return false;
 						return item.url.pathname === resolved.pathname;
@@ -302,7 +280,8 @@
 		const setFilters = async (fieldValues, { reset = true } = {}) => {
 			const list = await readyList();
 			if (!list) {
-				throw new Error('ddg.fs.setFilters: list instance is missing');
+				warn('setFilters: list instance missing');
+				return;
 			}
 
 		// Step 1: Clear all form fields first (only if reset is true)
@@ -555,78 +534,99 @@
 			const init = () => {
 				log('loadingFilters init');
 
-				new Promise((resolve) => {
+				let attempts = 0;
+				const maxAttempts = 300;
+
+				const waitForIx = () => new Promise((resolve, reject) => {
 					const check = () => {
-						const wfIx = Webflow.require("ix3");
-						if (wfIx.emit) resolve(wfIx);
-						else requestAnimationFrame(check);
+						attempts += 1;
+						const wf = window.Webflow;
+						if (wf && typeof wf.require === 'function') {
+							const wfIx = wf.require('ix3');
+							if (wfIx && typeof wfIx.emit === 'function') {
+								resolve(wfIx);
+								return;
+							}
+						}
+						if (attempts >= maxAttempts) {
+							reject(new Error('Webflow ix3 not ready'));
+							return;
+						}
+						requestAnimationFrame(check);
 					};
 					check();
-				}).then((wfIx) => {
-					const parent = document.querySelector('[data-loadingfilters="parent"]');
-					if (!parent) return;
+				});
 
-					const labels = parent.querySelectorAll('label');
-					let modalOpen = false;
-					let pendingAnimation = false;
+				waitForIx()
+					.then((wfIx) => {
+						const parent = document.querySelector('[data-loadingfilters="parent"]');
+						if (!parent) return;
 
-					// Listen for Finsweet's native filter hook
-					readyList().then(list => {
-						list.addHook('filter', (items) => {
-							// Extract current filter values from list.filters
-							const allValues = list.filters.value.groups.flatMap(group =>
-								group.conditions.flatMap(condition => {
-									const val = condition.value;
-									return Array.isArray(val) ? val : [val];
-								})
-							).filter(Boolean);
+						const labels = parent.querySelectorAll('label');
+						let modalOpen = false;
+						let pendingAnimation = false;
 
-							const values = allValues.slice(0, maxDisplay);
-							const extraCount = Math.max(0, allValues.length - maxDisplay);
+						readyList().then(list => {
+							if (!list || !list.filters || !list.filters.value) return;
 
-							labels.forEach((label, i) => {
-								const span = label.querySelector('span');
-								label.style.pointerEvents = 'none';
+							list.addHook('filter', (items) => {
+								const groups = list.filters.value.groups || [];
+								const allValues = groups.flatMap(g =>
+									(g.conditions || []).flatMap(condition => {
+										const val = condition.value;
+										return Array.isArray(val) ? val : [val];
+									})
+								).filter(Boolean);
 
-								if (values[i]) {
-									label.style.display = '';
-									if (span) span.textContent = values[i];
-								} else if (i === values.length && extraCount > 0) {
-									label.style.display = '';
-									if (span) span.textContent = `+${extraCount} more`;
-								} else {
-									label.style.display = 'none';
+								const values = allValues.slice(0, maxDisplay);
+								const extraCount = Math.max(0, allValues.length - maxDisplay);
+
+								labels.forEach((label, i) => {
+									const span = label.querySelector('span');
+									label.style.pointerEvents = 'none';
+
+									if (values[i]) {
+										label.style.display = '';
+										if (span) span.textContent = values[i];
+									} else if (i === values.length && extraCount > 0) {
+										label.style.display = '';
+										if (span) span.textContent = `+${extraCount} more`;
+									} else {
+										label.style.display = 'none';
+									}
+								});
+
+								if (values.length > 0) {
+									if (modalOpen) {
+										pendingAnimation = true;
+									} else {
+										window.scrollTo({ top: 0, behavior: 'smooth' });
+										wfIx.emit('loadingFilters');
+									}
 								}
-							});
 
-							if (values.length > 0) {
-								if (modalOpen) {
-									pendingAnimation = true;
-								} else {
+								return items;
+							});
+						});
+
+						document.addEventListener('ddg:modal-opened', (e) => {
+							if (e.detail && e.detail.id === 'filters') modalOpen = true;
+						});
+
+						document.addEventListener('ddg:modal-closed', (e) => {
+							if (e.detail && e.detail.id === 'filters') {
+								modalOpen = false;
+								if (pendingAnimation) {
+									pendingAnimation = false;
 									window.scrollTo({ top: 0, behavior: 'smooth' });
-									wfIx.emit("loadingFilters");
+									wfIx.emit('loadingFilters');
 								}
 							}
-
-							return items; // Pass items through unchanged
 						});
+					})
+					.catch(err => {
+						warn('loadingFilters: Webflow ix3 not available', err);
 					});
-
-					document.addEventListener('ddg:modal-opened', (e) => {
-						if (e?.detail?.id === 'filters') modalOpen = true;
-					});
-
-					document.addEventListener('ddg:modal-closed', (e) => {
-						if (e?.detail?.id === 'filters') {
-							modalOpen = false;
-							if (pendingAnimation) {
-								pendingAnimation = false;
-								window.scrollTo({ top: 0, behavior: 'smooth' });
-								wfIx.emit("loadingFilters");
-								}
-						}
-					});
-				});
 			};
 
 			return { init };
@@ -717,16 +717,22 @@
 			() => ddg.iframeBridge.post('sync-url', { url: location.href, title: document.title }), 50
 		);
 
-		const wrap = (name) => {
-			try {
-				const orig = history[name];
-				if (typeof orig !== 'function' || orig.__ddgWrapped) return;
-				history[name] = function () { const r = orig.apply(this, arguments); notify(); return r; };
-				history[name].__ddgWrapped = true;
-			} catch { }
+		const wrapHistory = (name) => {
+			const orig = history[name];
+			if (typeof orig !== 'function' || orig.__ddgWrapped) return;
+
+			const wrapped = function (...args) {
+				const result = orig.apply(this, args);
+				notify();
+				return result;
+			};
+
+			wrapped.__ddgWrapped = true;
+			history[name] = wrapped;
 		};
 
-		wrap('pushState'); wrap('replaceState');
+		wrapHistory('pushState');
+		wrapHistory('replaceState');
 		window.addEventListener('popstate', notify);
 		window.addEventListener('hashchange', notify);
 		setTimeout(notify, 0);
@@ -906,7 +912,7 @@
 		};
 
 		// ---------- tiny helpers ----------
-		const toNum = (v) => {
+		const parseCountdown = (v) => {
 			const n = parseInt(String(v ?? '').trim(), 10);
 			return Number.isFinite(n) ? n : 0;
 		};
@@ -958,7 +964,7 @@
 		const tickCountdowns = () => {
 			let hitZero = false;
 			document.querySelectorAll('[data-share-countdown]').forEach((node) => {
-				const cur = toNum(
+				const cur = parseCountdown(
 					node.getAttribute('data-share-countdown') ||
 					(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node.value : node.textContent)
 				);
@@ -1045,11 +1051,7 @@
 			// countdown + optional confetti (does not block navigation)
 			const shouldConfetti = tickCountdowns();
 			if (shouldConfetti) {
-				// fire & forget so navigation happens in the same user-gesture tick
-				try {
-					// confetti() already catches internally, but add a guard to avoid unhandled rejections
-					Promise.resolve(confetti()).catch(() => { /* noop */ });
-				} catch { /* noop */ }
+				void confetti();
 			}
 
 			// fire webhook once/day
@@ -1118,7 +1120,6 @@
 
 		ddg.modalsInitialized = true;
 		ddg.modals ??= {};
-		ddg.modalsKeydownBound = Boolean(ddg.modalsKeydownBound);
 
 		const selectors = {
 			trigger: '[data-modal-trigger]',
@@ -1636,7 +1637,7 @@
 
 		const cancelPrefetch = () => {
 			if (!prefetchCancel) return;
-			try { prefetchCancel(); } catch { }
+			prefetchCancel();
 			prefetchCancel = null;
 		};
 
@@ -1737,12 +1738,17 @@
 			const muteIcon = muteBtn.querySelector('.circle-btn_icon.is-mute');
 			const unmuteIcon = muteBtn.querySelector('.circle-btn_icon.is-unmute');
 
-			let wavesurfer;
 			let isMuted = false;
 
 			ddg.utils.log('[audio] creating new player', audioUrl);
+
+			if (typeof WaveSurfer === 'undefined') {
+				ddg.utils.warn('[audio] WaveSurfer not available');
+				return;
+			}
+
+			let wavesurfer;
 			try {
-				if (typeof WaveSurfer === 'undefined') throw new Error('WaveSurfer not available');
 				wavesurfer = WaveSurfer.create({
 					container: waveformEl,
 					height: waveformEl.offsetHeight || 42,
@@ -1937,24 +1943,36 @@
 
 		// wavesurfer
 		function initWaveSurfer() {
+			if (typeof WaveSurfer === 'undefined' || !WaveSurfer.Record) {
+				warn('WaveSurfer or Record plugin missing — recorder disabled.');
+				return;
+			}
+
 			wsRecord?.destroy?.();
 			wsRecord = WaveSurfer.create({
 				container: recWaveWrap,
 				waveColor: 'rgb(0,0,0)',
 				progressColor: 'rgb(0,0,0)',
 				normalize: false,
-				barWidth: 4, barGap: 6, barHeight: 2.5
+				barWidth: 4,
+				barGap: 6,
+				barHeight: 2.5
 			});
+
 			wsRecordPlugin = wsRecord.registerPlugin(WaveSurfer.Record.create({
 				renderRecordedAudio: false,
 				scrollingWaveform: false,
 				continuousWaveform: false,
 				continuousWaveformDuration: 30
 			}));
+
 			wsRecordPlugin.on('record-progress', (ms) => setTimerMs(ms));
 			wsRecordPlugin.on('record-end', (b) => {
-				blob = b; recording = false; syncButtons();
+				blob = b;
+				recording = false;
+				syncButtons();
 				wsPlayback?.destroy?.();
+
 				const url = URL.createObjectURL(b);
 				wsPlayback = WaveSurfer.create({
 					container: pbWaveWrap,
@@ -1962,13 +1980,19 @@
 					waveColor: '#B1B42E',
 					progressColor: 'rgb(0,0,0)',
 					normalize: true,
-					barWidth: 4, barGap: 2, barRadius: 2, barHeight: 2.5,
+					barWidth: 4,
+					barGap: 2,
+					barRadius: 2,
+					barHeight: 2.5,
 					minPxPerSec: 100,
 					url
 				});
 				wsPlayback.on('timeupdate', (t) => setTimerSec(t));
 			});
-			setMessage('Ready?'); setTimerMs(0); syncButtons();
+
+			setMessage('Ready?');
+			setTimerMs(0);
+			syncButtons();
 		}
 
 		async function countdownThen(fn) {
