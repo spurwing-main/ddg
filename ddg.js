@@ -112,7 +112,7 @@
 				try {
 					await fetch(url, { signal: controller.signal, credentials: 'same-origin' });
 				} catch (err) {
-					if (err && err.name !== 'AbortError') console.warn('ddg.net.prefetch failed:', err);
+					if (err && err.name !== 'AbortError') ddg.utils.warn('ddg.net.prefetch failed:', err);
 				}
 			}, delay);
 			return () => { clearTimeout(timeout); controller.abort(); };
@@ -231,6 +231,12 @@
 		const log = (...args) => ddg.utils.log('[fs]', ...args);
 		const warn = (...args) => ddg.utils.warn('[fs]', ...args);
 
+		// Helper: normalize list.items to array
+		const getItemsArray = (list) => {
+			const raw = list.items?.value ?? list.items;
+			return Array.isArray(raw) ? raw : [];
+		};
+
 		// Core - Get list instance
 		let listPromise;
 		const readyList = () => {
@@ -270,9 +276,9 @@
 						throw new Error('ddg.fs.currentItem.resolve: list or list.items missing');
 					}
 
-					const itemsArr = list.items.value || list.items;
-					if (!Array.isArray(itemsArr)) {
-						throw new Error('ddg.fs.currentItem.resolve: items is not an array');
+					const itemsArr = getItemsArray(list);
+					if (!itemsArr.length) {
+						throw new Error('ddg.fs.currentItem.resolve: items is empty');
 					}
 
 					const resolved = new URL(url, window.location.origin);
@@ -514,7 +520,7 @@
 					setTimeout(() => (btn.rfLock = false), 250);
 
 					const list = await readyList();
-					const items = list.items?.value || [];
+					const items = getItemsArray(list);
 					if (!items.length) return;
 
 					const idx = getNext(items);
@@ -549,18 +555,14 @@
 			const init = () => {
 				log('loadingFilters init');
 
-				const waitForWebflow = () => {
-					return new Promise((resolve) => {
-						const check = () => {
-							const wfIx = Webflow?.require?.("ix3");
-							if (wfIx?.emit) resolve(wfIx);
-							else requestAnimationFrame(check);
-						};
-						check();
-					});
-				};
-
-				waitForWebflow().then((wfIx) => {
+				new Promise((resolve) => {
+					const check = () => {
+						const wfIx = Webflow.require("ix3");
+						if (wfIx.emit) resolve(wfIx);
+						else requestAnimationFrame(check);
+					};
+					check();
+				}).then((wfIx) => {
 					const parent = document.querySelector('[data-loadingfilters="parent"]');
 					if (!parent) return;
 
@@ -754,6 +756,12 @@
 		if (!navEl) return;
 		if (ddg.navInitialized) return;
 
+		// Guard: ScrollTrigger must exist
+		if (typeof ScrollTrigger === 'undefined') {
+			ddg.utils.warn('nav: ScrollTrigger not found');
+			return;
+		}
+
 		ddg.navInitialized = true;
 
 		const showThreshold = 50; // px from top to start hiding nav
@@ -765,7 +773,9 @@
 
 		// Throttled update function for better scroll performance
 		const updateNav = () => {
-			const y = ScrollTrigger?.scroll?.() ?? window.scrollY;
+			const y = (typeof ScrollTrigger !== 'undefined' && typeof ScrollTrigger.scroll === 'function')
+				? ScrollTrigger.scroll()
+				: window.scrollY;
 			const delta = y - lastY;
 
 			if (y <= showThreshold) {
@@ -800,6 +810,11 @@
 		const list = document.querySelector('.home-list_list');
 		if (!list) {
 			ddg.utils.warn('homelistSplit: .home-list_list not found');
+			return;
+		}
+		// Guard: require GSAP and SplitText
+		if (typeof gsap === 'undefined' || typeof SplitText === 'undefined') {
+			ddg.utils.warn('homelistSplit: GSAP or SplitText missing');
 			return;
 		}
 
@@ -868,17 +883,11 @@
 		const throttleUpdate = ddg.utils.throttle(update, 120);
 
 		const init = async () => {
-			await (ddg?.utils?.fontsReady?.() ?? Promise.resolve());
+			await ddg.utils.fontsReady();
 
 			update();
 
-			// Use the shared global resize bus where available
-			if (ddg.resizeEvent?.on) {
-				ddg.resizeEvent.on(throttleUpdate);
-			} else {
-				// Fallback: direct resize listener (shouldn't usually be hit)
-				window.addEventListener('resize', throttleUpdate);
-			}
+			ddg.resizeEvent.on(throttleUpdate);
 
 			window.addEventListener('ddg:filters-change', throttleUpdate);
 		};
@@ -910,23 +919,23 @@
 		};
 
 		// ---------- tiny helpers ----------
-		const toNum = (v) => {
+		const parseCountdownNumber = (v) => {
 			const n = parseInt(String(v ?? '').trim(), 10);
 			return Number.isFinite(n) ? n : 0;
 		};
 
-		const buildDest = (platform, url, text) =>
-			(urlFor[platform] ? urlFor[platform]({ url, text }) : url);
-
-		const navigateStub = (winRef, url) => {
+		const openShareUrl = (url) => {
+			let winRef = null;
 			try {
-				if (winRef && !winRef.closed) {
-					winRef.opener = null;
-					winRef.location.href = url;
-					return;
-				}
+				winRef = window.open(url, '_blank');
 			} catch { /* noop */ }
-			if (!window.open(url, '_blank')) { location.href = url; }
+			if (!winRef) {
+				try {
+					location.href = url;
+				} catch { /* noop */ }
+				return;
+			}
+			try { winRef.opener = null; } catch { /* noop */ }
 		};
 
 		// ---------- confetti (uses utils + always returns a Promise) ----------
@@ -945,10 +954,6 @@
 
 		const confetti = (opts = {}) => {
 			try {
-				if (!window.JSConfetti) {
-					ddg.utils.warn('Confetti library missing');
-					return Promise.resolve();
-				}
 				if (!confettiInstance) confettiInstance = new JSConfetti({ canvas: ensureCanvas() });
 				// fun but simple: shuffle emojis so it varies
 				const emojis = ddg.utils.shuffle(['🎉', '✨', '💥', '🎊']).slice(0, 3);
@@ -966,7 +971,7 @@
 		const tickCountdowns = () => {
 			let hitZero = false;
 			document.querySelectorAll('[data-share-countdown]').forEach((node) => {
-				const cur = toNum(
+				const cur = parseCountdownNumber(
 					node.getAttribute('data-share-countdown') ||
 					(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node.value : node.textContent)
 				);
@@ -1024,7 +1029,7 @@
 			const platform = (el.getAttribute('data-share') || '').toLowerCase();
 			const shareUrl = el.getAttribute('data-share-url') || window.location.href;
 			const shareText = el.getAttribute('data-share-text') || document.title;
-			const destination = buildDest(platform, shareUrl, shareText);
+			const destination = urlFor[platform] ? urlFor[platform]({ url: shareUrl, text: shareText }) : shareUrl;
 
 			const realClick = e.isTrusted && document.hasFocus();
 
@@ -1050,19 +1055,66 @@
 				return;
 			}
 
-			// open stub immediately for popup blockers
-			const stub = window.open('about:blank', '_blank');
-
-			// countdown + optional confetti
+			// countdown + optional confetti (does not block navigation)
 			const shouldConfetti = tickCountdowns();
-			const confettiDone = shouldConfetti ? confetti() : Promise.resolve();
+			if (shouldConfetti) {
+				// fire & forget; confetti() already handles its own errors
+				void confetti();
+			}
 
 			// fire webhook once/day
 			if (realClick) postDailyWebhookIfNeeded(platform);
 
 			ddg.utils.emit('ddg:share:start', { platform, destination });
-			await confettiDone; // wait if any confetti
-			navigateStub(stub, destination);
+
+			// Prefer Web Share API where available (mobile-ish browsers only)
+			try {
+				if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+					const ua = navigator.userAgent || '';
+					const isLikelyMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(ua);
+
+					if (isLikelyMobile) {
+						try {
+							// Let the UA handle things like WhatsApp / native share targets
+							await navigator.share({ url: shareUrl, text: shareText });
+							ddg.utils.emit('ddg:share:end', { platform, destination: shareUrl });
+							return;
+						} catch (err) {
+							// User cancelled or disallowed share: do not fall back to opening a new window.
+							if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError')) {
+								ddg.utils.warn('[share] navigator.share aborted/cancelled', err);
+								ddg.utils.emit('ddg:share:end', { platform, destination: shareUrl, aborted: true });
+								return;
+							}
+							// Other failures: just fall through to URL-based sharing.
+							ddg.utils.warn('[share] navigator.share failed, falling back', err);
+						}
+					}
+				}
+			} catch (err) {
+				ddg.utils.warn('[share] navigator.share runtime error (ignored)', err);
+				// fall through to URL-based sharing
+			}
+
+			// Platform-specific navigation: WhatsApp behaves more reliably with same-tab nav on many mobile/webview combos
+			let usedLocationHref = false;
+			try {
+				if (typeof navigator !== 'undefined') {
+					const ua = navigator.userAgent || '';
+					const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(ua);
+					if (platform === 'whatsapp' && isMobile) {
+						location.href = destination;
+						usedLocationHref = true;
+					}
+				}
+			} catch {
+				// ignore UA / navigation issues and let the generic opener handle it
+			}
+
+			if (!usedLocationHref) {
+				openShareUrl(destination);
+			}
+
 			ddg.utils.emit('ddg:share:end', { platform, destination });
 		};
 
@@ -1084,7 +1136,6 @@
 			bg: '[data-modal-bg]',
 			inner: '[data-modal-inner]',
 			close: '[data-modal-close]',
-			scrollAny: '[data-modal-scroll]',
 		};
 
 		const syncCssState = ($modal, open, id) => {
@@ -1463,10 +1514,6 @@
 		const skeletonHtml = "<div class='modal-skeleton' aria-busy='true'></div>";
 		const errorHtml = "<div class='modal-error'>Failed to load content.</div>";
 
-		const dispatchStoryOpened = (url) => queueMicrotask(() => {
-			ddg.utils.emit('ddg:story-opened', { url });
-		});
-
 		let storyModal = ddg.modals?.[storyModalId] || null;
 		const storyCacheMax = 20;
 		const storyCache = new Map(); // Map<url, { title, contentHTML }>
@@ -1521,11 +1568,16 @@
 					if (window !== window.parent) {
 						try { ddg.iframeBridge.post('sync-url', { url, title: document.title }); } catch { }
 					}
+					
+					const emitStoryOpened = () => queueMicrotask(
+						() => ddg.utils.emit('ddg:story-opened', { url })
+					);
+					
 					ddg.fs.readyList()
-						.then(() => dispatchStoryOpened(url))
-						.catch(() => dispatchStoryOpened(url))
+						.then(emitStoryOpened)
+						.catch(emitStoryOpened)
 						.finally(() => {
-							ddg.fs.resolveCurrentItem?.(url);
+							ddg.fs.resolveCurrentItem(url);
 						});
 
 				}
@@ -1558,7 +1610,7 @@
 			if (ev.detail?.id !== storyModalId) return;
 			document.title = originalTitle;
 			history.pushState({}, '', homeUrl);
-			ddg.fs.resolveCurrentItem?.(homeUrl);
+			ddg.fs.resolveCurrentItem(homeUrl);
 			if (window !== window.parent) {
 				try { ddg.iframeBridge.post('sync-url', { url: homeUrl, title: originalTitle }); } catch { }
 			}
@@ -1633,7 +1685,7 @@
 			if (!modal) return;
 			if (!path.startsWith('/stories/')) {
 				if (modal.isOpen()) modal.close();
-				ddg.fs.resolveCurrentItem?.(window.location.href);
+				ddg.fs.resolveCurrentItem(window.location.href);
 				return;
 			}
 			loadAndOpenStory(window.location.href, { stateMode: 'none', showSkeleton: true, force: true });
@@ -1680,6 +1732,12 @@
 			const audioUrl = playerEl.dataset.audioUrl;
 			if (!audioUrl) return;
 
+			// Guard: require WaveSurfer
+			if (typeof WaveSurfer === 'undefined') {
+				ddg.utils.warn('[audio] WaveSurfer not available');
+				return;
+			}
+
 			// If same audio is already loaded, don't rebuild
 			if (playerEl.hasAttribute('data-audio-init') && activePlayer?.audioUrl === audioUrl) return;
 
@@ -1700,7 +1758,6 @@
 
 			ddg.utils.log('[audio] creating new player', audioUrl);
 			try {
-				if (typeof WaveSurfer === 'undefined') throw new Error('WaveSurfer not available');
 				wavesurfer = WaveSurfer.create({
 					container: waveformEl,
 					height: waveformEl.offsetHeight || 42,
@@ -1770,8 +1827,8 @@
 	}
 
 	function outreach() {
-		if (outreach.__initialized) return;
-		outreach.__initialized = true;
+		if (ddg.outreachInitialized) return;
+		ddg.outreachInitialized = true;
 
 		// pages: main / success / error
 		const path = (location.pathname || '').replace(/\/+$/, '') || '/';
@@ -1783,7 +1840,7 @@
 		// helpers
 		const getQuery = (key) => new URLSearchParams(location.search).get(key);
 		const go = (p) => { try { location.replace(p); } catch { location.href = p; } };
-		const warn = (...a) => console.warn('[outreach]', ...a);
+		const warn = (...a) => ddg.utils.warn('[outreach]', ...a);
 
 		// niceties (safe on any page)
 		setupSplitTextTweaks();
@@ -1818,16 +1875,11 @@
 				else if (heroName.length > 6) hero.classList.add('is-md');
 			}
 			document.querySelectorAll('.outreach-hero_word.is-name').forEach(n => n.textContent = heroName);
-			if (window.gsap) gsap.to('.outreach-hero_content', { autoAlpha: 1, duration: 0.1, overwrite: 'auto' });
+			gsap.to('.outreach-hero_content', { autoAlpha: 1, duration: 0.1, overwrite: 'auto' });
 		}
 
 		// if backend already has a recording, jump to success
 		if (!isTestMode) checkExistingSubmission(ddgId).catch(() => { });
-
-		if (typeof WaveSurfer === 'undefined' || typeof WaveSurfer.Record === 'undefined') {
-			warn('WaveSurfer not found — recorder disabled.');
-			return;
-		}
 
 		// recorder elements
 		const root = document.querySelector('.recorder');
@@ -1900,6 +1952,11 @@
 
 		// wavesurfer
 		function initWaveSurfer() {
+			// Guard: require WaveSurfer and Record plugin
+			if (typeof WaveSurfer === 'undefined' || !WaveSurfer.Record) {
+				warn('WaveSurfer or Record plugin not available — skipping recorder setup.');
+				return;
+			}
 			wsRecord?.destroy?.();
 			wsRecord = WaveSurfer.create({
 				container: recWaveWrap,
@@ -2056,7 +2113,6 @@
 
 		// niceties
 		function setupSplitTextTweaks() {
-			if (!window.gsap || typeof window.SplitText === 'undefined') return;
 			document.querySelectorAll('[ddg-text-anim="true"]').forEach((el) => {
 				const split = new SplitText(el, { type: 'chars, words' });
 				for (let i = 1; i < 4; i++) {
@@ -2088,7 +2144,6 @@
 		}
 
 		function setupInstructionReveal() {
-			if (!window.gsap || !window.ScrollTrigger) return;
 			gsap.registerPlugin(ScrollTrigger);
 			document.querySelectorAll('.outreach-instructions_item').forEach((item) => {
 				const img = item.querySelector('.outreach-instructions_img-wrap');
@@ -2104,7 +2159,13 @@
 		const stickyButton = document.querySelector('.join_sticky');
 		const staticButton = document.querySelector('.join-cta_btn .button');
 
-		if (!stickyButton || !staticButton || !window.gsap || !window.ScrollTrigger) return;
+		if (!stickyButton || !staticButton) return;
+
+		// Guard: require ScrollTrigger
+		if (typeof ScrollTrigger === 'undefined') {
+			ddg.utils.warn('joinButtons: ScrollTrigger not found');
+			return;
+		}
 
 		// keep static in layout for ScrollTrigger, but hide it visually
 		stickyButton.style.display = 'flex';
