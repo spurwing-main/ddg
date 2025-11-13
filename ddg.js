@@ -58,7 +58,7 @@
 	};
 
 	ddg.iframeBridge ??= (() => {
-		const PREFIX = 'ddg:';
+		const prefix = 'ddg:';
 		const listeners = new Map();
 
 		function post(type, data = {}, target = 'parent') {
@@ -66,7 +66,7 @@
 			try {
 				const t = target === 'parent' ? window.parent : target;
 				if (!t || typeof t.postMessage !== 'function') return;
-				t.postMessage({ type: PREFIX + type, data }, '*');
+				t.postMessage({ type: prefix + type, data }, '*');
 			} catch (err) {
 				ddg.utils.warn('[iframeBridge] post failed', err);
 			}
@@ -74,7 +74,7 @@
 
 		function on(type, fn) {
 			if (!type || typeof fn !== 'function') return () => { };
-			const key = PREFIX + type;
+			const key = prefix + type;
 			const handler = (e) => { if (e?.data?.type === key) fn(e.data.data, e); };
 			window.addEventListener('message', handler);
 			listeners.set(fn, handler);
@@ -87,26 +87,26 @@
 	ddg.net ??= {
 		// Fetch and return parsed HTMLDocument
 		async fetchHTML(url) {
-			if (!url || typeof url !== 'string') throw new Error('ddg.net.fetchHTML: invalid URL');
+			if (!url || typeof url !== 'string') throw new Error('ddg.net.fetchHTML: invalid url');
 			const res = await fetch(url, { credentials: 'same-origin' });
-			if (!res.ok) throw new Error(`ddg.net.fetchHTML: HTTP ${res.status}`);
+			if (!res.ok) throw new Error(`ddg.net.fetchHTML: http ${res.status}`);
 			const text = await res.text();
 			return new DOMParser().parseFromString(text, 'text/html');
 		},
-		// Fetch and parse JSON safely
+		// Fetch and parse json safely
 		async fetchJSON(url) {
-			if (!url || typeof url !== 'string') throw new Error('ddg.net.fetchJSON: invalid URL');
+			if (!url || typeof url !== 'string') throw new Error('ddg.net.fetchJSON: invalid url');
 			const res = await fetch(url, { credentials: 'same-origin' });
-			if (!res.ok) throw new Error(`ddg.net.fetchJSON: HTTP ${res.status}`);
+			if (!res.ok) throw new Error(`ddg.net.fetchJSON: http ${res.status}`);
 			try {
 				return await res.json();
 			} catch {
-				throw new Error('ddg.net.fetchJSON: invalid JSON');
+				throw new Error('ddg.net.fetchJSON: invalid json');
 			}
 		},
-		// Prefetch (HTML or JSON) after delay, cancellable
+		// Prefetch (html or json) after delay, cancellable
 		prefetch(url, delay = 250) {
-			if (!url) throw new Error('ddg.net.prefetch: missing URL');
+			if (!url) throw new Error('ddg.net.prefetch: missing url');
 			const controller = new AbortController();
 			const timeout = setTimeout(async () => {
 				try {
@@ -231,7 +231,7 @@
 		const log = (...args) => ddg.utils.log('[fs]', ...args);
 		const warn = (...args) => ddg.utils.warn('[fs]', ...args);
 
-		// CORE - Get List Instance
+		// Core - Get list instance
 		let listPromise;
 		const readyList = () => {
 			if (listPromise) return listPromise;
@@ -240,6 +240,11 @@
 				window.FinsweetAttributes ||= [];
 				window.FinsweetAttributes.push(['list', (instances) => {
 					const list = Array.isArray(instances) ? (instances.find(Boolean) ?? instances[0]) : instances;
+
+					if (!list) {
+						throw new Error('ddg.fs.readyList: Finsweet list instance is missing or invalid');
+					}
+
 					log('list ready', { instances });
 
 					try {
@@ -261,12 +266,19 @@
 			return {
 				resolve: async (url = window.location.href) => {
 					const list = await readyList();
-					if (!list?.items?.value) return;
+					if (!list || !list.items) {
+						throw new Error('ddg.fs.currentItem.resolve: list or list.items missing');
+					}
+
+					const itemsArr = list.items.value || list.items;
+					if (!Array.isArray(itemsArr)) {
+						throw new Error('ddg.fs.currentItem.resolve: items is not an array');
+					}
 
 					const resolved = new URL(url, window.location.origin);
 
 					// Use Finsweet's native item matching
-					const item = list.items.value.find(item => {
+					const item = itemsArr.find(item => {
 						if (!item.url) return false;
 						return item.url.pathname === resolved.pathname;
 					});
@@ -283,28 +295,30 @@
 
 		const setFilters = async (fieldValues, { reset = true } = {}) => {
 			const list = await readyList();
-			if (!list) return;
+			if (!list) {
+				throw new Error('ddg.fs.setFilters: list instance is missing');
+			}
 
-			// Get all filter forms
-			const forms = document.querySelectorAll('[fs-list-element="filters"]');
+		// Step 1: Clear all form fields first (only if reset is true)
+			if (reset) {
+				const forms = document.querySelectorAll('[fs-list-element="filters"]');
+				forms.forEach(form => {
+					form.querySelectorAll('input[type="checkbox"], input[type="radio"]').forEach(input => {
+						input.checked = false;
+						input.closest('label')?.classList.remove('is-list-active');
+					});
 
-			// STEP 1: Clear ALL form fields first
-			forms.forEach(form => {
-				form.querySelectorAll('input[type="checkbox"], input[type="radio"]').forEach(input => {
-					input.checked = false;
-					input.closest('label')?.classList.remove('is-list-active');
+					form.querySelectorAll('input[type="text"], input[type="search"], textarea').forEach(input => {
+						input.value = '';
+					});
+
+					form.querySelectorAll('select').forEach(select => {
+						select.selectedIndex = 0;
+					});
 				});
+			}
 
-				form.querySelectorAll('input[type="text"], input[type="search"], textarea').forEach(input => {
-					input.value = '';
-				});
-
-				form.querySelectorAll('select').forEach(select => {
-					select.selectedIndex = 0;
-				});
-			});
-
-			// STEP 2: Build new conditions
+		// Step 2: Build new conditions
 			const conditions = Object.entries(fieldValues || {})
 				.map(([fieldKey, values]) => {
 					const valueArray = Array.isArray(values) ? values : [values];
@@ -328,7 +342,7 @@
 
 			log('setFilters', { fieldValues, conditions: conditions.length });
 
-			// STEP 3: Set the new filters
+		// Step 3: Set the new filters
 			list.filters.value = {
 				groupsMatch: 'and',
 				groups: conditions.length ? [{
@@ -337,12 +351,15 @@
 					conditions
 				}] : []
 			};
+
+		// Step 4: Notify other modules (e.g. homelistSplit) - event on window, not document
+			ddg.utils.emit('ddg:filters-change', { fieldValues, list }, window);
 		};
 
-		// RELATED FILTERS
+		// Related filters
 		const relatedFilters = (() => {
-			const MAX = 6;
-			const EXCLUDED = new Set(['slug', 'name', 'title']);
+			const max = 6;
+			const excluded = new Set(['slug', 'name', 'title']);
 			const sel = {
 				parent: '[data-relatedfilters="parent"]',
 				target: '[data-relatedfilters="target"]',
@@ -356,7 +373,7 @@
 				if (!item?.fields) return {};
 				const result = {};
 				for (const [fieldKey, field] of Object.entries(item.fields)) {
-					if (EXCLUDED.has(fieldKey)) continue;
+					if (excluded.has(fieldKey)) continue;
 					const values = Array.isArray(field.value) ? field.value : [field.value];
 					const stringValues = values.map(v => String(v)).filter(Boolean);
 					if (stringValues.length) result[fieldKey] = stringValues;
@@ -389,13 +406,13 @@
 
 				const entries = [];
 				for (const [field, arr] of Object.entries(fields || {})) {
-					if (!Array.isArray(arr) || !arr.length || EXCLUDED.has(field)) continue;
+					if (!Array.isArray(arr) || !arr.length || excluded.has(field)) continue;
 					for (const val of Array.from(new Set(arr))) {
 						entries.push({ field, value: String(val) });
 					}
 				}
 
-				ddg.utils.shuffle(entries).slice(0, MAX).forEach(({ field, value }, idx) => {
+				ddg.utils.shuffle(entries).slice(0, max).forEach(({ field, value }, idx) => {
 					const clone = tpl.cloneNode(true);
 					const input = clone.querySelector(sel.input);
 					const span = clone.querySelector(sel.span);
@@ -467,9 +484,9 @@
 			return { init };
 		})();
 
-		// RANDOM FILTERS
+		// Random filters
 		const randomFilters = (() => {
-			const MAX_TOTAL = 4;
+			const maxTotal = 4;
 			const state = { bag: [] };
 
 			const getKey = (item) =>
@@ -503,7 +520,7 @@
 					const idx = getNext(items);
 					const item = items[idx] ?? items[Math.floor(Math.random() * items.length)];
 
-					// Flatten all field values into single array, shuffle, and limit to MAX_TOTAL
+					// Flatten all field values into single array, shuffle, and limit to maxTotal
 					const allEntries = [];
 					for (const [fieldKey, field] of Object.entries(item.fields)) {
 						const values = Array.isArray(field.value) ? field.value : [field.value];
@@ -511,7 +528,7 @@
 					}
 
 					const limitedFields = {};
-					ddg.utils.shuffle(allEntries).slice(0, MAX_TOTAL).forEach(({ fieldKey, value }) => {
+					ddg.utils.shuffle(allEntries).slice(0, maxTotal).forEach(({ fieldKey, value }) => {
 						(limitedFields[fieldKey] ||= []).push(value);
 					});
 
@@ -525,9 +542,9 @@
 			return { init };
 		})();
 
-		// LOADING FILTERS
+		// Loading filters
 		const loadingFilters = (() => {
-			const MAX_DISPLAY = 4;
+			const maxDisplay = 4;
 
 			const init = () => {
 				log('loadingFilters init');
@@ -555,14 +572,15 @@
 					readyList().then(list => {
 						list.addHook('filter', (items) => {
 							// Extract current filter values from list.filters
-							const values = list.filters.value.groups.flatMap(group =>
+							const allValues = list.filters.value.groups.flatMap(group =>
 								group.conditions.flatMap(condition => {
 									const val = condition.value;
 									return Array.isArray(val) ? val : [val];
 								})
-							).filter(Boolean).slice(0, MAX_DISPLAY);
+							).filter(Boolean);
 
-							const extraCount = Math.max(0, values.length - MAX_DISPLAY);
+							const values = allValues.slice(0, maxDisplay);
+							const extraCount = Math.max(0, allValues.length - maxDisplay);
 
 							labels.forEach((label, i) => {
 								const span = label.querySelector('span');
@@ -612,7 +630,7 @@
 			return { init };
 		})();
 
-		// MAIN INITIALIZER
+		// Main initializer
 		let initialized = false;
 
 		const finsweetRelated = () => {
@@ -627,7 +645,7 @@
 			log('finsweetRelated: complete');
 		};
 
-		// PUBLIC API
+		// Public api
 		return {
 			readyList,
 			finsweetRelated,
@@ -655,7 +673,7 @@
 	}
 
 	function iframe() {
-		// --- parent: accept URL sync from children
+		// --- parent: accept url sync from children
 		if (window === window.parent) {
 			let childSyncSession = false; // active while parent is following a child-driven story journey
 			const norm = (p) => { try { const s = String(p || ''); return (s.replace(/\/+$/, '') || '/'); } catch { return '/'; } };
@@ -692,7 +710,7 @@
 			return ddg.iframeBridge;
 		}
 
-		// --- child: notify parent on URL changes
+		// --- child: notify parent on url changes
 		const notify = ddg.utils.debounce(
 			() => ddg.iframeBridge.post('sync-url', { url: location.href, title: document.title }), 50
 		);
@@ -810,7 +828,7 @@
 			probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;margin:0;padding:0;border:0;width:1ch;height:0;font:inherit;white-space:normal;';
 
 			try {
-				// Phase 1: Batch all DOM reads (measurements) to minimize layout thrashing
+				// Phase 1: batch all dom reads (measurements) to minimize layout thrashing
 				const measurements = split.lines.map(line => {
 					// Measure ch-width in this line's font context
 					line.appendChild(probe);
@@ -824,7 +842,7 @@
 					return { line, chPx, offsetWidth, widthPx };
 				});
 
-				// Phase 2: Batch all DOM writes (style updates)
+				// Phase 2: batch all dom writes (style updates)
 				measurements.forEach(({ line, chPx, offsetWidth, widthPx }) => {
 					const dur = gsap.utils.clamp(0.3, 2, offsetWidth / tapeSpeed);
 					line.style.setProperty('--tape-dur', `${dur}s`);
@@ -974,7 +992,7 @@
 			const iframe = document.createElement('iframe');
 			const name = 'wf_' + Math.random().toString(36).slice(2);
 			iframe.name = name; iframe.style.display = 'none';
-			form.target = name; form.method = 'POST'; form.action = webhookUrl; form.style.display = 'none';
+			form.target = name; form.method = 'post'; form.action = webhookUrl; form.style.display = 'none';
 			[['platform', platform], ['date', today]].forEach(([k, v]) => {
 				const input = document.createElement('input');
 				input.type = 'hidden'; input.name = k; input.value = v;
@@ -1442,22 +1460,22 @@
 		const $embed = $(embedEl);
 		const originalTitle = document.title;
 		const homeUrl = '/';
-		const SKELETON_HTML = "<div class='modal-skeleton' aria-busy='true'></div>";
-		const ERROR_HTML = "<div class='modal-error'>Failed to load content.</div>";
+		const skeletonHtml = "<div class='modal-skeleton' aria-busy='true'></div>";
+		const errorHtml = "<div class='modal-error'>Failed to load content.</div>";
 
 		const dispatchStoryOpened = (url) => queueMicrotask(() => {
 			ddg.utils.emit('ddg:story-opened', { url });
 		});
 
 		let storyModal = ddg.modals?.[storyModalId] || null;
-		const STORY_CACHE_MAX = 20;
+		const storyCacheMax = 20;
 		const storyCache = new Map(); // Map<url, { title, contentHTML }>
 
 		const cacheGet = (url) => storyCache.get(url) || null;
 
 		const cacheSet = (url, payload) => {
 			storyCache.set(url, payload);
-			if (storyCache.size > STORY_CACHE_MAX) {
+			if (storyCache.size > storyCacheMax) {
 				const firstKey = storyCache.keys().next().value;
 				if (firstKey != null) storyCache.delete(firstKey);
 			}
@@ -1470,11 +1488,11 @@
 
 		const storyFromDoc = (doc) => {
 			const node = doc?.querySelector?.('[data-ajax-modal="content"]');
-			return { title: (doc?.title || ''), contentHTML: node ? node.outerHTML : ERROR_HTML };
+			return { title: (doc?.title || ''), contentHTML: node ? node.outerHTML : errorHtml };
 		};
 
 		const renderEmbed = (html) => {
-			const markup = typeof html === 'string' && html.trim() ? html : ERROR_HTML;
+			const markup = typeof html === 'string' && html.trim() ? html : errorHtml;
 			$embed.empty();
 			$embed[0].innerHTML = markup;
 		};
@@ -1499,7 +1517,7 @@
 					} else if (stateMode === 'push') {
 						history.pushState({ modal: true }, '', url);
 					}
-					// Notify parent of new URL if in iframe
+					// Notify parent of new url if in iframe
 					if (window !== window.parent) {
 						try { ddg.iframeBridge.post('sync-url', { url, title: document.title }); } catch { }
 					}
@@ -1524,13 +1542,13 @@
 					openStory(url, cached.title, cached.contentHTML, options);
 					return;
 				}
-				if (options.showSkeleton !== false) renderEmbed(SKELETON_HTML);
+				if (options.showSkeleton !== false) renderEmbed(skeletonHtml);
 				const doc = await ddg.net.fetchHTML(url);
 				const parsed = storyFromDoc(doc);
 				cacheSet(url, parsed);
 				openStory(url, parsed.title, parsed.contentHTML, options);
 			} catch {
-				renderEmbed(ERROR_HTML);
+				renderEmbed(errorHtml);
 			} finally {
 				lock = false;
 			}
@@ -1825,7 +1843,7 @@
 		const form = root?.querySelector('#rec-form');
 
 		if (!root || !recordBtn || !playBtn || !clearBtn || !saveBtn || !submitBtn || !msgEl || !timerEl || !form || !recWaveWrap || !pbWaveWrap) {
-			warn('Recorder DOM incomplete — aborting wiring.');
+			warn('Recorder dom incomplete — aborting wiring.');
 			return;
 		}
 
@@ -2014,7 +2032,7 @@
 			const fd = new FormData();
 			fd.append('file', fileBlob, `${id}.webm`);
 			fd.append('upload_preset', 'ddg-recordings');
-			const res = await fetch('https://api.cloudinary.com/v1_1/daoliqze4/video/upload', { method: 'POST', body: fd });
+			const res = await fetch('https://api.cloudinary.com/v1_1/daoliqze4/video/upload', { method: 'post', body: fd });
 			if (!res.ok) throw new Error('Cloudinary upload failed');
 			const json = await res.json();
 			if (!json?.secure_url) throw new Error('secure_url missing');
