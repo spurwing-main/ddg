@@ -550,7 +550,7 @@
 
 		// Loading filters
 		const loadingFilters = (() => {
-			const maxDisplay = 4;
+			const maxDisplay = 8;
 
 			const init = () => {
 				log('loadingFilters init');
