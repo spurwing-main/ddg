@@ -5,8 +5,7 @@
 	});
 
 	ddg.utils = {
-
-		debounce: (fn, ms = 150) => {
+		debounce(fn, ms = 150) {
 			let t;
 			return (...args) => {
 				clearTimeout(t);
@@ -14,20 +13,22 @@
 			};
 		},
 
-		throttle: (fn, ms = 150) => {
-			let lastCall = 0;
+		throttle(fn, ms = 150) {
+			let last = 0;
 			return (...args) => {
 				const now = Date.now();
-				if (now - lastCall >= ms) {
-					lastCall = now;
+				if (now - last >= ms) {
+					last = now;
 					fn(...args);
 				}
 			};
 		},
 
-		wait: (ms = 0) => new Promise(resolve => setTimeout(resolve, ms)),
+		wait(ms = 0) {
+			return new Promise(r => setTimeout(r, ms));
+		},
 
-		shuffle: (arr) => {
+		shuffle(arr) {
 			const a = arr.slice();
 			for (let i = a.length - 1; i > 0; i--) {
 				const j = Math.floor(Math.random() * (i + 1));
@@ -36,22 +37,21 @@
 			return a;
 		},
 
-		emit: (event, detail, el = document) =>
-			el.dispatchEvent(new CustomEvent(event, { detail })),
+		emit(event, detail, el = document) {
+			el.dispatchEvent(new CustomEvent(event, { detail }));
+		},
 
 		log: (...a) => console.log('[ddg]', ...a),
 		warn: (...a) => console.warn('[ddg]', ...a),
 
-		fontsReady: async (timeoutMs = 3000) => {
-			if (!document.fonts || !document.fonts.ready) {
+		async fontsReady(timeoutMs = 3000) {
+			if (!document.fonts?.ready) {
 				return new Promise(r => requestAnimationFrame(r));
 			}
-
 			await Promise.race([
 				document.fonts.ready,
 				new Promise(r => setTimeout(r, timeoutMs))
 			]);
-
 			return new Promise(r => requestAnimationFrame(r));
 		}
 	};
@@ -60,9 +60,8 @@
 		const prefix = 'ddg:';
 
 		function post(type, data = {}, target = 'parent') {
-			if (!type) return;
 			const t = target === 'parent' ? window.parent : target;
-			if (!t || typeof t.postMessage !== 'function') return;
+			if (!type || !t?.postMessage) return;
 			t.postMessage({ type: prefix + type, data }, '*');
 		}
 
@@ -70,7 +69,7 @@
 			if (!type || typeof fn !== 'function') return () => {};
 			const key = prefix + type;
 			const handler = (e) => {
-				if (e && e.data && e.data.type === key) fn(e.data.data, e);
+				if (e?.data?.type === key) fn(e.data.data, e);
 			};
 			window.addEventListener('message', handler);
 			return () => window.removeEventListener('message', handler);
@@ -120,16 +119,14 @@
 
 		function applyLock() {
 			if (saved) return;
-			const scrollY = window.scrollY || docEl.scrollTop || 0;
-			const scrollX = window.scrollX || docEl.scrollLeft || 0;
-			saved = { x: scrollX, y: scrollY };
-			// Prevent background scroll without layout shift
+			const y = window.scrollY || docEl.scrollTop || 0;
+			const x = window.scrollX || docEl.scrollLeft || 0;
+			saved = { x, y };
 			body.style.position = 'fixed';
-			body.style.top = `-${scrollY}px`;
+			body.style.top = `-${y}px`;
 			body.style.left = '0';
 			body.style.right = '0';
 			body.style.width = '100%';
-			// Reduce bounce/overscroll behind modals
 			body.style.overscrollBehavior = 'contain';
 			docEl.style.overscrollBehavior = 'contain';
 		}
@@ -152,13 +149,18 @@
 			if (key) held.add(String(key));
 			if (held.size === 1) applyLock();
 		}
+
 		function unlock(key) {
 			if (key) held.delete(String(key));
-			if (held.size === 0) removeLock();
+			if (!held.size) removeLock();
 		}
-		function isLocked() { return held.size > 0; }
-		function isHolding(key) { return held.has(String(key)); }
-		return { lock, unlock, isLocked, isHolding };
+
+		return {
+			lock,
+			unlock,
+			isLocked: () => held.size > 0,
+			isHolding: (key) => held.has(String(key))
+		};
 	})();
 
 	ddg.resizeEvent ??= (() => {
@@ -174,13 +176,7 @@
 		const notify = () => {
 			lastSize = readSize();
 			const detail = { ...lastSize };
-			listeners.forEach(fn => {
-				try {
-					fn(detail);
-				} catch (err) {
-					ddg.utils.warn('[resizeEvent] listener error', err);
-				}
-			});
+			listeners.forEach(fn => fn(detail));
 		};
 
 		const onWinResize = ddg.utils.throttle(notify, 150);
@@ -189,15 +185,7 @@
 		const on = (fn, { immediate = false } = {}) => {
 			if (typeof fn !== 'function') return () => {};
 			listeners.add(fn);
-
-			if (immediate) {
-				try {
-					fn({ ...lastSize });
-				} catch (err) {
-					ddg.utils.warn('[resizeEvent] immediate listener error', err);
-				}
-			}
-
+			if (immediate) fn({ ...lastSize });
 			return () => listeners.delete(fn);
 		};
 
@@ -207,127 +195,99 @@
 	})();
 
 	ddg.fs ??= (() => {
-		const log = (...args) => ddg.utils.log('[fs]', ...args);
-		const warn = (...args) => ddg.utils.warn('[fs]', ...args);
+		const log = (...a) => ddg.utils.log('[fs]', ...a);
+		const warn = (...a) => ddg.utils.warn('[fs]', ...a);
 
-		// Helper: normalize list.items to array
 		const getItemsArray = (list) => {
+			if (!list) return [];
 			const raw = list.items?.value ?? list.items;
 			return Array.isArray(raw) ? raw : [];
 		};
 
-		// Core - Get list instance
 		let listPromise;
 		const readyList = () => {
 			if (listPromise) return listPromise;
-
 			listPromise = new Promise((resolve) => {
 				window.FinsweetAttributes ||= [];
 				window.FinsweetAttributes.push(['list', (instances) => {
 					const list = Array.isArray(instances)
 						? (instances.find(Boolean) || instances[0])
 						: instances;
-
 					if (!list) {
-						warn('readyList: Finsweet list instance missing');
+						warn('readyList: no list instance');
 						resolve(null);
 						return;
 					}
-
-					log('list ready', { instances });
+					log('list ready');
 					ddg.utils.emit('fs:list-ready', { list });
 					resolve(list);
 				}]);
 			});
-
 			return listPromise;
 		};
 
 		const currentItem = (() => {
 			ddg.currentItem ??= { item: null, url: null };
 
-			return {
-				resolve: async (url = window.location.href) => {
-					const list = await readyList();
-					if (!list || !list.items) {
-						warn('currentItem.resolve: list or items missing');
-						return;
-					}
+			const resolve = async (url = window.location.href) => {
+				const list = await readyList();
+				const items = getItemsArray(list);
+				if (!items.length) return;
 
-					const itemsArr = getItemsArray(list);
-					if (!itemsArr.length) {
-						warn('currentItem.resolve: no items');
-						return;
-					}
-
-					const resolved = new URL(url, window.location.origin);
-
-					const item = itemsArr.find(item => {
-						if (!item.url) return false;
-						return item.url.pathname === resolved.pathname;
-					});
-
-					if (item && item !== ddg.currentItem.item) {
-						ddg.currentItem.item = item;
-						ddg.currentItem.url = url;
-						log('current item changed', { pathname: resolved.pathname });
-						ddg.utils.emit('ddg:current-item-changed', { item, url });
-					}
+				const resolved = new URL(url, window.location.origin);
+				const item = items.find(i => i.url && i.url.pathname === resolved.pathname);
+				if (item && item !== ddg.currentItem.item) {
+					ddg.currentItem.item = item;
+					ddg.currentItem.url = url;
+					log('current item', resolved.pathname);
+					ddg.utils.emit('ddg:current-item-changed', { item, url });
 				}
 			};
+
+			return { resolve };
 		})();
 
 		const setFilters = async (fieldValues, { reset = true } = {}) => {
 			const list = await readyList();
 			if (!list) {
-				warn('setFilters: list instance missing');
+				warn('setFilters: no list');
 				return;
 			}
 
-		// Step 1: Clear all form fields first (only if reset is true)
 			if (reset) {
-				const forms = document.querySelectorAll('[fs-list-element="filters"]');
-				forms.forEach(form => {
+				document.querySelectorAll('[fs-list-element="filters"]').forEach(form => {
 					form.querySelectorAll('input[type="checkbox"], input[type="radio"]').forEach(input => {
 						input.checked = false;
 						input.closest('label')?.classList.remove('is-list-active');
 					});
-
 					form.querySelectorAll('input[type="text"], input[type="search"], textarea').forEach(input => {
 						input.value = '';
 					});
-
 					form.querySelectorAll('select').forEach(select => {
 						select.selectedIndex = 0;
 					});
 				});
 			}
 
-		// Step 2: Build new conditions
-			const conditions = Object.entries(fieldValues || {})
-				.map(([fieldKey, values]) => {
-					const valueArray = Array.isArray(values) ? values : [values];
-					const cleanValues = [...new Set(valueArray.map(String))].filter(Boolean);
+			const conditions = Object.entries(fieldValues || {}).map(([fieldKey, values]) => {
+				const arr = Array.isArray(values) ? values : [values];
+				const clean = [...new Set(arr.map(String))].filter(Boolean);
+				if (!clean.length) return null;
+				return {
+					id: `${fieldKey}_equal`,
+					type: 'checkbox',
+					fieldKey,
+					value: clean,
+					op: 'equal',
+					filterMatch: 'or',
+					interacted: true,
+					showTag: true,
+					tagValuesDisplay: 'combined'
+				};
+			}).filter(Boolean);
 
-					if (!cleanValues.length) return null;
+			log('setFilters', { groups: conditions.length });
 
-					return {
-						id: `${fieldKey}_equal`,
-						type: 'checkbox',
-						fieldKey,
-						value: cleanValues,
-						op: 'equal',
-						filterMatch: 'or',  // <-- This is the "or" you asked about
-						interacted: true,
-						showTag: true,
-						tagValuesDisplay: 'combined'
-					};
-				})
-				.filter(Boolean);
-
-			log('setFilters', { fieldValues, conditions: conditions.length });
-
-		// Step 3: Set the new filters
 			list.filters.value = {
 				groupsMatch: 'and',
 				groups: conditions.length ? [{
@@ -337,11 +297,9 @@
 				}] : []
 			};
 
-		// Step 4: Notify other modules (e.g. homelistSplit) - event on window, not document
 			ddg.utils.emit('ddg:filters-change', { fieldValues, list }, window);
 		};
 
-		// Related filters
 		const relatedFilters = (() => {
 			const max = 6;
 			const excluded = new Set(['slug', 'name', 'title']);
@@ -355,13 +313,13 @@
 			};
 
 			const extractFields = (item) => {
-				if (!item?.fields) return {};
+				const fields = item?.fields || {};
 				const result = {};
-				for (const [fieldKey, field] of Object.entries(item.fields)) {
-					if (excluded.has(fieldKey)) continue;
-					const values = Array.isArray(field.value) ? field.value : [field.value];
-					const stringValues = values.map(v => String(v)).filter(Boolean);
-					if (stringValues.length) result[fieldKey] = stringValues;
+				for (const [key, field] of Object.entries(fields)) {
+					if (excluded.has(key)) continue;
+					const vals = Array.isArray(field.value) ? field.value : [field.value];
+					const strings = vals.map(v => String(v)).filter(Boolean);
+					if (strings.length) result[key] = strings;
 				}
 				return result;
 			};
@@ -377,52 +335,15 @@
 				input.setAttribute('fs-list-value', '');
 				const span = document.createElement('span');
 				span.className = 'checkbox_label';
-				label.appendChild(input);
-				label.appendChild(span);
+				label.append(input, span);
 				return label;
-			};
-
-			const render = (parent, fields) => {
-				const target = parent.querySelector(sel.target);
-				if (!target) return;
-
-				const tpl = target.querySelector(sel.label) || createLabel();
-				while (target.firstChild) target.removeChild(target.firstChild);
-
-				const entries = [];
-				for (const [field, arr] of Object.entries(fields || {})) {
-					if (!Array.isArray(arr) || !arr.length || excluded.has(field)) continue;
-					for (const val of Array.from(new Set(arr))) {
-						entries.push({ field, value: String(val) });
-					}
-				}
-
-				ddg.utils.shuffle(entries).slice(0, max).forEach(({ field, value }, idx) => {
-					const clone = tpl.cloneNode(true);
-					const input = clone.querySelector(sel.input);
-					const span = clone.querySelector(sel.span);
-					if (!input || !span) return;
-
-					input.id = `rf-${field}-${idx}`;
-					input.name = `rf-${field}`;
-					input.setAttribute('fs-list-field', field);
-					input.setAttribute('fs-list-value', value);
-					span.textContent = value;
-					target.appendChild(clone);
-				});
-
-				wireCheckboxes(parent);
-				parent.querySelectorAll(`${sel.target} ${sel.input}`).forEach((i) => {
-					const label = i.closest('label');
-					if (label) label.classList.toggle('is-list-active', i.checked);
-				});
 			};
 
 			const wireCheckboxes = (parent) => {
 				if (parent.rfWired) return;
 				parent.rfWired = true;
 				parent.addEventListener('change', (e) => {
-					if (!e.target?.matches?.(sel.input)) return;
+					if (!e.target?.matches(sel.input)) return;
 					const label = e.target.closest('label');
 					if (label) label.classList.toggle('is-list-active', e.target.checked);
 				});
@@ -444,8 +365,41 @@
 				});
 			};
 
+			const render = (parent, fields) => {
+				const target = parent.querySelector(sel.target);
+				if (!target) return;
+
+				const tpl = target.querySelector(sel.label) || createLabel();
+				target.innerHTML = '';
+
+				const entries = [];
+				for (const [field, arr] of Object.entries(fields || {})) {
+					if (!Array.isArray(arr) || !arr.length || excluded.has(field)) continue;
+					new Set(arr).forEach(val => entries.push({ field, value: String(val) }));
+				}
+
+				ddg.utils.shuffle(entries).slice(0, max).forEach(({ field, value }, i) => {
+					const clone = tpl.cloneNode(true);
+					const input = clone.querySelector(sel.input);
+					const span = clone.querySelector(sel.span);
+					if (!input || !span) return;
+					input.id = `rf-${field}-${i}`;
+					input.name = `rf-${field}`;
+					input.setAttribute('fs-list-field', field);
+					input.setAttribute('fs-list-value', value);
+					span.textContent = value;
+					target.appendChild(clone);
+				});
+
+				wireCheckboxes(parent);
+				parent.querySelectorAll(`${sel.target} ${sel.input}`).forEach(i => {
+					const label = i.closest('label');
+					if (label) label.classList.toggle('is-list-active', i.checked);
+				});
+			};
+
 			const init = () => {
-				const buildFilters = () => {
+				const build = () => {
 					const item = ddg.currentItem?.item;
 					if (!item) return;
 					const fields = extractFields(item);
@@ -456,20 +410,19 @@
 				};
 
 				document.addEventListener('ddg:current-item-changed', (e) => {
-					if (e.detail?.item) buildFilters();
+					if (e.detail?.item) build();
 				});
 
 				document.addEventListener('ddg:story-opened', () => {
-					requestAnimationFrame(() => requestAnimationFrame(buildFilters));
+					requestAnimationFrame(() => requestAnimationFrame(build));
 				});
 
-				log('relatedFilters init', { parents: document.querySelectorAll(sel.parent).length });
+				log('relatedFilters init');
 			};
 
 			return { init };
 		})();
 
-		// Random filters
 		const randomFilters = (() => {
 			const maxTotal = 4;
 			const state = { bag: [] };
@@ -480,7 +433,6 @@
 			const rebuildBag = (items, exclude) => {
 				const ids = items.map((_, i) => i).filter(i => getKey(items[i]) !== exclude);
 				state.bag = ddg.utils.shuffle(ids);
-				log('randomFilters rebuild bag', { size: state.bag.length });
 			};
 
 			const getNext = (items) => {
@@ -493,32 +445,35 @@
 				document.addEventListener('click', async (e) => {
 					const btn = e.target.closest('[data-randomfilters]');
 					if (!btn || btn.rfLock) return;
-
 					e.preventDefault();
+
 					btn.rfLock = true;
 					setTimeout(() => (btn.rfLock = false), 250);
 
 					const list = await readyList();
+					if (!list) return;
+
 					const items = getItemsArray(list);
 					if (!items.length) return;
 
 					const idx = getNext(items);
 					const item = items[idx] ?? items[Math.floor(Math.random() * items.length)];
 
-					// Flatten all field values into single array, shuffle, and limit to maxTotal
 					const allEntries = [];
-					for (const [fieldKey, field] of Object.entries(item.fields)) {
-						const values = Array.isArray(field.value) ? field.value : [field.value];
-						values.forEach(val => allEntries.push({ fieldKey, value: val }));
+					for (const [fieldKey, field] of Object.entries(item.fields || {})) {
+						const vals = Array.isArray(field.value) ? field.value : [field.value];
+						vals.forEach(v => allEntries.push({ fieldKey, value: v }));
 					}
 
-					const limitedFields = {};
-					ddg.utils.shuffle(allEntries).slice(0, maxTotal).forEach(({ fieldKey, value }) => {
-						(limitedFields[fieldKey] ||= []).push(value);
-					});
+					const limited = {};
+					ddg.utils.shuffle(allEntries)
+						.slice(0, maxTotal)
+						.forEach(({ fieldKey, value }) => {
+							(limited[fieldKey] ||= []).push(value);
+						});
 
-					log('randomFilters apply', { idx, limitedFields });
-					await setFilters(limitedFields);
+					log('randomFilters apply', { idx, limited });
+					await setFilters(limited);
 				}, true);
 
 				log('randomFilters init');
@@ -527,7 +482,6 @@
 			return { init };
 		})();
 
-		// Loading filters
 		const loadingFilters = (() => {
 			const maxDisplay = 8;
 
@@ -539,11 +493,11 @@
 
 				const waitForIx = () => new Promise((resolve, reject) => {
 					const check = () => {
-						attempts += 1;
+						attempts++;
 						const wf = window.Webflow;
-						if (wf && typeof wf.require === 'function') {
+						if (wf?.require) {
 							const wfIx = wf.require('ix3');
-							if (wfIx && typeof wfIx.emit === 'function') {
+							if (wfIx?.emit) {
 								resolve(wfIx);
 								return;
 							}
@@ -567,36 +521,34 @@
 						let pendingAnimation = false;
 
 						readyList().then(list => {
-							if (!list || !list.filters || !list.filters.value) return;
+							if (!list?.filters?.value) return;
 
 							list.addHook('filter', (items) => {
 								const groups = list.filters.value.groups || [];
 								const allValues = groups.flatMap(g =>
-									(g.conditions || []).flatMap(condition => {
-										const val = condition.value;
-										return Array.isArray(val) ? val : [val];
+									(g.conditions || []).flatMap(c => {
+										const v = c.value;
+										return Array.isArray(v) ? v : [v];
 									})
 								).filter(Boolean);
 
 								const values = allValues.slice(0, maxDisplay);
-								const extraCount = Math.max(0, allValues.length - maxDisplay);
+								const extra = Math.max(0, allValues.length - maxDisplay);
 
 								labels.forEach((label, i) => {
 									const span = label.querySelector('span');
-									label.style.pointerEvents = 'none';
-
 									if (values[i]) {
 										label.style.display = '';
 										if (span) span.textContent = values[i];
-									} else if (i === values.length && extraCount > 0) {
+									} else if (i === values.length && extra > 0) {
 										label.style.display = '';
-										if (span) span.textContent = `+${extraCount} more`;
+										if (span) span.textContent = `+${extra} more`;
 									} else {
 										label.style.display = 'none';
 									}
 								});
 
-								if (values.length > 0) {
+								if (values.length) {
 									if (modalOpen) {
 										pendingAnimation = true;
 									} else {
@@ -610,11 +562,11 @@
 						});
 
 						document.addEventListener('ddg:modal-opened', (e) => {
-							if (e.detail && e.detail.id === 'filters') modalOpen = true;
+							if (e.detail?.id === 'filters') modalOpen = true;
 						});
 
 						document.addEventListener('ddg:modal-closed', (e) => {
-							if (e.detail && e.detail.id === 'filters') {
+							if (e.detail?.id === 'filters') {
 								modalOpen = false;
 								if (pendingAnimation) {
 									pendingAnimation = false;
@@ -632,13 +584,10 @@
 			return { init };
 		})();
 
-		// Main initializer
 		let initialized = false;
-
 		const finsweetRelated = () => {
 			if (initialized) return;
 			initialized = true;
-
 			log('finsweetRelated init');
 			currentItem.resolve();
 			relatedFilters.init();
@@ -647,7 +596,6 @@
 			log('finsweetRelated: complete');
 		};
 
-		// Public api
 		return {
 			readyList,
 			finsweetRelated,
@@ -675,44 +623,47 @@
 	}
 
 	function iframe() {
-		// --- parent: accept url sync from children
+		// parent window: follow child URL sync
 		if (window === window.parent) {
-			let childSyncSession = false; // active while parent is following a child-driven story journey
-			const norm = (p) => { try { const s = String(p || ''); return (s.replace(/\/+$/, '') || '/'); } catch { return '/'; } };
-			ddg.iframeBridge.on('sync-url', ({ url, title }, ev) => {
-				try {
-					const parentPath = norm(location.pathname);
-					let nextUrl = null, nextPath = null;
-					if (url) {
-						nextUrl = new URL(url, location.href);
-						nextPath = norm(nextUrl.pathname);
-					}
+			let childSyncSession = false;
+			const norm = (p) => {
+				const s = String(p || '');
+				return s.replace(/\/+$/, '') || '/';
+			};
 
-					const allowNow = childSyncSession || parentPath === '/';
-					if (!allowNow) return;
+			ddg.iframeBridge.on('sync-url', ({ url, title }) => {
+				const parentPath = norm(location.pathname);
+				let nextPath = null;
 
-					// Start session when following child from home to a different path
-					if (!childSyncSession && parentPath === '/' && nextPath && nextPath !== '/') { childSyncSession = true; }
-					if (url && url !== location.href) {
-						const u = new URL(url, location.href);
-						if (u.origin === location.origin) {
-							history.replaceState(history.state, '', u.toString());
-						} else {
-							location.assign(u.toString());
-						}
-					}
-
-					// End session when returning to home
-					if (childSyncSession && nextPath === '/') { childSyncSession = false; }
-					if (title) document.title = title;
-				} catch (err) {
-					ddg.utils.warn('[iframe] parent sync failed', err);
+				if (url) {
+					const nextUrl = new URL(url, location.href);
+					nextPath = norm(nextUrl.pathname);
 				}
+
+				const allow = childSyncSession || parentPath === '/';
+				if (!allow) return;
+
+				if (!childSyncSession && parentPath === '/' && nextPath && nextPath !== '/') {
+					childSyncSession = true;
+				}
+
+				if (url && url !== location.href) {
+					const u = new URL(url, location.href);
+					if (u.origin === location.origin) {
+						history.replaceState(history.state, '', u.toString());
+					} else {
+						location.assign(u.toString());
+					}
+				}
+
+				if (childSyncSession && nextPath === '/') childSyncSession = false;
+				if (title) document.title = title;
 			});
+
 			return ddg.iframeBridge;
 		}
 
-		// --- child: notify parent on url changes
+		// child frame: notify parent on URL changes
 		const notify = ddg.utils.debounce(
 			() => ddg.iframeBridge.post('sync-url', { url: location.href, title: document.title }), 50
 		);
@@ -720,13 +671,11 @@
 		const wrapHistory = (name) => {
 			const orig = history[name];
 			if (typeof orig !== 'function' || orig.__ddgWrapped) return;
-
 			const wrapped = function (...args) {
 				const result = orig.apply(this, args);
 				notify();
 				return result;
 			};
-
 			wrapped.__ddgWrapped = true;
 			history[name] = wrapped;
 		};
@@ -737,7 +686,7 @@
 		window.addEventListener('hashchange', notify);
 		setTimeout(notify, 0);
 
-		// --- child: link policy (navigate top on same-origin normal clicks)
+		// child: normal links navigate top-level
 		if (!ddg.iframeLinkPolicyBound) {
 			ddg.iframeLinkPolicyBound = true;
 			document.addEventListener('click', (e) => {
@@ -759,21 +708,19 @@
 
 	function nav() {
 		const navEl = document.querySelector('.nav');
-		if (!navEl) return;
-		if (ddg.navInitialized) return;
+		if (!navEl || ddg.navInitialized) return;
 
 		ddg.navInitialized = true;
 
-		const showThreshold = 50; // px from top to start hiding nav
-		const hideThreshold = 100; // px scrolled before nav can hide
-		const revealBuffer = 50; // px scroll up needed to reveal nav
+		const showThreshold = 50;   // px from top where nav always visible
+		const hideThreshold = 100;  // px before nav is allowed to hide
+		const revealBuffer = 50;    // px scroll up needed to reveal nav
 
-		let lastY = window.scrollY;
+		let lastY = window.scrollY || 0;
 		let revealDistance = 0;
 
-		// Throttled update function for better scroll performance
 		const updateNav = () => {
-			const y = ScrollTrigger.scroll();
+			const y = window.scrollY || 0;
 			const delta = y - lastY;
 
 			if (y <= showThreshold) {
@@ -791,17 +738,13 @@
 			}
 
 			navEl.classList.toggle('is-past-threshold', y > hideThreshold);
-
 			lastY = y;
 		};
 
-		// Ensure a ScrollTrigger instance with throttled updates
-		ScrollTrigger.create({
-			trigger: document.body,
-			start: 'top top',
-			end: 'bottom bottom',
-			onUpdate: ddg.utils.throttle(updateNav, 16) // Throttle to ~60fps
-		});
+		const onScroll = ddg.utils.throttle(updateNav, 16);
+		window.addEventListener('scroll', onScroll, { passive: true });
+
+		updateNav();
 	}
 
 	function homelistSplit() {
@@ -813,16 +756,14 @@
 
 		const mobileBp = 767;
 		const tapeSpeed = 5000;
-
 		let split = null;
 
 		const isMobile = () => window.innerWidth <= mobileBp;
 
 		const revertSplit = () => {
 			if (!split) return;
-			try { split.revert(); }
-			catch (e) { ddg.utils.warn('homelistSplit: revert failed', e); }
-			finally { split = null; }
+			try { split.revert(); } catch (e) { ddg.utils.warn('homelistSplit: revert failed', e); }
+			split = null;
 		};
 
 		const applySplit = () => {
@@ -831,65 +772,47 @@
 
 			split = new SplitText(items, { type: 'lines', linesClass: 'home-list_split-line' });
 
-			// Create a single reusable probe element for measuring 1ch
 			const probe = document.createElement('span');
 			probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;margin:0;padding:0;border:0;width:1ch;height:0;font:inherit;white-space:normal;';
 
 			try {
-				// Phase 1: batch all dom reads (measurements) to minimize layout thrashing
 				const measurements = split.lines.map(line => {
-					// Measure ch-width in this line's font context
 					line.appendChild(probe);
 					const chPx = probe.getBoundingClientRect().width || 1;
 					line.removeChild(probe);
-
-					// Read all needed dimensions
 					const offsetWidth = line.offsetWidth || 0;
 					const widthPx = line.getBoundingClientRect().width || 0;
-
 					return { line, chPx, offsetWidth, widthPx };
 				});
 
-				// Phase 2: batch all dom writes (style updates)
 				measurements.forEach(({ line, chPx, offsetWidth, widthPx }) => {
 					const dur = gsap.utils.clamp(0.3, 2, offsetWidth / tapeSpeed);
 					line.style.setProperty('--tape-dur', `${dur}s`);
-
 					const chUnits = chPx ? (widthPx / chPx) : 0;
 					line.style.setProperty('--line-ch', `${chUnits.toFixed(2)}ch`);
 				});
 			} catch (err) {
 				if (probe.parentNode) probe.parentNode.removeChild(probe);
-				ddg.utils.warn('homelistSplit: split measurement failed', err);
-				return;
+				ddg.utils.warn('homelistSplit: measurement failed', err);
 			}
 		};
 
 		const update = () => {
 			revertSplit();
 			if (isMobile()) return;
-
-			try { applySplit(); }
-			catch (e) { ddg.utils.warn('homelistSplit: split failed', e); }
+			try { applySplit(); } catch (e) { ddg.utils.warn('homelistSplit: split failed', e); }
 		};
 
 		const throttleUpdate = ddg.utils.throttle(update, 120);
 
-		const init = async () => {
+		(async () => {
 			await ddg.utils.fontsReady();
-
 			update();
-
 			ddg.resizeEvent.on(throttleUpdate);
-
 			window.addEventListener('ddg:filters-change', throttleUpdate);
-		};
+		})();
 
-		init();
-
-		return () => {
-			revertSplit();
-		};
+		return () => revertSplit();
 	}
 
 	function share() {
@@ -1480,11 +1403,15 @@
 			});
 		});
 
-		document.addEventListener('ddg:modal-opened', (e) => {
-			window.Marquee.rescan(document);
+		document.addEventListener('ddg:modal-opened', () => {
+			if (window.Marquee && typeof window.Marquee.rescan === 'function') {
+				window.Marquee.rescan(document);
+			}
 		});
-		document.addEventListener('ddg:modal-closed', (e) => {
-			window.Marquee.rescan(document);
+		document.addEventListener('ddg:modal-closed', () => {
+			if (window.Marquee && typeof window.Marquee.rescan === 'function') {
+				window.Marquee.rescan(document);
+			}
 		});
 
 		ddg.utils.emit('ddg:modals-ready');
@@ -1560,9 +1487,11 @@
 						try { ddg.iframeBridge.post('sync-url', { url, title: document.title }); } catch { }
 					}
 					
-					const emitStoryOpened = () => queueMicrotask(
-						() => ddg.utils.emit('ddg:story-opened', { url })
-					);
+					const emitStoryOpened = () => {
+						const fn = () => ddg.utils.emit('ddg:story-opened', { url });
+						if (typeof queueMicrotask === 'function') queueMicrotask(fn);
+						else setTimeout(fn, 0);
+					};
 					
 					ddg.fs.readyList()
 						.then(emitStoryOpened)
