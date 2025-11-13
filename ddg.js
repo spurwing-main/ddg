@@ -756,12 +756,6 @@
 		if (!navEl) return;
 		if (ddg.navInitialized) return;
 
-		// Guard: ScrollTrigger must exist
-		if (typeof ScrollTrigger === 'undefined') {
-			ddg.utils.warn('nav: ScrollTrigger not found');
-			return;
-		}
-
 		ddg.navInitialized = true;
 
 		const showThreshold = 50; // px from top to start hiding nav
@@ -773,9 +767,7 @@
 
 		// Throttled update function for better scroll performance
 		const updateNav = () => {
-			const y = (typeof ScrollTrigger !== 'undefined' && typeof ScrollTrigger.scroll === 'function')
-				? ScrollTrigger.scroll()
-				: window.scrollY;
+			const y = ScrollTrigger.scroll();
 			const delta = y - lastY;
 
 			if (y <= showThreshold) {
@@ -810,11 +802,6 @@
 		const list = document.querySelector('.home-list_list');
 		if (!list) {
 			ddg.utils.warn('homelistSplit: .home-list_list not found');
-			return;
-		}
-		// Guard: require GSAP and SplitText
-		if (typeof gsap === 'undefined' || typeof SplitText === 'undefined') {
-			ddg.utils.warn('homelistSplit: GSAP or SplitText missing');
 			return;
 		}
 
@@ -919,7 +906,7 @@
 		};
 
 		// ---------- tiny helpers ----------
-		const parseCountdownNumber = (v) => {
+		const toNum = (v) => {
 			const n = parseInt(String(v ?? '').trim(), 10);
 			return Number.isFinite(n) ? n : 0;
 		};
@@ -971,7 +958,7 @@
 		const tickCountdowns = () => {
 			let hitZero = false;
 			document.querySelectorAll('[data-share-countdown]').forEach((node) => {
-				const cur = parseCountdownNumber(
+				const cur = toNum(
 					node.getAttribute('data-share-countdown') ||
 					(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node.value : node.textContent)
 				);
@@ -1058,8 +1045,11 @@
 			// countdown + optional confetti (does not block navigation)
 			const shouldConfetti = tickCountdowns();
 			if (shouldConfetti) {
-				// fire & forget; confetti() already handles its own errors
-				void confetti();
+				// fire & forget so navigation happens in the same user-gesture tick
+				try {
+					// confetti() already catches internally, but add a guard to avoid unhandled rejections
+					Promise.resolve(confetti()).catch(() => { /* noop */ });
+				} catch { /* noop */ }
 			}
 
 			// fire webhook once/day
@@ -1732,12 +1722,6 @@
 			const audioUrl = playerEl.dataset.audioUrl;
 			if (!audioUrl) return;
 
-			// Guard: require WaveSurfer
-			if (typeof WaveSurfer === 'undefined') {
-				ddg.utils.warn('[audio] WaveSurfer not available');
-				return;
-			}
-
 			// If same audio is already loaded, don't rebuild
 			if (playerEl.hasAttribute('data-audio-init') && activePlayer?.audioUrl === audioUrl) return;
 
@@ -1758,6 +1742,7 @@
 
 			ddg.utils.log('[audio] creating new player', audioUrl);
 			try {
+				if (typeof WaveSurfer === 'undefined') throw new Error('WaveSurfer not available');
 				wavesurfer = WaveSurfer.create({
 					container: waveformEl,
 					height: waveformEl.offsetHeight || 42,
@@ -1952,11 +1937,6 @@
 
 		// wavesurfer
 		function initWaveSurfer() {
-			// Guard: require WaveSurfer and Record plugin
-			if (typeof WaveSurfer === 'undefined' || !WaveSurfer.Record) {
-				warn('WaveSurfer or Record plugin not available — skipping recorder setup.');
-				return;
-			}
 			wsRecord?.destroy?.();
 			wsRecord = WaveSurfer.create({
 				container: recWaveWrap,
@@ -2160,12 +2140,6 @@
 		const staticButton = document.querySelector('.join-cta_btn .button');
 
 		if (!stickyButton || !staticButton) return;
-
-		// Guard: require ScrollTrigger
-		if (typeof ScrollTrigger === 'undefined') {
-			ddg.utils.warn('joinButtons: ScrollTrigger not found');
-			return;
-		}
 
 		// keep static in layout for ScrollTrigger, but hide it visually
 		stickyButton.style.display = 'flex';
