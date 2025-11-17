@@ -49,8 +49,61 @@ ddg.utils = {
 		console.warn('[ddg]', ...args);
 	},
 
+	// Performance monitoring utilities
+	perf: {
+		marks: new Map(),
+		
+		start(label) {
+			const key = `ddg:${label}`;
+			this.marks.set(label, performance.now());
+			console.log(`[ddg:perf] 🚀 START: ${label}`);
+			if (typeof performance.mark === 'function') {
+				performance.mark(`${key}:start`);
+			}
+		},
+		
+		end(label) {
+			const startTime = this.marks.get(label);
+			if (!startTime) {
+				console.warn(`[ddg:perf] ⚠️ No start mark for: ${label}`);
+				return;
+			}
+			const duration = performance.now() - startTime;
+			const color = duration > 100 ? '🔴' : duration > 50 ? '🟡' : '🟢';
+			console.log(`[ddg:perf] ${color} END: ${label} - ${duration.toFixed(2)}ms`);
+			this.marks.delete(label);
+			
+			const key = `ddg:${label}`;
+			if (typeof performance.mark === 'function' && typeof performance.measure === 'function') {
+				performance.mark(`${key}:end`);
+				try {
+					performance.measure(key, `${key}:start`, `${key}:end`);
+				} catch (e) { /* ignore */ }
+			}
+		},
+		
+		count(label) {
+			const key = `ddg:count:${label}`;
+			const current = this.marks.get(key) || 0;
+			this.marks.set(key, current + 1);
+			if (current > 0 && current % 10 === 0) {
+				console.log(`[ddg:perf] 📊 COUNT: ${label} = ${current + 1}`);
+			}
+		},
+		
+		memory() {
+			if (performance.memory) {
+				const used = (performance.memory.usedJSHeapSize / 1048576).toFixed(2);
+				const total = (performance.memory.totalJSHeapSize / 1048576).toFixed(2);
+				console.log(`[ddg:perf] 💾 Memory: ${used}MB / ${total}MB`);
+			}
+		}
+	},
+
 	async fontsReady(timeoutMs = 3000) {
+		ddg.utils.perf.start('fonts-ready');
 		if (!document.fonts || !document.fonts.ready) {
+			ddg.utils.perf.end('fonts-ready');
 			return new Promise(resolve => requestAnimationFrame(resolve));
 		}
 
@@ -59,6 +112,7 @@ ddg.utils = {
 			new Promise(resolve => setTimeout(resolve, timeoutMs))
 		]);
 
+		ddg.utils.perf.end('fonts-ready');
 		return new Promise(resolve => requestAnimationFrame(resolve));
 	}
 };
@@ -87,31 +141,50 @@ ddg.iframeBridge = (function () {
 
 ddg.net = {
 	async fetchHTML(url) {
+		ddg.utils.perf.start(`fetchHTML:${url}`);
+		ddg.utils.perf.count('fetchHTML');
 		const res = await fetch(url, { credentials: 'same-origin' });
 		if (!res.ok) throw new Error(`fetchHTML: HTTP ${res.status}`);
 		const text = await res.text();
-		return new DOMParser().parseFromString(text, 'text/html');
+		const doc = new DOMParser().parseFromString(text, 'text/html');
+		ddg.utils.perf.end(`fetchHTML:${url}`);
+		return doc;
 	},
 
 	async fetchJSON(url) {
+		ddg.utils.perf.start(`fetchJSON:${url}`);
+		ddg.utils.perf.count('fetchJSON');
 		const res = await fetch(url, { credentials: 'same-origin' });
 		if (!res.ok) throw new Error(`fetchJSON: HTTP ${res.status}`);
-		return res.json();
+		const data = await res.json();
+		ddg.utils.perf.end(`fetchJSON:${url}`);
+		return data;
 	},
 
 	prefetch(url, delay = 250) {
+		console.log(`[ddg:perf] 🌐 PREFETCH scheduled: ${url} (delay: ${delay}ms)`);
+		ddg.utils.perf.count('prefetch');
 		const controller = new AbortController();
 		const timeout = setTimeout(() => {
+			console.log(`[ddg:perf] 🌐 PREFETCH executing: ${url}`);
+			const start = performance.now();
 			fetch(url, {
 				signal: controller.signal,
 				credentials: 'same-origin'
+			}).then(() => {
+				const duration = performance.now() - start;
+				console.log(`[ddg:perf] ✅ PREFETCH complete: ${url} (${duration.toFixed(2)}ms)`);
 			}).catch((err) => {
-				if (!err || err.name === 'AbortError') return;
+				if (!err || err.name === 'AbortError') {
+					console.log(`[ddg:perf] ❌ PREFETCH cancelled: ${url}`);
+					return;
+				}
 				ddg.utils.warn('ddg.net.prefetch failed:', err);
 			});
 		}, delay);
 
 		return () => {
+			console.log(`[ddg:perf] 🚫 PREFETCH abort: ${url}`);
 			clearTimeout(timeout);
 			controller.abort();
 		};
@@ -126,6 +199,7 @@ ddg.scrollLock = (function () {
 
 	function applyLock() {
 		if (saved) return;
+		console.log('[ddg:perf] 🔒 ScrollLock: applying lock');
 		const y = window.scrollY || docEl.scrollTop || 0;
 		const x = window.scrollX || docEl.scrollLeft || 0;
 		saved = { x, y };
@@ -140,6 +214,7 @@ ddg.scrollLock = (function () {
 
 	function removeLock() {
 		if (!saved) return;
+		console.log('[ddg:perf] 🔓 ScrollLock: removing lock');
 		const { x, y } = saved;
 		saved = null;
 		body.style.position = '';
@@ -154,11 +229,13 @@ ddg.scrollLock = (function () {
 
 	function lock(key) {
 		if (key) held.add(String(key));
+		console.log(`[ddg:perf] 🔒 ScrollLock: lock requested (key: ${key}, total: ${held.size})`);
 		if (held.size === 1) applyLock();
 	}
 
 	function unlock(key) {
 		if (key) held.delete(String(key));
+		console.log(`[ddg:perf] 🔓 ScrollLock: unlock requested (key: ${key}, remaining: ${held.size})`);
 		if (!held.size) removeLock();
 	}
 
@@ -181,7 +258,14 @@ ddg.resizeEvent = (function () {
 	let lastSize = readSize();
 
 	const notify = () => {
-		lastSize = readSize();
+		const newSize = readSize();
+		const widthChange = Math.abs(newSize.width - lastSize.width);
+		const heightChange = Math.abs(newSize.height - lastSize.height);
+		
+		console.log(`[ddg:perf] 📐 ResizeEvent: ${lastSize.width}x${lastSize.height} → ${newSize.width}x${newSize.height} (Δ ${widthChange}x${heightChange})`);
+		ddg.utils.perf.count('resize-event-notify');
+		
+		lastSize = newSize;
 		const detail = { ...lastSize };
 		listeners.forEach(fn => fn(detail));
 	};
@@ -192,8 +276,12 @@ ddg.resizeEvent = (function () {
 	const on = (fn, { immediate = false } = {}) => {
 		if (typeof fn !== 'function') return () => { };
 		listeners.add(fn);
+		console.log(`[ddg:perf] 📐 ResizeEvent: listener added (total: ${listeners.size})`);
 		if (immediate) fn({ ...lastSize });
-		return () => listeners.delete(fn);
+		return () => {
+			listeners.delete(fn);
+			console.log(`[ddg:perf] 📐 ResizeEvent: listener removed (remaining: ${listeners.size})`);
+		};
 	};
 
 	const getSize = () => ({ ...lastSize });
@@ -257,9 +345,12 @@ ddg.fs = (function () {
 	})();
 
 	const setFilters = async (fieldValues, { reset = true } = {}) => {
+		ddg.utils.perf.start('fs-setFilters');
+		console.log('[ddg:perf] 🔍 Finsweet: setFilters called', fieldValues);
 		const list = await readyList();
 		if (!list) {
 			warn('setFilters: no list');
+			ddg.utils.perf.end('fs-setFilters');
 			return;
 		}
 
@@ -287,6 +378,7 @@ ddg.fs = (function () {
 			})
 			.filter(Boolean);
 
+		console.log(`[ddg:perf] 🔍 Finsweet: applying ${conditions.length} filter conditions`);
 		log('setFilters', { groups: conditions.length });
 
 		// Replace the entire filters model
@@ -307,6 +399,7 @@ ddg.fs = (function () {
 		list.settingFilters = false;
 
 		ddg.utils.emit('ddg:filters-change', { fieldValues, list }, window);
+		ddg.utils.perf.end('fs-setFilters');
 	};
 
 	const relatedFilters = (() => {
@@ -442,6 +535,7 @@ ddg.fs = (function () {
 		const rebuildBag = (items, exclude) => {
 			const ids = items.map((_, i) => i).filter(i => getKey(items[i]) !== exclude);
 			state.bag = ddg.utils.shuffle(ids);
+			console.log(`[ddg:perf] 🎲 RandomFilters: bag rebuilt with ${state.bag.length} items`);
 		};
 
 		const getNext = (items) => {
@@ -455,6 +549,9 @@ ddg.fs = (function () {
 				const btn = e.target.closest('[data-randomfilters]');
 				if (!btn || btn.rfLock) return;
 				e.preventDefault();
+
+				console.log('[ddg:perf] 🎲 RandomFilters: button clicked');
+				ddg.utils.perf.start('randomFilters-apply');
 
 				btn.rfLock = true;
 				setTimeout(() => (btn.rfLock = false), 250);
@@ -482,7 +579,9 @@ ddg.fs = (function () {
 					});
 
 				log('randomFilters apply', { idx, limited });
+				console.log(`[ddg:perf] 🎲 RandomFilters: applying filters from item ${idx}`, limited);
 				await setFilters(limited);
+				ddg.utils.perf.end('randomFilters-apply');
 			}, true);
 
 			log('randomFilters init');
@@ -698,6 +797,7 @@ function iframe() {
 }
 
 function nav() {
+	ddg.utils.perf.start('nav-init');
 	const navEl = document.querySelector('.nav');
 	if (!navEl || ddg.navInitialized) return;
 
@@ -711,6 +811,7 @@ function nav() {
 	let revealDistance = 0;
 
 	const updateNav = () => {
+		ddg.utils.perf.count('nav-scroll-update');
 		const y = window.scrollY || 0;
 		const delta = y - lastY;
 
@@ -732,16 +833,19 @@ function nav() {
 		lastY = y;
 	};
 
-	const onScroll = ddg.utils.throttle(updateNav, 16);
+	const onScroll = ddg.utils.throttle(updateNav, 100);
 	window.addEventListener('scroll', onScroll, { passive: true });
 
 	updateNav();
+	ddg.utils.perf.end('nav-init');
 }
 
 function homelistSplit() {
+	ddg.utils.perf.start('homelistSplit-init');
 	const list = document.querySelector('.home-list_list');
 	if (!list) {
 		ddg.utils.warn('homelistSplit: .home-list_list not found');
+		ddg.utils.perf.end('homelistSplit-init');
 		return;
 	}
 
@@ -756,39 +860,65 @@ function homelistSplit() {
 
 	const revertSplit = () => {
 		if (!split) return;
+		ddg.utils.perf.start('homelistSplit-revert');
 		try { split.revert(); } catch (e) { ddg.utils.warn('homelistSplit: revert failed', e); }
 		split = null;
+		ddg.utils.perf.end('homelistSplit-revert');
 	};
 
 	const applySplit = () => {
+		ddg.utils.perf.start('homelistSplit-apply');
+		ddg.utils.perf.count('homelistSplit-apply');
 		const items = gsap.utils.toArray(list.querySelectorAll('.home-list_item'));
-		if (!items.length) return;
+		if (!items.length) {
+			ddg.utils.perf.end('homelistSplit-apply');
+			return;
+		}
 
+		console.log(`[ddg:perf] SplitText processing ${items.length} items`);
 		split = new SplitText(items, { type: 'lines', linesClass: 'home-list_split-line' });
 
+		// Create a shared probe element for measurements
 		const probe = document.createElement('span');
 		probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;margin:0;padding:0;border:0;width:1ch;height:0;font:inherit;white-space:normal;';
 
 		try {
-			const measurements = split.lines.map(line => {
-				line.appendChild(probe);
-				const chPx = probe.getBoundingClientRect().width || 1;
-				line.removeChild(probe);
-				const offsetWidth = line.offsetWidth || 0;
-				const widthPx = line.getBoundingClientRect().width || 0;
-				return { line, chPx, offsetWidth, widthPx };
-			});
-
+			// OPTIMIZATION: Batch DOM reads to eliminate layout thrashing
+			// We append probe once, measure it, then reuse the measurement for all lines
+			
+			// Phase 1: Get a sample line to measure probe width
+			const firstLine = split.lines[0];
+			if (!firstLine) {
+				ddg.utils.perf.end('homelistSplit-apply');
+				return;
+			}
+			
+			// Append probe to first line to get ch width
+			firstLine.appendChild(probe);
+			const chPx = probe.getBoundingClientRect().width || 1;
+			firstLine.removeChild(probe);
+			
+			// Phase 2: Batch all line measurements (no DOM mutations, just reads)
+			const measurements = split.lines.map(line => ({
+				line,
+				chPx,
+				offsetWidth: line.offsetWidth || 0,
+				widthPx: line.getBoundingClientRect().width || 0
+			}));
+			
+			// Phase 3: Apply CSS custom properties (no layout reads, safe to do in loop)
 			measurements.forEach(({ line, chPx, offsetWidth, widthPx }) => {
 				const dur = gsap.utils.clamp(0.3, 2, offsetWidth / tapeSpeed);
 				line.style.setProperty('--tape-dur', `${dur}s`);
 				const chUnits = chPx ? (widthPx / chPx) : 0;
 				line.style.setProperty('--line-ch', `${chUnits.toFixed(2)}ch`);
 			});
+			console.log(`[ddg:perf] SplitText created ${split.lines.length} lines`);
 		} catch (err) {
 			if (probe.parentNode) probe.parentNode.removeChild(probe);
 			ddg.utils.warn('homelistSplit: measurement failed', err);
 		}
+		ddg.utils.perf.end('homelistSplit-apply');
 	};
 
 	const isNearViewport = () => {
@@ -804,16 +934,25 @@ function homelistSplit() {
 	};
 
 	const onResize = ({ width }) => {
-		if (width === lastWidth) return;
+		ddg.utils.perf.count('homelistSplit-resize');
+		
+		// Ignore small width changes (e.g., scrollbar appearing/disappearing)
+		if (Math.abs(width - lastWidth) < 50) {
+			console.log(`[ddg:perf] homelistSplit resize ignored: ${width}px (< 50px change)`);
+			return;
+		}
+		
 		lastWidth = width;
+		console.log(`[ddg:perf] homelistSplit resize: ${width}px`);
 
 		revertSplit();
 
 		if (resizeTimeout) clearTimeout(resizeTimeout);
+		// Increased debounce to reduce unnecessary rebuilds
 		resizeTimeout = setTimeout(() => {
 			resizeTimeout = null;
 			splitIfVisible();
-		}, 150);
+		}, 500);
 	};
 	
 	const setupObserver = () => {
@@ -822,6 +961,7 @@ function homelistSplit() {
 		observer = new IntersectionObserver((entries) => {
 			for (const entry of entries) {
 				if (entry.isIntersecting && !split && !isMobile() && !resizeTimeout) {
+					console.log(`[ddg:perf] homelistSplit intersection visible`);
 					splitIfVisible();
 				}
 			}
@@ -838,6 +978,7 @@ function homelistSplit() {
 		setupObserver();
 		splitIfVisible();
 		ddg.resizeEvent.on(onResize);
+		ddg.utils.perf.end('homelistSplit-init');
 	})();
 
 	return () => {
@@ -1075,6 +1216,7 @@ function share() {
 }
 
 function modals() {
+	ddg.utils.perf.start('modals-init');
 	const modalRoot = document.querySelector('[data-modal-el]');
 	if (!modalRoot) return;
 	if (ddg.modalsInitialized) return;
@@ -1234,6 +1376,8 @@ function modals() {
 		}
 
 		const open = ({ skipAnimation = false, afterOpen } = {}) => {
+			ddg.utils.perf.start(`modal-open:${id}`);
+			ddg.utils.perf.count('modal-open');
 			// Combine: on-load, skipAnimation, and existing is-open are treated as "already open" (instant)
 			const alreadyOpen = $modal.hasClass('is-open');
 
@@ -1257,12 +1401,14 @@ function modals() {
 				}
 				requestAnimationFrame(focusModal);
 				announceOpen();
+				ddg.utils.perf.end(`modal-open:${id}`);
 				return afterOpen && afterOpen();
 			}
 
 			setAnimating(true);
 			gsap.set($bg[0], { autoAlpha: 0 });
 
+			console.log(`[ddg:perf] 🎬 Modal: starting open animation (id: ${id})`);
 			gsap.timeline({
 				onComplete: () => {
 					setAnimating(false);
@@ -1274,6 +1420,8 @@ function modals() {
 					}
 					requestAnimationFrame(focusModal);
 					announceOpen();
+					console.log(`[ddg:perf] 🎬 Modal: open animation complete (id: ${id})`);
+					ddg.utils.perf.end(`modal-open:${id}`);
 					afterOpen && afterOpen();
 				}
 			})
@@ -1291,6 +1439,7 @@ function modals() {
 			if (!$modal.hasClass('is-open')) return;
 			if (closing) return closingTl;
 
+			console.log(`[ddg:perf] 🚪 Modal: starting close (id: ${id}, skipAnimation: ${skipAnimation})`);
 			closing = true;
 			// Only unlock if this modal applied the lock
 			if (ddg.scrollLock.isHolding(id)) ddg.scrollLock.unlock(id);
@@ -1308,6 +1457,7 @@ function modals() {
 				openedAnnounced = false;
 				closing = false;
 				closingTl = null;
+				console.log(`[ddg:perf] 🚪 Modal: close complete (id: ${id})`);
 				afterClose && afterClose();
 			};
 
@@ -1317,6 +1467,7 @@ function modals() {
 				return finish();
 			}
 
+			console.log(`[ddg:perf] 🎬 Modal: starting close animation (id: ${id})`);
 			setAnimating(true);
 			$bg[0]?.classList.remove('is-open');
 			gsap.set([$modal[0], $inner[0], $bg[0]], { pointerEvents: 'none' });
@@ -1456,6 +1607,7 @@ function modals() {
 }
 
 function ajaxStories() {
+	ddg.utils.perf.start('ajaxStories-init');
 	const embedEl = document.querySelector('[data-ajax-modal="embed"]');
 	if (!embedEl) return;
 	if (ddg.ajaxStoriesInitialized) return;
@@ -1495,9 +1647,13 @@ function ajaxStories() {
 	};
 
 	const renderEmbed = (html) => {
+		ddg.utils.perf.start('renderEmbed');
 		const markup = typeof html === 'string' && html.trim() ? html : errorHtml;
+		const htmlLength = markup.length;
 		$embed.empty();
 		$embed[0].innerHTML = markup;
+		console.log(`[ddg:perf] 📄 RenderEmbed: ${htmlLength} chars, ${$embed[0].children.length} children`);
+		ddg.utils.perf.end('renderEmbed');
 	};
 
 	const ensureModal = () => {
@@ -1507,8 +1663,13 @@ function ajaxStories() {
 	};
 
 	const openStory = (url, title, contentHTML, options = {}) => {
+		console.log(`[ddg:perf] 📖 OpenStory: ${url} (cached: ${!!options.cached})`);
+		ddg.utils.perf.start('openStory');
 		const modal = ensureModal();
-		if (!modal) { return; }
+		if (!modal) { 
+			ddg.utils.perf.end('openStory');
+			return; 
+		}
 
 		const { stateMode = 'push' } = options;
 		renderEmbed(contentHTML);
@@ -1536,6 +1697,7 @@ function ajaxStories() {
 					.catch(emitStoryOpened)
 					.finally(() => {
 						ddg.fs.resolveCurrentItem(url);
+						ddg.utils.perf.end('openStory');
 					});
 
 			}
@@ -1546,26 +1708,33 @@ function ajaxStories() {
 		if (!url) return;
 		if (lock && !options.force) return;
 		lock = true;
+		ddg.utils.perf.start(`loadStory:${url}`);
+		ddg.utils.perf.count('loadStory');
 		try {
 			const cached = cacheGet(url);
 			if (cached) {
-				openStory(url, cached.title, cached.contentHTML, options);
+				console.log(`[ddg:perf] ✅ Story cache HIT: ${url}`);
+				openStory(url, cached.title, cached.contentHTML, { ...options, cached: true });
 				return;
 			}
+			console.log(`[ddg:perf] ❌ Story cache MISS: ${url} (cache size: ${storyCache.size}/${storyCacheMax})`);
 			if (options.showSkeleton !== false) renderEmbed(skeletonHtml);
 			const doc = await ddg.net.fetchHTML(url);
 			const parsed = storyFromDoc(doc);
 			cacheSet(url, parsed);
+			console.log(`[ddg:perf] 💾 Story cached: ${url} (new cache size: ${storyCache.size}/${storyCacheMax})`);
 			openStory(url, parsed.title, parsed.contentHTML, options);
 		} catch {
 			renderEmbed(errorHtml);
 		} finally {
+			ddg.utils.perf.end(`loadStory:${url}`);
 			lock = false;
 		}
 	};
 
 	document.addEventListener('ddg:modal-closed', (ev) => {
 		if (ev.detail?.id !== storyModalId) return;
+		console.log('[ddg:perf] 📕 Story modal closed, navigating to home');
 		document.title = originalTitle;
 		history.pushState({}, '', homeUrl);
 		ddg.fs.resolveCurrentItem(homeUrl);
@@ -1624,29 +1793,45 @@ function ajaxStories() {
 		catch { prefetchCancel = null; }
 	};
 
-	const onMouseOver = (event) => {
+	// Throttle hover handler to reduce excessive event processing
+	const onMouseOver = ddg.utils.throttle((event) => {
+		ddg.utils.perf.count('story-hover');
 		const root = event.target.closest('[data-ajax-modal="link"]');
 		if (!root) return;
 		const url = resolveLinkHref(root, event.target);
 		if (!url) return;
 
 		cancelPrefetch();
+		// Increased delay - only prefetch on intentional hovers
 		prefetchHoverTimeout = setTimeout(() => {
 			maybePrefetchStory(url);
-		}, 300);
-	};
+		}, 800);
+	}, 150);
 
-	const onMouseOut = (event) => {
+	const onMouseOut = ddg.utils.throttle((event) => {
 		const root = event.target.closest('[data-ajax-modal="link"]');
 		if (!root) return;
 		const related = event.relatedTarget;
 		if (related && root.contains(related)) return;
 		cancelPrefetch();
+	}, 150);
+
+	// Also prefetch on mousedown for immediate clicks (before hover timeout fires)
+	const onMouseDown = (event) => {
+		const root = event.target.closest('[data-ajax-modal="link"]');
+		if (!root) return;
+		const url = resolveLinkHref(root, event.target);
+		if (url && !cacheGet(url)) {
+			// Cancel any pending hover prefetch and prefetch immediately
+			cancelPrefetch();
+			maybePrefetchStory(url);
+		}
 	};
 
 	document.addEventListener('click', onStoryLinkClick);
 	document.addEventListener('mouseover', onMouseOver);
 	document.addEventListener('mouseout', onMouseOut);
+	document.addEventListener('mousedown', onMouseDown, { passive: true });
 
 	window.addEventListener('popstate', () => {
 		const path = window.location.pathname;
@@ -1659,6 +1844,8 @@ function ajaxStories() {
 		}
 		loadAndOpenStory(window.location.href, { stateMode: 'none', showSkeleton: true, force: true });
 	});
+
+	ddg.utils.perf.end('ajaxStories-init');
 }
 
 function storiesAudioPlayer() {
@@ -1686,6 +1873,7 @@ function storiesAudioPlayer() {
 
 	const cleanupActive = () => {
 		if (!activePlayer) return;
+		console.log('[ddg:perf] 🎵 Audio: cleanup active player');
 		const { wavesurfer, el } = activePlayer;
 		try { wavesurfer?.destroy?.(); }
 		catch (err) { ddg.utils.warn('[audio] destroy failed', err); }
@@ -1695,21 +1883,36 @@ function storiesAudioPlayer() {
 	};
 
 	const buildAudio = (modalEl) => {
+		ddg.utils.perf.start('audio-build');
 		const playerEl = modalEl.querySelector('.story-player');
-		if (!playerEl) return;
+		if (!playerEl) {
+			ddg.utils.perf.end('audio-build');
+			return;
+		}
 
 		const audioUrl = playerEl.dataset.audioUrl;
-		if (!audioUrl) return;
+		if (!audioUrl) {
+			ddg.utils.perf.end('audio-build');
+			return;
+		}
 
 		// If same audio is already loaded, don't rebuild
-		if (playerEl.hasAttribute('data-audio-init') && activePlayer?.audioUrl === audioUrl) return;
+		if (playerEl.hasAttribute('data-audio-init') && activePlayer?.audioUrl === audioUrl) {
+			console.log('[ddg:perf] 🎵 Audio: already initialized, skipping');
+			ddg.utils.perf.end('audio-build');
+			return;
+		}
 
 		cleanupActive();
+		console.log('[ddg:perf] 🎵 Audio: building new player', audioUrl);
 
 		const waveformEl = playerEl.querySelector('.story-player_waveform');
 		const playBtn = playerEl.querySelector('[data-player="play"]');
 		const muteBtn = playerEl.querySelector('[data-player="mute"]');
-		if (!waveformEl || !playBtn || !muteBtn) return;
+		if (!waveformEl || !playBtn || !muteBtn) {
+			ddg.utils.perf.end('audio-build');
+			return;
+		}
 
 		const playIcon = playBtn.querySelector('.circle-btn_icon.is-play');
 		const pauseIcon = playBtn.querySelector('.circle-btn_icon.is-pause');
@@ -1722,6 +1925,7 @@ function storiesAudioPlayer() {
 
 		if (typeof WaveSurfer === 'undefined') {
 			ddg.utils.warn('[audio] WaveSurfer not available');
+			ddg.utils.perf.end('audio-build');
 			return;
 		}
 
@@ -1743,6 +1947,7 @@ function storiesAudioPlayer() {
 			});
 		} catch (err) {
 			ddg.utils.warn('[audio] WaveSurfer init failed', err);
+			ddg.utils.perf.end('audio-build');
 			return;
 		}
 
@@ -1757,11 +1962,12 @@ function storiesAudioPlayer() {
 		wavesurfer.once('ready', () => {
 			disable(playBtn, false);
 			disable(muteBtn, false);
-
+			console.log('[ddg:perf] 🎵 Audio: waveform ready');
 			ddg.utils.log('[audio] waveform ready');
 		});
 
 		wavesurfer.on('play', () => {
+			console.log('[ddg:perf] 🎵 Audio: playback started');
 			setPlayState(playBtn, playIcon, pauseIcon, true);
 			if (activePlayer && activePlayer.wavesurfer !== wavesurfer) {
 				try { activePlayer.wavesurfer.pause(); } catch (e) { }
@@ -1769,8 +1975,14 @@ function storiesAudioPlayer() {
 			activePlayer = { el: playerEl, wavesurfer, audioUrl };
 		});
 
-		wavesurfer.on('pause', () => setPlayState(playBtn, playIcon, pauseIcon, false));
-		wavesurfer.on('finish', () => setPlayState(playBtn, playIcon, pauseIcon, false));
+		wavesurfer.on('pause', () => {
+			console.log('[ddg:perf] 🎵 Audio: playback paused');
+			setPlayState(playBtn, playIcon, pauseIcon, false);
+		});
+		wavesurfer.on('finish', () => {
+			console.log('[ddg:perf] 🎵 Audio: playback finished');
+			setPlayState(playBtn, playIcon, pauseIcon, false);
+		});
 
 		playBtn.addEventListener('click', () => wavesurfer.playPause());
 		muteBtn.addEventListener('click', () => {
@@ -1780,6 +1992,7 @@ function storiesAudioPlayer() {
 		});
 
 		playerEl.__ws = wavesurfer;
+		ddg.utils.perf.end('audio-build');
 	};
 
 	document.addEventListener('ddg:modal-opened', e => {
@@ -1837,6 +2050,10 @@ ddg.boot = function boot() {
 	if (data.siteBooted) return;
 	data.siteBooted = true;
 
+	console.log('[ddg:perf] ========== BOOT START ==========');
+	ddg.utils.perf.start('boot');
+	ddg.utils.perf.memory();
+
 	requestAnimationFrame(() => {
 		iframe();
 		nav();
@@ -1847,5 +2064,20 @@ ddg.boot = function boot() {
 		share();
 		storiesAudioPlayer();
 		joinButtons();
+		
+		ddg.utils.perf.end('boot');
+		ddg.utils.perf.memory();
+		console.log('[ddg:perf] ========== BOOT COMPLETE ==========');
+		
+		// Log overall performance marks
+		if (typeof performance.getEntriesByType === 'function') {
+			const measures = performance.getEntriesByType('measure').filter(m => m.name.startsWith('ddg:'));
+			if (measures.length) {
+				console.table(measures.map(m => ({ 
+					name: m.name.replace('ddg:', ''), 
+					duration: `${m.duration.toFixed(2)}ms` 
+				})));
+			}
+		}
 	});
 };
