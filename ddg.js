@@ -263,48 +263,48 @@ ddg.fs = (function () {
 			return;
 		}
 
-		if (reset) {
-			document.querySelectorAll('[fs-list-element="filters"]').forEach(form => {
-				form.querySelectorAll('input[type="checkbox"], input[type="radio"]').forEach(input => {
-					input.checked = false;
-					input.closest('label')?.classList.remove('is-list-active');
-				});
-				form.querySelectorAll('input[type="text"], input[type="search"], textarea').forEach(input => {
-					input.value = '';
-				});
-				form.querySelectorAll('select').forEach(select => {
-					select.selectedIndex = 0;
-				});
-			});
-		}
+		// Prevent two-way binding from reacting to these changes
+		list.settingFilters = true;
 
-		const conditions = Object.entries(fieldValues || {}).map(([fieldKey, values]) => {
-			const arr = Array.isArray(values) ? values : [values];
-			const clean = [...new Set(arr.map(String))].filter(Boolean);
-			if (!clean.length) return null;
-			return {
-				id: `${fieldKey}_equal`,
-				type: 'checkbox',
-				fieldKey,
-				value: clean,
-				op: 'equal',
-				filterMatch: 'or',
-				interacted: true,
-				showTag: true,
-				tagValuesDisplay: 'combined'
-			};
-		}).filter(Boolean);
+		// Build new conditions from fieldValues
+		const conditions = Object.entries(fieldValues || {})
+			.map(([fieldKey, values]) => {
+				const arr = Array.isArray(values) ? values : [values];
+				const clean = [...new Set(arr.map(String))].filter(Boolean);
+				if (!clean.length) return null;
+
+				return {
+					id: `${fieldKey}_equal`,
+					type: 'checkbox', // Adjust if your actual form fields differ
+					fieldKey,
+					value: clean,
+					op: 'equal',
+					filterMatch: 'or',
+					interacted: true,
+					showTag: true,
+					tagValuesDisplay: 'combined',
+				};
+			})
+			.filter(Boolean);
 
 		log('setFilters', { groups: conditions.length });
 
+		// Replace the entire filters model
 		list.filters.value = {
 			groupsMatch: 'and',
-			groups: conditions.length ? [{
-				id: '0',
-				conditionsMatch: 'and',
-				conditions
-			}] : []
+			groups: conditions.length
+				? [
+					{
+						id: '0',
+						conditionsMatch: 'and',
+						conditions,
+					},
+				]
+				: [],
 		};
+
+		// Re-enable two-way binding; the watcher will now call setConditionsData
+		list.settingFilters = false;
 
 		ddg.utils.emit('ddg:filters-change', { fieldValues, list }, window);
 	};
@@ -748,6 +748,9 @@ function homelistSplit() {
 	const mobileBp = 767;
 	const tapeSpeed = 5000;
 	let split = null;
+	let observer = null;
+	let lastWidth = window.innerWidth;
+	let resizeTimeout = null;
 
 	const isMobile = () => window.innerWidth <= mobileBp;
 
@@ -788,22 +791,66 @@ function homelistSplit() {
 		}
 	};
 
-	const update = () => {
-		revertSplit();
+	const isNearViewport = () => {
+		const rect = list.getBoundingClientRect();
+		const buffer = 200;
+		return rect.bottom >= -buffer && rect.top <= window.innerHeight + buffer;
+	};
+
+	const splitIfVisible = () => {
 		if (isMobile()) return;
+		if (!isNearViewport()) return;
 		try { applySplit(); } catch (e) { ddg.utils.warn('homelistSplit: split failed', e); }
 	};
 
-	const throttleUpdate = ddg.utils.throttle(update, 120);
+	const onResize = ({ width }) => {
+		if (width === lastWidth) return;
+		lastWidth = width;
+
+		revertSplit();
+
+		if (resizeTimeout) clearTimeout(resizeTimeout);
+		resizeTimeout = setTimeout(() => {
+			resizeTimeout = null;
+			splitIfVisible();
+		}, 150);
+	};
+	
+	const setupObserver = () => {
+		if (observer) return;
+
+		observer = new IntersectionObserver((entries) => {
+			for (const entry of entries) {
+				if (entry.isIntersecting && !split && !isMobile() && !resizeTimeout) {
+					splitIfVisible();
+				}
+			}
+		}, {
+			rootMargin: '200px 0px',
+			threshold: 0
+		});
+
+		observer.observe(list);
+	};
 
 	(async () => {
 		await ddg.utils.fontsReady();
-		update();
-		ddg.resizeEvent.on(throttleUpdate);
-		window.addEventListener('ddg:filters-change', throttleUpdate);
+		setupObserver();
+		splitIfVisible();
+		ddg.resizeEvent.on(onResize);
 	})();
 
-	return () => revertSplit();
+	return () => {
+		if (observer) {
+			observer.disconnect();
+			observer = null;
+		}
+		if (resizeTimeout) {
+			clearTimeout(resizeTimeout);
+			resizeTimeout = null;
+		}
+		revertSplit();
+	};
 }
 
 function share() {
@@ -1554,41 +1601,52 @@ function ajaxStories() {
 	};
 
 	let prefetchCancel = null;
+	let lastPrefetchUrl = null;
+	let prefetchHoverTimeout = null;
 
 	const cancelPrefetch = () => {
-		if (!prefetchCancel) return;
-		prefetchCancel();
-		prefetchCancel = null;
+		if (prefetchHoverTimeout) {
+			clearTimeout(prefetchHoverTimeout);
+			prefetchHoverTimeout = null;
+		}
+		if (prefetchCancel) {
+			prefetchCancel();
+			prefetchCancel = null;
+		}
+		lastPrefetchUrl = null;
 	};
 
-	const maybePrefetchStory = (event) => {
-		const root = event.target.closest('[data-ajax-modal="link"]');
-		if (!root) return;
-		const url = resolveLinkHref(root, event.target);
-		if (!prefetchEnabled || !url || cacheGet(url)) return;
+	const maybePrefetchStory = (url) => {
+		if (!prefetchEnabled || !url || cacheGet(url) || lastPrefetchUrl === url) return;
 		cancelPrefetch();
-		try { prefetchCancel = ddg.net.prefetch(url, 120); }
+		lastPrefetchUrl = url;
+		try { prefetchCancel = ddg.net.prefetch(url, 500); }
 		catch { prefetchCancel = null; }
 	};
 
-	const throttledHover = ddg.utils.throttle((event) => {
-		maybePrefetchStory(event);
-	}, 16);
+	const onMouseOver = (event) => {
+		const root = event.target.closest('[data-ajax-modal="link"]');
+		if (!root) return;
+		const url = resolveLinkHref(root, event.target);
+		if (!url) return;
 
-	const throttledHoverOut = ddg.utils.throttle((event) => {
+		cancelPrefetch();
+		prefetchHoverTimeout = setTimeout(() => {
+			maybePrefetchStory(url);
+		}, 300);
+	};
+
+	const onMouseOut = (event) => {
 		const root = event.target.closest('[data-ajax-modal="link"]');
 		if (!root) return;
 		const related = event.relatedTarget;
 		if (related && root.contains(related)) return;
 		cancelPrefetch();
-	}, 16);
+	};
 
 	document.addEventListener('click', onStoryLinkClick);
-	document.addEventListener('mouseover', throttledHover);
-	document.addEventListener('mouseout', throttledHoverOut);
-	document.addEventListener('touchstart', maybePrefetchStory, { passive: true });
-	document.addEventListener('touchend', cancelPrefetch, { passive: true });
-	document.addEventListener('touchcancel', cancelPrefetch, { passive: true });
+	document.addEventListener('mouseover', onMouseOver);
+	document.addEventListener('mouseout', onMouseOut);
 
 	window.addEventListener('popstate', () => {
 		const path = window.location.pathname;
