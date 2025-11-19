@@ -853,10 +853,33 @@ function homelistSplit() {
 	const tapeSpeed = 5000;
 	let split = null;
 	let observer = null;
+	let mobileObserver = null;
 	let lastWidth = window.innerWidth;
 	let resizeTimeout = null;
 
 	const isMobile = () => window.innerWidth <= mobileBp;
+
+	const enableMobileCenter = () => {
+		if (mobileObserver) return;
+		const items = list.querySelectorAll('.home-list_item');
+		mobileObserver = new IntersectionObserver((entries) => {
+			entries.forEach(entry => {
+				if (entry.isIntersecting) {
+					entry.target.classList.add('is-hover');
+				} else {
+					entry.target.classList.remove('is-hover');
+				}
+			});
+		}, { rootMargin: '-50% 0px -50% 0px' });
+		items.forEach(item => mobileObserver.observe(item));
+	};
+
+	const disableMobileCenter = () => {
+		if (!mobileObserver) return;
+		mobileObserver.disconnect();
+		mobileObserver = null;
+		list.querySelectorAll('.home-list_item').forEach(item => item.classList.remove('is-hover'));
+	};
 
 	const revertSplit = () => {
 		if (!split) return;
@@ -928,7 +951,12 @@ function homelistSplit() {
 	};
 
 	const splitIfVisible = () => {
-		if (isMobile()) return;
+		if (isMobile()) {
+			enableMobileCenter();
+			return;
+		}
+		disableMobileCenter();
+
 		if (!isNearViewport()) return;
 		try { applySplit(); } catch (e) { ddg.utils.warn('homelistSplit: split failed', e); }
 	};
@@ -991,6 +1019,7 @@ function homelistSplit() {
 			resizeTimeout = null;
 		}
 		revertSplit();
+		disableMobileCenter();
 	};
 }
 
@@ -1065,73 +1094,88 @@ function share() {
 	// ---------- persistence ----------
 	const storageKey = 'ddg:share_state';
 	const oneHour = 60 * 60 * 1000;
+	const defaultCount = 25;
 
 	const getStoredState = () => {
 		try {
 			const raw = localStorage.getItem(storageKey);
-			if (!raw) return { count: 0, ts: Date.now() };
-			const { count, ts } = JSON.parse(raw);
+			if (!raw) {
+				console.log('[ddg:share] No stored state, using default:', defaultCount);
+				return { remaining: defaultCount, ts: Date.now() };
+			}
+			const { remaining, ts } = JSON.parse(raw);
 			// Expire after 1 hour
 			if (Date.now() - ts > oneHour) {
+				console.log('[ddg:share] Stored state expired, resetting to default');
 				localStorage.removeItem(storageKey);
-				return { count: 0, ts: Date.now() };
+				return { remaining: defaultCount, ts: Date.now() };
 			}
-			return { count, ts };
-		} catch {
-			return { count: 0, ts: Date.now() };
+			console.log('[ddg:share] Loaded stored state:', { remaining, age: Date.now() - ts });
+			return { remaining, ts };
+		} catch (e) {
+			console.warn('[ddg:share] Error reading state:', e);
+			return { remaining: defaultCount, ts: Date.now() };
 		}
 	};
 
-	const saveState = (count) => {
-		localStorage.setItem(storageKey, JSON.stringify({ count, ts: Date.now() }));
+	const saveState = (remaining) => {
+		console.log('[ddg:share] Saving state:', remaining);
+		localStorage.setItem(storageKey, JSON.stringify({ remaining, ts: Date.now() }));
 	};
 
 	// ---------- countdown (returns true when any hits zero) ----------
-	const updateNode = (node, current) => {
-		// Ensure we know the starting value
-		if (!node.hasAttribute('data-share-initial')) {
-			const raw = node.getAttribute('data-share-countdown') ||
-				(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node.value : node.textContent);
-			node.setAttribute('data-share-initial', String(parseCountdown(raw)));
-		}
-
-		const initial = parseInt(node.getAttribute('data-share-initial'), 10) || 0;
-		const next = Math.max(0, initial - current);
-
-		node.setAttribute('data-share-countdown', String(next));
-		if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.value = String(next);
-		else node.textContent = String(next);
-
-		return next === 0;
+	const updateNode = (node, remaining) => {
+		node.setAttribute('data-share-countdown', String(remaining));
+		if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.value = String(remaining);
+		else node.textContent = String(remaining);
+		return remaining === 0;
 	};
 
 	const syncCountdowns = () => {
-		const { count } = getStoredState();
+		const { remaining } = getStoredState();
+		console.log('[ddg:share] Syncing countdowns to:', remaining);
 		let anyHitZero = false;
 		document.querySelectorAll('[data-share-countdown]').forEach(node => {
-			if (updateNode(node, count)) anyHitZero = true;
+			if (updateNode(node, remaining)) anyHitZero = true;
 		});
 		return anyHitZero;
 	};
 
 	const tickCountdowns = () => {
-		const { count } = getStoredState();
-		const nextCount = count + 1;
-		saveState(nextCount);
+		const { remaining } = getStoredState();
+		const next = Math.max(0, remaining - 1);
+		console.log('[ddg:share] Ticking countdown:', remaining, '->', next);
+		saveState(next);
 
 		let hitZero = false;
 		document.querySelectorAll('[data-share-countdown]').forEach(node => {
-			if (updateNode(node, nextCount)) hitZero = true;
+			if (updateNode(node, next)) hitZero = true;
 		});
 		return hitZero;
 	};
 
 	// Initialize on load
+	const { remaining: initRemaining } = getStoredState();
+	const anyModalOpen = document.querySelector('[data-modal-el].is-open');
+	if (initRemaining === 0 && !anyModalOpen) {
+		console.log('[ddg:share] Init: 0 remaining and no modal open. Resetting to default.');
+		saveState(defaultCount);
+	}
 	syncCountdowns();
 
 	// Initialize when modals open (in case they contain countdowns)
 	document.addEventListener('ddg:modal-opened', () => {
 		requestAnimationFrame(syncCountdowns);
+	});
+
+	// Reset on modal close if reached 0
+	document.addEventListener('ddg:modal-closed', () => {
+		const { remaining } = getStoredState();
+		if (remaining === 0) {
+			console.log('[ddg:share] Modal closed with 0 remaining. Resetting to default.');
+			saveState(defaultCount);
+			syncCountdowns();
+		}
 	});
 
 	// ---------- webhook (unchanged behavior, clearer shape) ----------
