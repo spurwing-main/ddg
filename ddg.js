@@ -842,6 +842,7 @@ function nav() {
 
 function homelistSplit() {
 	ddg.utils.perf.start('homelistSplit-init');
+
 	const list = document.querySelector('.home-list_list');
 	if (!list) {
 		ddg.utils.warn('homelistSplit: .home-list_list not found');
@@ -851,17 +852,32 @@ function homelistSplit() {
 
 	const mobileBp = 767;
 	const tapeSpeed = 5000;
+
+	let items = [];
 	let split = null;
 	let observer = null;
 	let mobileObserver = null;
 	let lastWidth = window.innerWidth;
-	let resizeTimeout = null;
+	let resizePending = false;
+	let isApplying = false;
+
+	const refreshItems = () => {
+		items = Array.from(list.querySelectorAll('.home-list_item'));
+		if (!items.length) {
+			ddg.utils.warn('homelistSplit: no .home-list_item elements found (current state)');
+		} else {
+			ddg.utils.log(`homelistSplit: ${items.length} .home-list_item elements`);
+		}
+	};
+
+	// Initial snapshot; don't bail if empty – filters may populate later
+	refreshItems();
 
 	const isMobile = () => window.innerWidth <= mobileBp;
 
 	const enableMobileCenter = () => {
-		if (mobileObserver) return;
-		const items = list.querySelectorAll('.home-list_item');
+		if (mobileObserver || !items.length) return;
+
 		mobileObserver = new IntersectionObserver((entries) => {
 			entries.forEach(entry => {
 				if (entry.isIntersecting) {
@@ -871,6 +887,7 @@ function homelistSplit() {
 				}
 			});
 		}, { rootMargin: '-50% 0px -50% 0px' });
+
 		items.forEach(item => mobileObserver.observe(item));
 	};
 
@@ -878,70 +895,101 @@ function homelistSplit() {
 		if (!mobileObserver) return;
 		mobileObserver.disconnect();
 		mobileObserver = null;
-		list.querySelectorAll('.home-list_item').forEach(item => item.classList.remove('is-hover'));
+		items.forEach(item => item.classList.remove('is-hover'));
 	};
 
 	const revertSplit = () => {
 		if (!split) return;
 		ddg.utils.perf.start('homelistSplit-revert');
-		try { split.revert(); } catch (e) { ddg.utils.warn('homelistSplit: revert failed', e); }
+		try {
+			split.revert();
+		} catch (e) {
+			ddg.utils.warn('homelistSplit: revert failed', e);
+		}
 		split = null;
 		ddg.utils.perf.end('homelistSplit-revert');
 	};
 
 	const applySplit = () => {
+		// Guard against re-entrancy & double application
+		if (split || isApplying || !items.length) return;
+
+		isApplying = true;
 		ddg.utils.perf.start('homelistSplit-apply');
 		ddg.utils.perf.count('homelistSplit-apply');
-		const items = gsap.utils.toArray(list.querySelectorAll('.home-list_item'));
-		if (!items.length) {
-			ddg.utils.perf.end('homelistSplit-apply');
-			return;
-		}
-
-		console.log(`[ddg:perf] SplitText processing ${items.length} items`);
-		split = new SplitText(items, { type: 'lines', linesClass: 'home-list_split-line' });
-
-		// Create a shared probe element for measurements
-		const probe = document.createElement('span');
-		probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;margin:0;padding:0;border:0;width:1ch;height:0;font:inherit;white-space:normal;';
 
 		try {
-			// OPTIMIZATION: Batch DOM reads to eliminate layout thrashing
-			// We append probe once, measure it, then reuse the measurement for all lines
+			console.log(`[ddg:perf] SplitText processing ${items.length} items`);
 
-			// Phase 1: Get a sample line to measure probe width
-			const firstLine = split.lines[0];
-			if (!firstLine) {
-				ddg.utils.perf.end('homelistSplit-apply');
+			split = new SplitText(items, {
+				type: 'lines',
+				linesClass: 'home-list_split-line'
+			});
+
+			const lines = split.lines || [];
+			if (!lines.length) {
+				console.log('[ddg:perf] SplitText produced no lines');
 				return;
 			}
 
-			// Append probe to first line to get ch width
+			// Shared probe for 1ch measurement
+			const probe = document.createElement('span');
+			probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;margin:0;padding:0;border:0;width:1ch;height:0;font:inherit;white-space:normal;';
+
+			const firstLine = lines[0];
 			firstLine.appendChild(probe);
 			const chPx = probe.getBoundingClientRect().width || 1;
 			firstLine.removeChild(probe);
 
-			// Phase 2: Batch all line measurements (no DOM mutations, just reads)
-			const measurements = split.lines.map(line => ({
-				line,
-				chPx,
-				offsetWidth: line.offsetWidth || 0,
-				widthPx: line.getBoundingClientRect().width || 0
-			}));
+			// Phase 2: batch measurements (reads only)
+			const measurements = lines.map(line => {
+				const rect = line.getBoundingClientRect();
+				return {
+					line,
+					offsetWidth: line.offsetWidth || rect.width || 0,
+					widthPx: rect.width || 0,
+					chPx
+				};
+			});
 
-			// Phase 3: Apply CSS custom properties (no layout reads, safe to do in loop)
-			measurements.forEach(({ line, chPx, offsetWidth, widthPx }) => {
-				const dur = gsap.utils.clamp(0.3, 2, offsetWidth / tapeSpeed);
+			// Phase 3: write CSS vars (writes only)
+			measurements.forEach(({ line, offsetWidth, widthPx, chPx }) => {
+				const dur = gsap.utils.clamp(0.3, 2, (offsetWidth || 0) / tapeSpeed || 0.3);
 				line.style.setProperty('--tape-dur', `${dur}s`);
+
 				const chUnits = chPx ? (widthPx / chPx) : 0;
 				line.style.setProperty('--line-ch', `${chUnits.toFixed(2)}ch`);
 			});
-			console.log(`[ddg:perf] SplitText created ${split.lines.length} lines`);
+
+			// Group lines by their parent .home-list_item
+			const itemLinesMap = new Map();
+			lines.forEach(line => {
+				const item = line.closest('.home-list_item');
+				if (!item) return;
+				if (!itemLinesMap.has(item)) itemLinesMap.set(item, []);
+				itemLinesMap.get(item).push(line);
+			});
+
+			// Ensure a non-breaking space between lines of the same item
+			itemLinesMap.forEach((linesForItem) => {
+				linesForItem.forEach((line, index) => {
+					const isLastLineOfItem = index === linesForItem.length - 1;
+					if (isLastLineOfItem) return;
+
+					const text = line.textContent || '';
+					if (!/\s$/.test(text)) {
+						line.appendChild(document.createTextNode('\u00A0'));
+					}
+				});
+			});
+
+			console.log(`[ddg:perf] SplitText created ${lines.length} lines`);
 		} catch (err) {
-			if (probe.parentNode) probe.parentNode.removeChild(probe);
 			ddg.utils.warn('homelistSplit: measurement failed', err);
+		} finally {
+			ddg.utils.perf.end('homelistSplit-apply');
+			isApplying = false;
 		}
-		ddg.utils.perf.end('homelistSplit-apply');
 	};
 
 	const isNearViewport = () => {
@@ -955,13 +1003,20 @@ function homelistSplit() {
 			enableMobileCenter();
 			return;
 		}
+
 		disableMobileCenter();
 
 		if (!isNearViewport()) return;
-		try { applySplit(); } catch (e) { ddg.utils.warn('homelistSplit: split failed', e); }
+
+		try {
+			applySplit();
+		} catch (e) {
+			ddg.utils.warn('homelistSplit: split failed', e);
+		}
 	};
 
-	const onResize = ({ width }) => {
+	const handleResizeInternal = ({ width }) => {
+		resizePending = false;
 		ddg.utils.perf.count('homelistSplit-resize');
 
 		// Ignore small width changes (e.g., scrollbar appearing/disappearing)
@@ -974,13 +1029,15 @@ function homelistSplit() {
 		console.log(`[ddg:perf] homelistSplit resize: ${width}px`);
 
 		revertSplit();
+		// items don't change on resize, so no refreshItems() here
+		splitIfVisible();
+	};
 
-		if (resizeTimeout) clearTimeout(resizeTimeout);
-		// Increased debounce to reduce unnecessary rebuilds
-		resizeTimeout = setTimeout(() => {
-			resizeTimeout = null;
-			splitIfVisible();
-		}, 500);
+	const debouncedResize = ddg.utils.debounce(handleResizeInternal, 500);
+
+	const onResize = (payload) => {
+		resizePending = true;
+		debouncedResize(payload);
 	};
 
 	const setupObserver = () => {
@@ -988,9 +1045,10 @@ function homelistSplit() {
 
 		observer = new IntersectionObserver((entries) => {
 			for (const entry of entries) {
-				if (entry.isIntersecting && !split && !isMobile() && !resizeTimeout) {
-					console.log(`[ddg:perf] homelistSplit intersection visible`);
+				if (entry.isIntersecting && !split && !isMobile() && !resizePending) {
+					console.log('[ddg:perf] homelistSplit intersection visible');
 					splitIfVisible();
+					break;
 				}
 			}
 		}, {
@@ -1000,6 +1058,40 @@ function homelistSplit() {
 
 		observer.observe(list);
 	};
+
+	// Handle Finsweet filters changing the DOM
+	const onFiltersChange = (event) => {
+		const detail = event.detail || {};
+		const changedList = detail.list;
+
+		// Ignore events for other lists
+		if (changedList && changedList !== list) return;
+
+		ddg.utils.perf.start('homelistSplit-filters-change');
+		console.log('[ddg:perf] homelistSplit filters-change');
+
+		// Tear down old split content
+		revertSplit();
+
+		// Refresh items from current DOM
+		refreshItems();
+
+		// Rebuild mobile observer bindings if needed
+		if (mobileObserver) {
+			mobileObserver.disconnect();
+			mobileObserver = null;
+		}
+
+		if (isMobile()) {
+			enableMobileCenter();
+		} else {
+			splitIfVisible();
+		}
+
+		ddg.utils.perf.end('homelistSplit-filters-change');
+	};
+
+	window.addEventListener('ddg:filters-change', onFiltersChange);
 
 	(async () => {
 		await ddg.utils.fontsReady();
@@ -1014,10 +1106,18 @@ function homelistSplit() {
 			observer.disconnect();
 			observer = null;
 		}
-		if (resizeTimeout) {
-			clearTimeout(resizeTimeout);
-			resizeTimeout = null;
+		if (mobileObserver) {
+			mobileObserver.disconnect();
+			mobileObserver = null;
 		}
+
+		if (ddg.resizeEvent && typeof ddg.resizeEvent.off === 'function') {
+			ddg.resizeEvent.off(onResize);
+		}
+
+		window.removeEventListener('ddg:filters-change', onFiltersChange);
+
+		resizePending = false;
 		revertSplit();
 		disableMobileCenter();
 	};
