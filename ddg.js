@@ -52,7 +52,7 @@ ddg.utils = {
 	// Performance monitoring utilities
 	perf: {
 		marks: new Map(),
-		
+
 		start(label) {
 			const key = `ddg:${label}`;
 			this.marks.set(label, performance.now());
@@ -61,7 +61,7 @@ ddg.utils = {
 				performance.mark(`${key}:start`);
 			}
 		},
-		
+
 		end(label) {
 			const startTime = this.marks.get(label);
 			if (!startTime) {
@@ -72,7 +72,7 @@ ddg.utils = {
 			const color = duration > 100 ? '🔴' : duration > 50 ? '🟡' : '🟢';
 			console.log(`[ddg:perf] ${color} END: ${label} - ${duration.toFixed(2)}ms`);
 			this.marks.delete(label);
-			
+
 			const key = `ddg:${label}`;
 			if (typeof performance.mark === 'function' && typeof performance.measure === 'function') {
 				performance.mark(`${key}:end`);
@@ -81,7 +81,7 @@ ddg.utils = {
 				} catch (e) { /* ignore */ }
 			}
 		},
-		
+
 		count(label) {
 			const key = `ddg:count:${label}`;
 			const current = this.marks.get(key) || 0;
@@ -90,7 +90,7 @@ ddg.utils = {
 				console.log(`[ddg:perf] 📊 COUNT: ${label} = ${current + 1}`);
 			}
 		},
-		
+
 		memory() {
 			if (performance.memory) {
 				const used = (performance.memory.usedJSHeapSize / 1048576).toFixed(2);
@@ -261,10 +261,10 @@ ddg.resizeEvent = (function () {
 		const newSize = readSize();
 		const widthChange = Math.abs(newSize.width - lastSize.width);
 		const heightChange = Math.abs(newSize.height - lastSize.height);
-		
+
 		console.log(`[ddg:perf] 📐 ResizeEvent: ${lastSize.width}x${lastSize.height} → ${newSize.width}x${newSize.height} (Δ ${widthChange}x${heightChange})`);
 		ddg.utils.perf.count('resize-event-notify');
-		
+
 		lastSize = newSize;
 		const detail = { ...lastSize };
 		listeners.forEach(fn => fn(detail));
@@ -885,19 +885,19 @@ function homelistSplit() {
 		try {
 			// OPTIMIZATION: Batch DOM reads to eliminate layout thrashing
 			// We append probe once, measure it, then reuse the measurement for all lines
-			
+
 			// Phase 1: Get a sample line to measure probe width
 			const firstLine = split.lines[0];
 			if (!firstLine) {
 				ddg.utils.perf.end('homelistSplit-apply');
 				return;
 			}
-			
+
 			// Append probe to first line to get ch width
 			firstLine.appendChild(probe);
 			const chPx = probe.getBoundingClientRect().width || 1;
 			firstLine.removeChild(probe);
-			
+
 			// Phase 2: Batch all line measurements (no DOM mutations, just reads)
 			const measurements = split.lines.map(line => ({
 				line,
@@ -905,7 +905,7 @@ function homelistSplit() {
 				offsetWidth: line.offsetWidth || 0,
 				widthPx: line.getBoundingClientRect().width || 0
 			}));
-			
+
 			// Phase 3: Apply CSS custom properties (no layout reads, safe to do in loop)
 			measurements.forEach(({ line, chPx, offsetWidth, widthPx }) => {
 				const dur = gsap.utils.clamp(0.3, 2, offsetWidth / tapeSpeed);
@@ -935,13 +935,13 @@ function homelistSplit() {
 
 	const onResize = ({ width }) => {
 		ddg.utils.perf.count('homelistSplit-resize');
-		
+
 		// Ignore small width changes (e.g., scrollbar appearing/disappearing)
 		if (Math.abs(width - lastWidth) < 50) {
 			console.log(`[ddg:perf] homelistSplit resize ignored: ${width}px (< 50px change)`);
 			return;
 		}
-		
+
 		lastWidth = width;
 		console.log(`[ddg:perf] homelistSplit resize: ${width}px`);
 
@@ -954,7 +954,7 @@ function homelistSplit() {
 			splitIfVisible();
 		}, 500);
 	};
-	
+
 	const setupObserver = () => {
 		if (observer) return;
 
@@ -1006,7 +1006,7 @@ function share() {
 		clipboard: ({ url }) => url,
 		x: ({ url, text }) => `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
 		facebook: ({ url }) => `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}`,
-		linkedin: ({ url }) => `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(url)}`,
+		linkedin: ({ url, text }) => `https://www.linkedin.com/feed/?shareActive=true&text=${encodeURIComponent(text + ' ' + url)}`,
 		whatsapp: ({ url, text }) => `https://wa.me/?text=${encodeURIComponent(`${text} ${url}`)}`,
 		messenger: ({ url }) => `https://www.messenger.com/t/?link=${encodeURIComponent(url)}`,
 		snapchat: ({ url }) => `https://www.snapchat.com/scan?attachmentUrl=${encodeURIComponent(url)}`,
@@ -1062,23 +1062,77 @@ function share() {
 		}
 	};
 
-	// ---------- countdown (returns true when any hits zero) ----------
-	const tickCountdowns = () => {
-		let hitZero = false;
-		document.querySelectorAll('[data-share-countdown]').forEach((node) => {
-			const cur = parseCountdown(
-				node.getAttribute('data-share-countdown') ||
-				(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node.value : node.textContent)
-			);
-			const next = Math.max(0, cur - 1);
-			if (cur > 0 && next === 0) hitZero = true;
+	// ---------- persistence ----------
+	const storageKey = 'ddg:share_state';
+	const oneHour = 60 * 60 * 1000;
 
-			node.setAttribute('data-share-countdown', String(next));
-			if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.value = String(next);
-			else node.textContent = String(next);
+	const getStoredState = () => {
+		try {
+			const raw = localStorage.getItem(storageKey);
+			if (!raw) return { count: 0, ts: Date.now() };
+			const { count, ts } = JSON.parse(raw);
+			// Expire after 1 hour
+			if (Date.now() - ts > oneHour) {
+				localStorage.removeItem(storageKey);
+				return { count: 0, ts: Date.now() };
+			}
+			return { count, ts };
+		} catch {
+			return { count: 0, ts: Date.now() };
+		}
+	};
+
+	const saveState = (count) => {
+		localStorage.setItem(storageKey, JSON.stringify({ count, ts: Date.now() }));
+	};
+
+	// ---------- countdown (returns true when any hits zero) ----------
+	const updateNode = (node, current) => {
+		// Ensure we know the starting value
+		if (!node.hasAttribute('data-share-initial')) {
+			const raw = node.getAttribute('data-share-countdown') ||
+				(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node.value : node.textContent);
+			node.setAttribute('data-share-initial', String(parseCountdown(raw)));
+		}
+
+		const initial = parseInt(node.getAttribute('data-share-initial'), 10) || 0;
+		const next = Math.max(0, initial - current);
+
+		node.setAttribute('data-share-countdown', String(next));
+		if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.value = String(next);
+		else node.textContent = String(next);
+
+		return next === 0;
+	};
+
+	const syncCountdowns = () => {
+		const { count } = getStoredState();
+		let anyHitZero = false;
+		document.querySelectorAll('[data-share-countdown]').forEach(node => {
+			if (updateNode(node, count)) anyHitZero = true;
+		});
+		return anyHitZero;
+	};
+
+	const tickCountdowns = () => {
+		const { count } = getStoredState();
+		const nextCount = count + 1;
+		saveState(nextCount);
+
+		let hitZero = false;
+		document.querySelectorAll('[data-share-countdown]').forEach(node => {
+			if (updateNode(node, nextCount)) hitZero = true;
 		});
 		return hitZero;
 	};
+
+	// Initialize on load
+	syncCountdowns();
+
+	// Initialize when modals open (in case they contain countdowns)
+	document.addEventListener('ddg:modal-opened', () => {
+		requestAnimationFrame(syncCountdowns);
+	});
 
 	// ---------- webhook (unchanged behavior, clearer shape) ----------
 	const postDailyWebhookIfNeeded = (platform) => {
@@ -1666,9 +1720,9 @@ function ajaxStories() {
 		console.log(`[ddg:perf] 📖 OpenStory: ${url} (cached: ${!!options.cached})`);
 		ddg.utils.perf.start('openStory');
 		const modal = ensureModal();
-		if (!modal) { 
+		if (!modal) {
 			ddg.utils.perf.end('openStory');
-			return; 
+			return;
 		}
 
 		const { stateMode = 'push' } = options;
@@ -2064,18 +2118,18 @@ ddg.boot = function boot() {
 		share();
 		storiesAudioPlayer();
 		joinButtons();
-		
+
 		ddg.utils.perf.end('boot');
 		ddg.utils.perf.memory();
 		console.log('[ddg:perf] ========== BOOT COMPLETE ==========');
-		
+
 		// Log overall performance marks
 		if (typeof performance.getEntriesByType === 'function') {
 			const measures = performance.getEntriesByType('measure').filter(m => m.name.startsWith('ddg:'));
 			if (measures.length) {
-				console.table(measures.map(m => ({ 
-					name: m.name.replace('ddg:', ''), 
-					duration: `${m.duration.toFixed(2)}ms` 
+				console.table(measures.map(m => ({
+					name: m.name.replace('ddg:', ''),
+					duration: `${m.duration.toFixed(2)}ms`
 				})));
 			}
 		}
