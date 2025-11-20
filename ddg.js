@@ -741,38 +741,20 @@ function homeList() {
 		}
 	})();
 
-	const animateIn = (el) => {
-		if (reduceMotion || !window.gsap) return;
-		gsap.killTweensOf(el);
-		gsap.fromTo(
-			el,
-			{ scale: 0.98, opacity: 0.92 },
-			{ duration: 0.25, scale: 1, opacity: 1, ease: 'power2.out', overwrite: 'auto' }
-		);
-	};
-
-	const animateOut = (el) => {
-		if (reduceMotion || !window.gsap) return;
-		gsap.killTweensOf(el);
-		gsap.to(el, { duration: 0.18, scale: 0.995, opacity: 0.98, ease: 'power1.out', overwrite: 'auto' });
-	};
-
 	const setActive = (el) => {
 		if (el === active) return;
 		if (active) {
 			active.classList.remove('is-hover');
-			animateOut(active);
 		}
 		if (el) {
 			el.classList.add('is-hover');
-			animateIn(el);
 		}
 		active = el;
 	};
 
 	const pickItem = () => {
 		const cx = window.innerWidth / 2;
-		const cy = window.innerHeight / 2;
+		const cy = window.innerHeight * 0.33; // bias center 10% upward for touch highlight
 		let target = null;
 		let bestDistance = Infinity;
 
@@ -1392,10 +1374,59 @@ function modals() {
 			});
 		}
 
+		const animateModal = (direction, { skipAnimation = false, alreadyOpen = false, onComplete } = {}) => {
+			const isOpen = direction === 'open';
+			const shouldSkip = skipAnimation || (isOpen && alreadyOpen);
+
+			if (shouldSkip) {
+				if (isOpen) {
+					gsap.set([$bg[0], $anim[0]], { autoAlpha: 1, y: 0 });
+				} else {
+					$bg[0]?.classList.remove('is-open');
+					gsap.set([$bg[0], $anim[0]], { autoAlpha: 0, y: '25%' });
+				}
+				requestAnimationFrame(clearInlineTransforms);
+				onComplete?.();
+				return null;
+			}
+
+			setAnimating(true);
+			if (isOpen) {
+				gsap.set($bg[0], { autoAlpha: 0 });
+			} else {
+				$bg[0]?.classList.remove('is-open');
+				gsap.set([$modal[0], $inner[0], $bg[0]], { pointerEvents: 'none' });
+			}
+
+			const tl = gsap.timeline({
+				onComplete: () => {
+					setAnimating(false);
+					onComplete?.();
+				}
+			});
+
+			if (isOpen) {
+				console.log(`[ddg:perf] 🎬 Modal: starting open animation (id: ${id})`);
+				tl.to($bg[0], {
+					autoAlpha: 1,
+					duration: 0.12,
+					ease: 'power1.out',
+					overwrite: 'auto'
+				}, 0)
+					.fromTo($anim[0], { y: '25%' }, { y: '0%', duration: 0.32, ease: 'power2.out', overwrite: 'auto' }, 0)
+					.fromTo($anim[0], { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.16, ease: 'power1.out', overwrite: 'auto' }, 0);
+			} else {
+				console.log(`[ddg:perf] 🎬 Modal: starting close animation (id: ${id})`);
+				tl.to($anim[0], { y: '25%', duration: 0.32, ease: 'power2.in', overwrite: 'auto' }, 0)
+					.to($anim[0], { autoAlpha: 0, duration: 0.16, ease: 'power1.in', overwrite: 'auto' }, 0)
+					.to($bg[0], { autoAlpha: 0, duration: 0.12, ease: 'power1.inOut', overwrite: 'auto' }, 0);
+			}
+			return tl;
+		};
+
 		const open = ({ skipAnimation = false, afterOpen } = {}) => {
 			ddg.utils.perf.start(`modal-open:${id}`);
 			ddg.utils.perf.count('modal-open');
-			// Combine: on-load, skipAnimation, and existing is-open are treated as "already open" (instant)
 			const alreadyOpen = $modal.hasClass('is-open');
 
 			if (!ddg.scrollLock.isHolding(id)) ddg.scrollLock.lock(id);
@@ -1408,8 +1439,7 @@ function modals() {
 			syncCssState($modal, true, id);
 			resetScrollTop();
 
-			if (skipAnimation || alreadyOpen) {
-				gsap.set([$bg[0], $anim[0]], { autoAlpha: 1, y: 0 });
+			const finalizeOpen = () => {
 				requestAnimationFrame(clearInlineTransforms);
 				requestAnimationFrame(resetScrollTop);
 				if (!keydownListenerActive) {
@@ -1418,38 +1448,12 @@ function modals() {
 				}
 				requestAnimationFrame(focusModal);
 				announceOpen();
+				console.log(`[ddg:perf] 🎬 Modal: open animation complete (id: ${id})`);
 				ddg.utils.perf.end(`modal-open:${id}`);
-				return afterOpen && afterOpen();
-			}
+				afterOpen && afterOpen();
+			};
 
-			setAnimating(true);
-			gsap.set($bg[0], { autoAlpha: 0 });
-
-			console.log(`[ddg:perf] 🎬 Modal: starting open animation (id: ${id})`);
-			gsap.timeline({
-				onComplete: () => {
-					setAnimating(false);
-					requestAnimationFrame(clearInlineTransforms);
-					requestAnimationFrame(resetScrollTop);
-					if (!keydownListenerActive) {
-						document.addEventListener('keydown', onKeydownTrap, true);
-						keydownListenerActive = true;
-					}
-					requestAnimationFrame(focusModal);
-					announceOpen();
-					console.log(`[ddg:perf] 🎬 Modal: open animation complete (id: ${id})`);
-					ddg.utils.perf.end(`modal-open:${id}`);
-					afterOpen && afterOpen();
-				}
-			})
-				.to($bg[0], {
-					autoAlpha: 1,
-					duration: 0.12,
-					ease: 'power1.out',
-					overwrite: 'auto'
-				}, 0)
-				.fromTo($anim[0], { y: '25%' }, { y: '0%', duration: 0.32, ease: 'power2.out', overwrite: 'auto' }, 0)
-				.fromTo($anim[0], { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.16, ease: 'power1.out', overwrite: 'auto' }, 0);
+			animateModal('open', { skipAnimation, alreadyOpen, onComplete: finalizeOpen });
 		};
 
 		const close = ({ skipAnimation = false, afterClose } = {}) => {
@@ -1458,7 +1462,6 @@ function modals() {
 
 			console.log(`[ddg:perf] 🚪 Modal: starting close (id: ${id}, skipAnimation: ${skipAnimation})`);
 			closing = true;
-			// Only unlock if this modal applied the lock
 			if (ddg.scrollLock.isHolding(id)) ddg.scrollLock.unlock(id);
 			gsap.killTweensOf([$anim[0], $bg[0]]);
 
@@ -1478,21 +1481,7 @@ function modals() {
 				afterClose && afterClose();
 			};
 
-			if (skipAnimation) {
-				$bg[0]?.classList.remove('is-open');
-				gsap.set([$bg[0], $anim[0]], { autoAlpha: 0, y: '25%' });
-				return finish();
-			}
-
-			console.log(`[ddg:perf] 🎬 Modal: starting close animation (id: ${id})`);
-			setAnimating(true);
-			$bg[0]?.classList.remove('is-open');
-			gsap.set([$modal[0], $inner[0], $bg[0]], { pointerEvents: 'none' });
-
-			closingTl = gsap.timeline({ onComplete: () => { setAnimating(false); finish(); } });
-			closingTl.to($anim[0], { y: '25%', duration: 0.32, ease: 'power2.in', overwrite: 'auto' }, 0);
-			closingTl.to($anim[0], { autoAlpha: 0, duration: 0.16, ease: 'power1.in', overwrite: 'auto' }, 0);
-			closingTl.to($bg[0], { autoAlpha: 0, duration: 0.12, ease: 'power1.inOut', overwrite: 'auto' }, 0);
+			closingTl = animateModal('close', { skipAnimation, onComplete: finish });
 			return closingTl;
 		};
 
@@ -1787,13 +1776,14 @@ function ajaxStories() {
 	};
 
 	let prefetchCancel = null;
+	let prefetchTimer = null;
 	let lastPrefetchUrl = null;
-	let prefetchHoverTimeout = null;
+	const prefetchDelayMs = 300;
 
 	const cancelPrefetch = () => {
-		if (prefetchHoverTimeout) {
-			clearTimeout(prefetchHoverTimeout);
-			prefetchHoverTimeout = null;
+		if (prefetchTimer) {
+			clearTimeout(prefetchTimer);
+			prefetchTimer = null;
 		}
 		if (prefetchCancel) {
 			prefetchCancel();
@@ -1802,53 +1792,32 @@ function ajaxStories() {
 		lastPrefetchUrl = null;
 	};
 
-	const maybePrefetchStory = (url) => {
+	const schedulePrefetch = (url) => {
 		if (!prefetchEnabled || !url || cacheGet(url) || lastPrefetchUrl === url) return;
 		cancelPrefetch();
 		lastPrefetchUrl = url;
-		try { prefetchCancel = ddg.net.prefetch(url, 500); }
-		catch { prefetchCancel = null; }
+		prefetchTimer = setTimeout(() => {
+			prefetchTimer = null;
+			try { prefetchCancel = ddg.net.prefetch(url, 0); }
+			catch { prefetchCancel = null; }
+		}, prefetchDelayMs);
 	};
 
-	// Throttle hover handler to reduce excessive event processing
-	const onMouseOver = ddg.utils.throttle((event) => {
-		ddg.utils.perf.count('story-hover');
-		const root = event.target.closest('[data-ajax-modal="link"]');
+	document.addEventListener('pointerenter', (event) => {
+		const root = event.target.closest?.('[data-ajax-modal="link"]');
 		if (!root) return;
 		const url = resolveLinkHref(root, event.target);
 		if (!url) return;
+		schedulePrefetch(url);
+	}, true);
 
-		cancelPrefetch();
-		// Increased delay - only prefetch on intentional hovers
-		prefetchHoverTimeout = setTimeout(() => {
-			maybePrefetchStory(url);
-		}, 800);
-	}, 150);
-
-	const onMouseOut = ddg.utils.throttle((event) => {
-		const root = event.target.closest('[data-ajax-modal="link"]');
+	document.addEventListener('pointerleave', (event) => {
+		const root = event.target.closest?.('[data-ajax-modal="link"]');
 		if (!root) return;
-		const related = event.relatedTarget;
-		if (related && root.contains(related)) return;
 		cancelPrefetch();
-	}, 150);
-
-	// Also prefetch on mousedown for immediate clicks (before hover timeout fires)
-	const onMouseDown = (event) => {
-		const root = event.target.closest('[data-ajax-modal="link"]');
-		if (!root) return;
-		const url = resolveLinkHref(root, event.target);
-		if (url && !cacheGet(url)) {
-			// Cancel any pending hover prefetch and prefetch immediately
-			cancelPrefetch();
-			maybePrefetchStory(url);
-		}
-	};
+	}, true);
 
 	document.addEventListener('click', onStoryLinkClick);
-	document.addEventListener('mouseover', onMouseOver);
-	document.addEventListener('mouseout', onMouseOut);
-	document.addEventListener('mousedown', onMouseDown, { passive: true });
 
 	window.addEventListener('popstate', () => {
 		const path = window.location.pathname;
