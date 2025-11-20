@@ -712,6 +712,108 @@ ddg.fs = (function () {
 	};
 })();
 
+function homeList() {
+	// Highlight the list item that sits under the viewport center on touch devices
+	const isTouch = (() => {
+		if (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches) return true;
+		if ('ontouchstart' in window) return true;
+		return (navigator.maxTouchPoints || navigator.msMaxTouchPoints || 0) > 0;
+	})();
+	if (!isTouch) return;
+
+	const container = document.querySelector('.c-home-list');
+	if (!container) return;
+
+	const items = Array.from(container.querySelectorAll('.home-list_item')).filter(Boolean);
+	if (!items.length) return;
+
+	// Prevent duplicate listeners if homeList is called more than once
+	if (typeof homeList.teardown === 'function') {
+		homeList.teardown();
+	}
+
+	let active = null;
+	const reduceMotion = (() => {
+		try {
+			return matchMedia('(prefers-reduced-motion: reduce)').matches;
+		} catch {
+			return false;
+		}
+	})();
+
+	const animateIn = (el) => {
+		if (reduceMotion || !window.gsap) return;
+		gsap.killTweensOf(el);
+		gsap.fromTo(
+			el,
+			{ scale: 0.98, opacity: 0.92 },
+			{ duration: 0.25, scale: 1, opacity: 1, ease: 'power2.out', overwrite: 'auto' }
+		);
+	};
+
+	const animateOut = (el) => {
+		if (reduceMotion || !window.gsap) return;
+		gsap.killTweensOf(el);
+		gsap.to(el, { duration: 0.18, scale: 0.995, opacity: 0.98, ease: 'power1.out', overwrite: 'auto' });
+	};
+
+	const setActive = (el) => {
+		if (el === active) return;
+		if (active) {
+			active.classList.remove('is-hover');
+			animateOut(active);
+		}
+		if (el) {
+			el.classList.add('is-hover');
+			animateIn(el);
+		}
+		active = el;
+	};
+
+	const pickItem = () => {
+		const cx = window.innerWidth / 2;
+		const cy = window.innerHeight / 2;
+		let target = null;
+		let bestDistance = Infinity;
+
+		for (const item of items) {
+			const rect = item.getBoundingClientRect();
+			const withinX = cx >= rect.left && cx <= rect.right;
+			const withinY = cy >= rect.top && cy <= rect.bottom;
+
+			if (withinX && withinY) {
+				target = item;
+				break;
+			}
+
+			const dx = Math.max(rect.left - cx, cx - rect.right, 0);
+			const dy = Math.max(rect.top - cy, cy - rect.bottom, 0);
+			const dist = Math.hypot(dx, dy);
+			if (dist < bestDistance) {
+				bestDistance = dist;
+				target = item;
+			}
+		}
+
+		setActive(target);
+	};
+
+	const update = ddg.utils.throttle(pickItem, 100);
+
+	window.addEventListener('scroll', update, { passive: true });
+	const offResize = ddg.resizeEvent?.on ? ddg.resizeEvent.on(update) : null;
+	window.addEventListener('orientationchange', update, { passive: true });
+
+	homeList.teardown = () => {
+		window.removeEventListener('scroll', update);
+		window.removeEventListener('orientationchange', update);
+		if (offResize) offResize();
+		setActive(null);
+	};
+
+	pickItem();
+}
+
 function iframe() {
 	// parent window: follow child URL sync
 	if (window === window.parent) {
@@ -1975,7 +2077,7 @@ ddg.boot = function boot() {
 		modals();
 		ddg.fs.finsweetRelated();
 		ajaxStories();
-		homelistSplit();
+		homeList();
 		share();
 		storiesAudioPlayer();
 		joinButtons();
