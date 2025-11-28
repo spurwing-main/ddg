@@ -306,7 +306,7 @@ ddg.fs = (function () {
 			window.FinsweetAttributes ||= [];
 			window.FinsweetAttributes.push(['list', (instances) => {
 				const list = Array.isArray(instances)
-					? (instances.find(Boolean) || instances[0])
+					? (instances.find(inst => inst?.instance === 'main') || instances.find(Boolean) || instances[0])
 					: instances;
 				if (!list) {
 					warn('readyList: no list instance');
@@ -656,7 +656,8 @@ ddg.fs = (function () {
 								}
 							});
 
-							if (values.length) {
+							if (values.length && list.filters.value.groups.some(g => g.conditions.some(c => c.value?.length))) {
+								console.log(list.hasFilters.value);
 								if (modalOpen) {
 									pendingAnimation = true;
 								} else {
