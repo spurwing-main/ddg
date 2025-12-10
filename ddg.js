@@ -725,9 +725,6 @@ function homeList() {
 	const container = document.querySelector('.c-home-list');
 	if (!container) return;
 
-	const items = Array.from(container.querySelectorAll('.home-list_item')).filter(Boolean);
-	if (!items.length) return;
-
 	// Prevent duplicate listeners if homeList is called more than once
 	if (typeof homeList.teardown === 'function') {
 		homeList.teardown();
@@ -754,6 +751,13 @@ function homeList() {
 	};
 
 	const pickItem = () => {
+		// 🔥 IMPORTANT: re-query each time so we see items Finsweet added later
+		const items = Array.from(container.querySelectorAll('.home-list_item')).filter(Boolean);
+		if (!items.length) {
+			setActive(null);
+			return;
+		}
+
 		const cx = window.innerWidth / 2;
 		const cy = window.innerHeight * 0.33; // bias center 10% upward for touch highlight
 		let target = null;
@@ -761,6 +765,10 @@ function homeList() {
 
 		for (const item of items) {
 			const rect = item.getBoundingClientRect();
+
+			// skip items that are fully off-screen vertically
+			if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+
 			const withinX = cx >= rect.left && cx <= rect.right;
 			const withinY = cy >= rect.top && cy <= rect.bottom;
 
