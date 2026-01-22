@@ -599,6 +599,7 @@ ddg.fs = (function () {
 			let attempts = 0;
 			const maxAttempts = 300;
 
+			// Define the wait function
 			const waitForIx = () => new Promise((resolve, reject) => {
 				const check = () => {
 					attempts++;
@@ -619,75 +620,145 @@ ddg.fs = (function () {
 				check();
 			});
 
-			waitForIx()
-				.then((wfIx) => {
-					const parent = document.querySelector('[data-loadingfilters="parent"]');
-					if (!parent) return;
+			// Track state variables here so they are available immediately
+			let modalOpen = false;
+			let pendingAnimation = false;
+			let lastFilterState = false;
 
-					const labels = parent.querySelectorAll('label');
-					let modalOpen = false;
-					let pendingAnimation = false;
+			// 1. Initialize List Hook IMMEDIATELY (Do not wait for waitForIx)
+			readyList().then(list => {
+				if (!list?.filters?.value) return;
 
-					readyList().then(list => {
-						if (!list?.filters?.value) return;
+				const parent = document.querySelector('[data-loadingfilters="parent"]');
+				const labels = parent ? parent.querySelectorAll('label') : [];
 
-						list.addHook('filter', (items) => {
-							const groups = list.filters.value.groups || [];
-							const allValues = groups.flatMap(g =>
-								(g.conditions || []).flatMap(c => {
-									const v = c.value;
-									return Array.isArray(v) ? v : [v];
-								})
-							).filter(Boolean);
+				list.addHook('filter', (items) => {
+					// Label logic (safe to run without IX)
+					if (parent && labels.length) {
+						const groups = list.filters.value.groups || [];
+						const allValues = groups.flatMap(g =>
+							(g.conditions || []).flatMap(c => {
+								const v = c.value;
+								return Array.isArray(v) ? v : [v];
+							})
+						).filter(Boolean);
 
-							const values = allValues.slice(0, maxDisplay);
-							const extra = Math.max(0, allValues.length - maxDisplay);
+						const values = allValues.slice(0, maxDisplay);
+						const extra = Math.max(0, allValues.length - maxDisplay);
 
-							labels.forEach((label, i) => {
-								const span = label.querySelector('span');
-								if (values[i]) {
-									label.style.display = '';
-									if (span) span.textContent = values[i];
-								} else if (i === values.length && extra > 0) {
-									label.style.display = '';
-									if (span) span.textContent = `+${extra} more`;
-								} else {
-									label.style.display = 'none';
+						labels.forEach((label, i) => {
+							const span = label.querySelector('span');
+							if (values[i]) {
+								label.style.display = '';
+								if (span) span.textContent = values[i];
+							} else if (i === values.length && extra > 0) {
+								label.style.display = '';
+								if (span) span.textContent = `+${extra} more`;
+							} else {
+								label.style.display = 'none';
+							}
+						});
+
+						const hasActiveFilters = list.filters.value.groups.some(g =>
+							g.conditions.some(c => c.value?.length)
+						);
+
+						// Trigger if we have values to show and active filters
+						const shouldTrigger = values.length && hasActiveFilters;
+
+						if (shouldTrigger) {
+							if (modalOpen) {
+								pendingAnimation = true;
+							} else {
+								// 2. Only wait for IX when we actually need to emit
+								window.scrollTo({ top: 0, behavior: 'smooth' });
+								waitForIx().then(wfIx => wfIx.emit('loadingFilters')).catch(() => { });
+							}
+						} else {
+							pendingAnimation = false;
+						}
+
+						lastFilterState = hasActiveFilters;
+					}
+					return items;
+				});
+			});
+
+			// 3. Set up event listeners (Low latency fix included)
+			document.addEventListener('ddg:modal-opened', (e) => {
+				if (e.detail?.id === 'filters') modalOpen = true;
+			});
+
+			// Trigger on closing for better latency
+			document.addEventListener('ddg:modal-closing', (e) => {
+				if (e.detail?.id === 'filters') {
+					if (pendingAnimation) {
+						pendingAnimation = false;
+						window.scrollTo({ top: 0, behavior: 'smooth' });
+						waitForIx().then(wfIx => wfIx.emit('loadingFilters')).catch(() => { });
+					}
+				}
+			});
+
+			document.addEventListener('ddg:modal-closed', (e) => {
+				if (e.detail?.id === 'filters') {
+					modalOpen = false;
+					// Fallback in case closing event didn't fire
+					if (pendingAnimation) {
+						pendingAnimation = false;
+						window.scrollTo({ top: 0, behavior: 'smooth' });
+						waitForIx().then(wfIx => wfIx.emit('loadingFilters')).catch(() => { });
+					}
+				}
+			});
+		};
+
+		return { init };
+	})();
+	const activeFiltersCount = (() => {
+		const init = async () => {
+			const countEl = document.querySelector('[fs-list-element="active-filters-count"]');
+			if (!countEl) return;
+
+			const list = await readyList();
+			if (!list) return;
+
+			// Watch the filters object for any changes
+			list.watch(
+				list.filters,
+				(filters) => {
+					let activeCount = 0;
+
+					// Loop through all groups and conditions to count active values
+					if (filters && filters.groups) {
+						filters.groups.forEach((group) => {
+							group.conditions.forEach((condition) => {
+								const { value } = condition;
+								if (Array.isArray(value)) {
+									// For checkboxes/multiselect, count the number of items in the array
+									activeCount += value.length;
+								} else if (value) {
+									// For text inputs/radios, count 1 if there is a value
+									activeCount += 1;
 								}
 							});
-
-							if (values.length && list.filters.value.groups.some(g => g.conditions.some(c => c.value?.length))) {
-								console.log(list.hasFilters.value);
-								if (modalOpen) {
-									pendingAnimation = true;
-								} else {
-									window.scrollTo({ top: 0, behavior: 'smooth' });
-									wfIx.emit('loadingFilters');
-								}
-							}
-
-							return items;
 						});
-					});
+					}
 
-					document.addEventListener('ddg:modal-opened', (e) => {
-						if (e.detail?.id === 'filters') modalOpen = true;
-					});
+					// Update the text element
+					countEl.textContent = activeCount.toString();
 
-					document.addEventListener('ddg:modal-closed', (e) => {
-						if (e.detail?.id === 'filters') {
-							modalOpen = false;
-							if (pendingAnimation) {
-								pendingAnimation = false;
-								window.scrollTo({ top: 0, behavior: 'smooth' });
-								wfIx.emit('loadingFilters');
-							}
-						}
-					});
-				})
-				.catch(err => {
-					warn('loadingFilters: Webflow ix3 not available', err);
-				});
+					// Only logic: hide when 0, show otherwise
+					if (activeCount > 0) {
+						countEl.style.display = '';
+					} else {
+						countEl.style.display = 'none';
+					}
+				},
+				{ deep: true, immediate: true }
+			);
+
+			log('activeFiltersCount init');
 		};
 
 		return { init };
@@ -702,6 +773,7 @@ ddg.fs = (function () {
 		relatedFilters.init();
 		randomFilters.init();
 		loadingFilters.init();
+		activeFiltersCount.init(); // New init call
 		log('finsweetRelated: complete');
 	};
 
@@ -1469,6 +1541,8 @@ function modals() {
 			if (!$modal.hasClass('is-open')) return;
 			if (closing) return closingTl;
 
+			ddg.utils.emit('ddg:modal-closing', { id });
+
 			console.log(`[ddg:perf] 🚪 Modal: starting close (id: ${id}, skipAnimation: ${skipAnimation})`);
 			closing = true;
 			if (ddg.scrollLock.isHolding(id)) ddg.scrollLock.unlock(id);
@@ -2003,6 +2077,182 @@ function storiesAudioPlayer() {
 	ddg.utils.log('[audio] storiesAudioPlayer initialized');
 }
 
+ddg.placeholderSearch = (() => {
+	const config = {
+		baseText: 'Search...',
+		typeSpeed: 60,
+		deleteSpeed: 40,
+		pauseDuration: 3000,
+	};
+
+	let active = false;
+	let currentTimeout = null;
+	let inputEl = null;
+	let cachedItems = null;
+	let focusHandler = null;
+	let blurHandler = null;
+
+	const getItemName = (item) => {
+		const nameField = item.fields?.name;
+		if (!nameField?.value) return null;
+
+		const val = Array.isArray(nameField.value) ? nameField.value[0] : nameField.value;
+		return val ? String(val) : null;
+	};
+
+	const typeText = (text, onComplete) => {
+		let i = config.baseText.length; // Start after base text
+		const type = () => {
+			if (!active || !inputEl) return;
+			if (i <= text.length) {
+				inputEl.placeholder = text.slice(0, i);
+				i++;
+				currentTimeout = setTimeout(type, config.typeSpeed);
+			} else {
+				onComplete?.();
+			}
+		};
+		type();
+	};
+
+	const deleteText = (fromText, toLength, onComplete) => {
+		let i = fromText.length;
+		const del = () => {
+			if (!active || !inputEl) return;
+			if (i > toLength) {
+				i--;
+				inputEl.placeholder = fromText.slice(0, i);
+				currentTimeout = setTimeout(del, config.deleteSpeed);
+			} else {
+				onComplete?.();
+			}
+		};
+		del();
+	};
+
+	const cycle = (items) => {
+		if (!active || !inputEl || !items.length) return;
+
+		const item = items[Math.floor(Math.random() * items.length)];
+		const name = getItemName(item);
+
+		if (!name) {
+			currentTimeout = setTimeout(() => cycle(items), 500);
+			return;
+		}
+
+		const fullText = `${config.baseText}${name}`;
+		const baseLen = config.baseText.length;
+
+		// Set base text first, then start typing
+		inputEl.placeholder = config.baseText;
+
+		typeText(fullText, () => {
+			currentTimeout = setTimeout(() => {
+				deleteText(fullText, baseLen, () => {
+					currentTimeout = setTimeout(() => cycle(items), 300);
+				});
+			}, config.pauseDuration);
+		});
+	};
+
+	const clearTimeouts = () => {
+		if (currentTimeout) {
+			clearTimeout(currentTimeout);
+			currentTimeout = null;
+		}
+	};
+
+	const removeListeners = () => {
+		if (inputEl && focusHandler) {
+			inputEl.removeEventListener('focus', focusHandler);
+		}
+		if (inputEl && blurHandler) {
+			inputEl.removeEventListener('blur', blurHandler);
+		}
+		focusHandler = null;
+		blurHandler = null;
+	};
+
+	const init = async () => {
+		// Find input within modal
+		inputEl = document.querySelector('input[fs-list-field="*"]');
+		if (!inputEl) {
+			ddg.utils.warn('[placeholderSearch] No search input found');
+			return;
+		}
+
+		// Get items (cache them)
+		if (!cachedItems) {
+			const list = await ddg.fs.readyList();
+			if (!list) {
+				ddg.utils.warn('[placeholderSearch] No list instance');
+				return;
+			}
+
+			await list.loadingPaginatedItems;
+
+			const items = list.items?.value ?? list.items;
+			if (!Array.isArray(items) || !items.length) {
+				ddg.utils.warn('[placeholderSearch] No items found');
+				return;
+			}
+
+			// Check if any items have a name field
+			const hasNameField = items.some(item => item.fields?.name?.value);
+			if (!hasNameField) {
+				ddg.utils.log('[placeholderSearch] No name field values found in items');
+				return;
+			}
+
+			cachedItems = items;
+		}
+
+		ddg.utils.log(`[placeholderSearch] Starting with ${cachedItems.length} items`);
+
+		active = true;
+		inputEl.placeholder = config.baseText;
+
+		// Stop on focus
+		focusHandler = () => {
+			clearTimeouts();
+			active = false;
+			if (inputEl) inputEl.placeholder = 'Search';
+		};
+
+		// Resume on blur if empty
+		blurHandler = () => {
+			if (inputEl && !inputEl.value && cachedItems) {
+				active = true;
+				inputEl.placeholder = config.baseText;
+				currentTimeout = setTimeout(() => cycle(cachedItems), 500);
+			}
+		};
+
+		inputEl.addEventListener('focus', focusHandler);
+		inputEl.addEventListener('blur', blurHandler);
+
+		// Start cycling
+		currentTimeout = setTimeout(() => cycle(cachedItems), 1000);
+	};
+
+	// Auto-bind to modal events
+	document.addEventListener('ddg:modal-opened', (e) => {
+		if (e.detail?.id === 'filters') {
+			// Small delay to ensure modal content is rendered
+			requestAnimationFrame(() => {
+				requestAnimationFrame(() => {
+					init();
+				});
+			});
+		}
+	});
+
+	ddg.utils.log('[placeholderSearch] Ready');
+
+	return { init, config };
+})();
+
 function joinButtons() {
 	const stickyButton = document.querySelector('.join_sticky');
 	const staticButton = document.querySelector('.join-cta_btn .button');
@@ -2059,6 +2309,7 @@ ddg.boot = function boot() {
 		share();
 		storiesAudioPlayer();
 		joinButtons();
+		ddg.placeholderSearch.init();
 
 		ddg.utils.perf.end('boot');
 		ddg.utils.perf.memory();
