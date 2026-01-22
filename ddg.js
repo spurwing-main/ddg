@@ -344,9 +344,9 @@ ddg.fs = (function () {
 		return { resolve };
 	})();
 
-	const setFilters = async (fieldValues, { reset = true } = {}) => {
+	const setFilters = async (fieldValues, { reset = true, tagValuesDisplay = 'separate' } = {}) => {
 		ddg.utils.perf.start('fs-setFilters');
-		console.log('[ddg:perf] 🔍 Finsweet: setFilters called', fieldValues);
+		console.log('[ddg: perf] 🔍 Finsweet:  setFilters called', fieldValues);
 		const list = await readyList();
 		if (!list) {
 			warn('setFilters: no list');
@@ -361,25 +361,25 @@ ddg.fs = (function () {
 		const conditions = Object.entries(fieldValues || {})
 			.map(([fieldKey, values]) => {
 				const arr = Array.isArray(values) ? values : [values];
-				const clean = [...new Set(arr.map(String))].filter(Boolean);
+				const clean = [... new Set(arr.map(String))].filter(Boolean);
 				if (!clean.length) return null;
 
 				return {
 					id: `${fieldKey}_equal`,
-					type: 'checkbox', // Adjust if your actual form fields differ
+					type: 'checkbox',
 					fieldKey,
 					value: clean,
 					op: 'equal',
 					filterMatch: 'or',
 					interacted: true,
 					showTag: true,
-					tagValuesDisplay: 'combined',
+					tagValuesDisplay,  // ← Key addition:  'separate' renders one tag per value
 				};
 			})
 			.filter(Boolean);
 
-		console.log(`[ddg:perf] 🔍 Finsweet: applying ${conditions.length} filter conditions`);
-		log('setFilters', { groups: conditions.length });
+		console.log(`[ddg:perf] 🔍 Finsweet: applying ${conditions.length} filter conditions with tagValuesDisplay: ${tagValuesDisplay}`);
+		log('setFilters', { groups: conditions.length, tagValuesDisplay });
 
 		// Replace the entire filters model
 		list.filters.value = {
@@ -395,7 +395,7 @@ ddg.fs = (function () {
 				: [],
 		};
 
-		// Re-enable two-way binding; the watcher will now call setConditionsData
+		// Re-enable two-way binding
 		list.settingFilters = false;
 
 		ddg.utils.emit('ddg:filters-change', { fieldValues, list }, window);
