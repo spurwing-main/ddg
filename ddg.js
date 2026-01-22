@@ -877,43 +877,60 @@ function homeList() {
 	pickItem();
 }
 
-function iframe() {
-	// parent window: follow child URL sync
-	if (window === window.parent) {
-		let childSyncSession = false;
-		const norm = (p) => {
-			const s = String(p || '');
-			return s.replace(/\/+$/, '') || '/';
-		};
+	function iframe() {
+		// parent window: follow child URL sync
+		if (window === window.parent) {
+			let childSyncSession = false;
+			const norm = (p) => {
+				const s = String(p || '');
+				return s.replace(/\/+$/, '') || '/';
+			};
 
-		ddg.iframeBridge.on('sync-url', ({ url, title }) => {
-			const parentPath = norm(location.pathname);
-			let nextPath = null;
+			ddg.iframeBridge.on('sync-url', ({ url, title }) => {
+				const parentPath = norm(location.pathname);
+				let nextPath = null;
+				let nextUrl = null;
 
-			if (url) {
-				const nextUrl = new URL(url, location.href);
-				nextPath = norm(nextUrl.pathname);
-			}
-
-			const allow = childSyncSession || parentPath === '/';
-			if (!allow) return;
-
-			if (!childSyncSession && parentPath === '/' && nextPath && nextPath !== '/') {
-				childSyncSession = true;
-			}
-
-			if (url && url !== location.href) {
-				const u = new URL(url, location.href);
-				if (u.origin === location.origin) {
-					history.replaceState(history.state, '', u.toString());
-				} else {
-					location.assign(u.toString());
+				if (url) {
+					try {
+						nextUrl = new URL(url, location.href);
+						nextPath = norm(nextUrl.pathname);
+					} catch {
+						nextUrl = null;
+						nextPath = null;
+					}
 				}
-			}
 
-			if (childSyncSession && nextPath === '/') childSyncSession = false;
-			if (title) document.title = title;
-		});
+				const allow = childSyncSession || parentPath === '/';
+				if (!allow) return;
+
+				if (!childSyncSession && parentPath === '/' && nextPath && nextPath !== '/') {
+					childSyncSession = true;
+				}
+
+				if (nextUrl) {
+					const isSameOrigin = nextUrl.origin === location.origin;
+					if (isSameOrigin) {
+						// Preserve parent query params (e.g. utm_*) while accepting the child's path.
+						const parentParams = new URLSearchParams(location.search);
+						parentParams.forEach((value, key) => {
+							if (!nextUrl.searchParams.has(key)) nextUrl.searchParams.set(key, value);
+						});
+					}
+
+					const nextHref = nextUrl.toString();
+					if (nextHref !== location.href) {
+						if (isSameOrigin) {
+							history.replaceState(history.state, '', nextHref);
+						} else {
+							location.assign(nextHref);
+						}
+					}
+				}
+
+				if (childSyncSession && nextPath === '/') childSyncSession = false;
+				if (title) document.title = title;
+			});
 
 		return ddg.iframeBridge;
 	}
@@ -2091,6 +2108,7 @@ ddg.placeholderSearch = (() => {
 	let cachedItems = null;
 	let focusHandler = null;
 	let blurHandler = null;
+	let isInitialized = false; // Guard against double-init
 
 	const getItemName = (item) => {
 		const nameField = item.fields?.name;
@@ -2101,7 +2119,7 @@ ddg.placeholderSearch = (() => {
 	};
 
 	const typeText = (text, onComplete) => {
-		let i = config.baseText.length; // Start after base text
+		let i = config.baseText.length;
 		const type = () => {
 			if (!active || !inputEl) return;
 			if (i <= text.length) {
@@ -2144,7 +2162,6 @@ ddg.placeholderSearch = (() => {
 		const fullText = `${config.baseText}${name}`;
 		const baseLen = config.baseText.length;
 
-		// Set base text first, then start typing
 		inputEl.placeholder = config.baseText;
 
 		typeText(fullText, () => {
@@ -2163,22 +2180,31 @@ ddg.placeholderSearch = (() => {
 		}
 	};
 
-	const removeListeners = () => {
-		if (inputEl && focusHandler) {
-			inputEl.removeEventListener('focus', focusHandler);
-		}
-		if (inputEl && blurHandler) {
-			inputEl.removeEventListener('blur', blurHandler);
-		}
-		focusHandler = null;
-		blurHandler = null;
-	};
-
 	const init = async () => {
+		// 1. IFRAME GUARD: Only run in the top window (Shell)
+		if (window !== window.top) {
+			// Silently fail in iframe to prevent console noise
+			return;
+		}
+
+		// 2. IDEMPOTENCY GUARD: Don't init if we already have the input setup
+		// This prevents "Starting with..." logs appearing every time the modal opens
+		if (isInitialized && inputEl) {
+			// Just ensure we are active and cycling
+			if (!active) {
+				active = true;
+				if (cachedItems) cycle(cachedItems);
+			}
+			return;
+		}
+
 		// Find input within modal
 		inputEl = document.querySelector('input[fs-list-field="*"]');
 		if (!inputEl) {
-			ddg.utils.warn('[placeholderSearch] No search input found');
+			// Only warn if we are in the Parent, otherwise it's expected not to find it
+			if (window === window.top) {
+				ddg.utils.warn('[placeholderSearch] No search input found');
+			}
 			return;
 		}
 
@@ -2210,6 +2236,7 @@ ddg.placeholderSearch = (() => {
 
 		ddg.utils.log(`[placeholderSearch] Starting with ${cachedItems.length} items`);
 
+		isInitialized = true; // Mark as done
 		active = true;
 		inputEl.placeholder = config.baseText;
 
@@ -2229,6 +2256,10 @@ ddg.placeholderSearch = (() => {
 			}
 		};
 
+		// Clean up old listeners if they somehow exist (unlikely with guard, but safe)
+		inputEl.removeEventListener('focus', focusHandler);
+		inputEl.removeEventListener('blur', blurHandler);
+
 		inputEl.addEventListener('focus', focusHandler);
 		inputEl.addEventListener('blur', blurHandler);
 
@@ -2237,9 +2268,10 @@ ddg.placeholderSearch = (() => {
 	};
 
 	// Auto-bind to modal events
+	// Note: We keep this listener active even in iframe just in case,
+	// but init() will reject it inside the function.
 	document.addEventListener('ddg:modal-opened', (e) => {
 		if (e.detail?.id === 'filters') {
-			// Small delay to ensure modal content is rendered
 			requestAnimationFrame(() => {
 				requestAnimationFrame(() => {
 					init();
