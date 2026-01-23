@@ -972,6 +972,69 @@ ddg.fs = (function () {
 		return { init, config };
 	})();
 
+	const filterStateIndicator = (() => {
+		// Placeholder selector - to be updated
+		const selector = '.c-filter.is-active-filters';
+		const selectedClass = 'u-display-none';
+
+		let filtersFromParamApplied = false;
+		let filtersAppliedAfterModalClose = false;
+		let modalOpen = false;
+		let changedWhileOpen = false;
+
+		const update = () => {
+			if (filtersFromParamApplied || filtersAppliedAfterModalClose) {
+				document.querySelectorAll(selector).forEach(el => {
+					el.classList.remove(selectedClass);
+				});
+			}
+		};
+
+		const init = async () => {
+			const list = await readyList();
+			if (!list) return;
+
+			// Check 1: Initial load from params
+			const hasActive = list.filters.value.groups.some(g =>
+				g.conditions.some(c => Array.isArray(c.value) ? c.value.length : c.value)
+			);
+
+			if (hasActive) {
+				filtersFromParamApplied = true;
+				update();
+			}
+
+			// Check 2: Modal interactions
+			document.addEventListener('ddg:modal-opened', (e) => {
+				if (e.detail?.id === 'filters') {
+					modalOpen = true;
+					changedWhileOpen = false;
+				}
+			});
+
+			document.addEventListener('ddg:modal-closed', (e) => {
+				if (e.detail?.id === 'filters') {
+					modalOpen = false;
+					if (changedWhileOpen) {
+						filtersAppliedAfterModalClose = true;
+						update();
+					}
+				}
+			});
+
+			// Watch for changes
+			list.watch(list.filters, () => {
+				if (modalOpen) {
+					changedWhileOpen = true;
+				}
+			}, { deep: true });
+
+			log('filterStateIndicator init');
+		};
+
+		return { init };
+	})();
+
 	let initialized = false;
 	const finsweetRelated = () => {
 		if (initialized) return;
@@ -983,6 +1046,7 @@ ddg.fs = (function () {
 		loadingFilters.init();
 		activeFiltersCount.init();
 		placeholderSearch.init();
+		filterStateIndicator.init();
 
 		log('finsweetRelated: complete');
 	};
