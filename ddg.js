@@ -877,60 +877,60 @@ function homeList() {
 	pickItem();
 }
 
-	function iframe() {
-		// parent window: follow child URL sync
-		if (window === window.parent) {
-			let childSyncSession = false;
-			const norm = (p) => {
-				const s = String(p || '');
-				return s.replace(/\/+$/, '') || '/';
-			};
+function iframe() {
+	// parent window: follow child URL sync
+	if (window === window.parent) {
+		let childSyncSession = false;
+		const norm = (p) => {
+			const s = String(p || '');
+			return s.replace(/\/+$/, '') || '/';
+		};
 
-			ddg.iframeBridge.on('sync-url', ({ url, title }) => {
-				const parentPath = norm(location.pathname);
-				let nextPath = null;
-				let nextUrl = null;
+		ddg.iframeBridge.on('sync-url', ({ url, title }) => {
+			const parentPath = norm(location.pathname);
+			let nextPath = null;
+			let nextUrl = null;
 
-				if (url) {
-					try {
-						nextUrl = new URL(url, location.href);
-						nextPath = norm(nextUrl.pathname);
-					} catch {
-						nextUrl = null;
-						nextPath = null;
-					}
+			if (url) {
+				try {
+					nextUrl = new URL(url, location.href);
+					nextPath = norm(nextUrl.pathname);
+				} catch {
+					nextUrl = null;
+					nextPath = null;
+				}
+			}
+
+			const allow = childSyncSession || parentPath === '/';
+			if (!allow) return;
+
+			if (!childSyncSession && parentPath === '/' && nextPath && nextPath !== '/') {
+				childSyncSession = true;
+			}
+
+			if (nextUrl) {
+				const isSameOrigin = nextUrl.origin === location.origin;
+				if (isSameOrigin) {
+					// Preserve parent query params (e.g. utm_*) while accepting the child's path.
+					const parentParams = new URLSearchParams(location.search);
+					parentParams.forEach((value, key) => {
+						if (!nextUrl.searchParams.has(key)) nextUrl.searchParams.set(key, value);
+					});
 				}
 
-				const allow = childSyncSession || parentPath === '/';
-				if (!allow) return;
-
-				if (!childSyncSession && parentPath === '/' && nextPath && nextPath !== '/') {
-					childSyncSession = true;
-				}
-
-				if (nextUrl) {
-					const isSameOrigin = nextUrl.origin === location.origin;
+				const nextHref = nextUrl.toString();
+				if (nextHref !== location.href) {
 					if (isSameOrigin) {
-						// Preserve parent query params (e.g. utm_*) while accepting the child's path.
-						const parentParams = new URLSearchParams(location.search);
-						parentParams.forEach((value, key) => {
-							if (!nextUrl.searchParams.has(key)) nextUrl.searchParams.set(key, value);
-						});
-					}
-
-					const nextHref = nextUrl.toString();
-					if (nextHref !== location.href) {
-						if (isSameOrigin) {
-							history.replaceState(history.state, '', nextHref);
-						} else {
-							location.assign(nextHref);
-						}
+						history.replaceState(history.state, '', nextHref);
+					} else {
+						location.assign(nextHref);
 					}
 				}
+			}
 
-				if (childSyncSession && nextPath === '/') childSyncSession = false;
-				if (title) document.title = title;
-			});
+			if (childSyncSession && nextPath === '/') childSyncSession = false;
+			if (title) document.title = title;
+		});
 
 		return ddg.iframeBridge;
 	}
@@ -2096,7 +2096,6 @@ function storiesAudioPlayer() {
 
 ddg.placeholderSearch = (() => {
 	const config = {
-		baseText: 'Search...',
 		typeSpeed: 60,
 		deleteSpeed: 40,
 		pauseDuration: 3000,
@@ -2106,9 +2105,7 @@ ddg.placeholderSearch = (() => {
 	let currentTimeout = null;
 	let inputEl = null;
 	let cachedItems = null;
-	let focusHandler = null;
-	let blurHandler = null;
-	let isInitialized = false; // Guard against double-init
+	let initializing = false;
 
 	const getItemName = (item) => {
 		const nameField = item.fields?.name;
@@ -2119,7 +2116,7 @@ ddg.placeholderSearch = (() => {
 	};
 
 	const typeText = (text, onComplete) => {
-		let i = config.baseText.length;
+		let i = 0;
 		const type = () => {
 			if (!active || !inputEl) return;
 			if (i <= text.length) {
@@ -2133,13 +2130,13 @@ ddg.placeholderSearch = (() => {
 		type();
 	};
 
-	const deleteText = (fromText, toLength, onComplete) => {
-		let i = fromText.length;
+	const deleteText = (text, onComplete) => {
+		let i = text.length;
 		const del = () => {
 			if (!active || !inputEl) return;
-			if (i > toLength) {
+			if (i >= 0) {
+				inputEl.placeholder = text.slice(0, i);
 				i--;
-				inputEl.placeholder = fromText.slice(0, i);
 				currentTimeout = setTimeout(del, config.deleteSpeed);
 			} else {
 				onComplete?.();
@@ -2159,14 +2156,9 @@ ddg.placeholderSearch = (() => {
 			return;
 		}
 
-		const fullText = `${config.baseText}${name}`;
-		const baseLen = config.baseText.length;
-
-		inputEl.placeholder = config.baseText;
-
-		typeText(fullText, () => {
+		typeText(name, () => {
 			currentTimeout = setTimeout(() => {
-				deleteText(fullText, baseLen, () => {
+				deleteText(name, () => {
 					currentTimeout = setTimeout(() => cycle(items), 300);
 				});
 			}, config.pauseDuration);
@@ -2181,38 +2173,25 @@ ddg.placeholderSearch = (() => {
 	};
 
 	const init = async () => {
-		// 1. IFRAME GUARD: Only run in the top window (Shell)
-		if (window !== window.top) {
-			// Silently fail in iframe to prevent console noise
-			return;
-		}
-
-		// 2. IDEMPOTENCY GUARD: Don't init if we already have the input setup
-		// This prevents "Starting with..." logs appearing every time the modal opens
-		if (isInitialized && inputEl) {
-			// Just ensure we are active and cycling
-			if (!active) {
+		if (initializing || inputEl) {
+			if (inputEl && !active) {
 				active = true;
 				if (cachedItems) cycle(cachedItems);
 			}
 			return;
 		}
 
-		// Find input within modal
-		inputEl = document.querySelector('input[fs-list-field="*"]');
-		if (!inputEl) {
-			// Only warn if we are in the Parent, otherwise it's expected not to find it
-			if (window === window.top) {
-				ddg.utils.warn('[placeholderSearch] No search input found');
-			}
-			return;
-		}
+		const el = document.querySelector('input[fs-list-field="*"]');
+		if (!el) return;
 
-		// Get items (cache them)
+		initializing = true;
+		inputEl = el;
+
 		if (!cachedItems) {
 			const list = await ddg.fs.readyList();
 			if (!list) {
 				ddg.utils.warn('[placeholderSearch] No list instance');
+				initializing = false;
 				return;
 			}
 
@@ -2221,13 +2200,14 @@ ddg.placeholderSearch = (() => {
 			const items = list.items?.value ?? list.items;
 			if (!Array.isArray(items) || !items.length) {
 				ddg.utils.warn('[placeholderSearch] No items found');
+				initializing = false;
 				return;
 			}
 
-			// Check if any items have a name field
 			const hasNameField = items.some(item => item.fields?.name?.value);
 			if (!hasNameField) {
 				ddg.utils.log('[placeholderSearch] No name field values found in items');
+				initializing = false;
 				return;
 			}
 
@@ -2236,40 +2216,27 @@ ddg.placeholderSearch = (() => {
 
 		ddg.utils.log(`[placeholderSearch] Starting with ${cachedItems.length} items`);
 
-		isInitialized = true; // Mark as done
 		active = true;
-		inputEl.placeholder = config.baseText;
 
-		// Stop on focus
-		focusHandler = () => {
+		const onFocus = () => {
 			clearTimeouts();
 			active = false;
 			if (inputEl) inputEl.placeholder = 'Search';
 		};
 
-		// Resume on blur if empty
-		blurHandler = () => {
+		const onBlur = () => {
 			if (inputEl && !inputEl.value && cachedItems) {
 				active = true;
-				inputEl.placeholder = config.baseText;
-				currentTimeout = setTimeout(() => cycle(cachedItems), 500);
+				cycle(cachedItems);
 			}
 		};
 
-		// Clean up old listeners if they somehow exist (unlikely with guard, but safe)
-		inputEl.removeEventListener('focus', focusHandler);
-		inputEl.removeEventListener('blur', blurHandler);
+		inputEl.addEventListener('focus', onFocus);
+		inputEl.addEventListener('blur', onBlur);
 
-		inputEl.addEventListener('focus', focusHandler);
-		inputEl.addEventListener('blur', blurHandler);
-
-		// Start cycling
-		currentTimeout = setTimeout(() => cycle(cachedItems), 1000);
+		cycle(cachedItems);
 	};
 
-	// Auto-bind to modal events
-	// Note: We keep this listener active even in iframe just in case,
-	// but init() will reject it inside the function.
 	document.addEventListener('ddg:modal-opened', (e) => {
 		if (e.detail?.id === 'filters') {
 			requestAnimationFrame(() => {
