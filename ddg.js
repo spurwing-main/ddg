@@ -293,6 +293,34 @@ ddg.fs = (function () {
 	const log = (...a) => ddg.utils.log('[fs]', ...a);
 	const warn = (...a) => ddg.utils.warn('[fs]', ...a);
 
+	// --- Helpers for fixing Two-Way Binding ---
+	const findFormFieldFor = (fieldKey) => {
+		// Try finding specific field first
+		let el = document.querySelector(`[fs-list-element="filters"] [fs-list-field="${CSS.escape(fieldKey)}"]`);
+		// If not found and key is '*', look for wildcard field
+		if (!el && fieldKey === '*') {
+			el = document.querySelector(`[fs-list-element="filters"] [fs-list-field="*"]`);
+		}
+		return el || null;
+	};
+
+	const getFormFieldType = (el) => {
+		if (!el) return 'text'; // Default assumption
+		const tag = el.tagName.toLowerCase();
+		if (tag === 'select') return el.multiple ? 'select-multiple' : 'select-one';
+		if (tag === 'textarea') return 'text';
+		if (tag === 'input') return (el.type || 'text').toLowerCase();
+		return 'text';
+	};
+
+	const getOperatorFor = (el, fallbackType) => {
+		if (!el) return fallbackType === 'text' ? 'contain' : 'equal';
+		const opAttr = el.getAttribute('fs-list-operator');
+		if (opAttr) return opAttr;
+		// Standard Finsweet defaults
+		return fallbackType === 'text' ? 'contain' : 'equal';
+	};
+
 	const getItemsArray = (list) => {
 		if (!list) return [];
 		const raw = list.items?.value ?? list.items;
@@ -354,46 +382,68 @@ ddg.fs = (function () {
 			return;
 		}
 
-		// Prevent two-way binding from reacting to these changes
+		// Prevent two-way binding loop while we work
 		list.settingFilters = true;
 
-		// Build new conditions from fieldValues
-		const conditions = Object.entries(fieldValues || {})
-			.map(([fieldKey, values]) => {
-				const arr = Array.isArray(values) ? values : [values];
-				const clean = [... new Set(arr.map(String))].filter(Boolean);
-				if (!clean.length) return null;
+		const filters = list.filters.value;
 
-				return {
-					id: `${fieldKey}_equal`,
-					type: 'checkbox',
+		// Ensure at least one group exists
+		let group = filters.groups && filters.groups[0];
+		if (!group) {
+			group = { id: '0', conditionsMatch: 'and', conditions: [] };
+			filters.groups = [group];
+		}
+
+		// 1. Reset Phase: Clear existing values without destroying objects
+		// This ensures Finsweet finds the original inputs and resets them
+		if (reset && Array.isArray(group.conditions)) {
+			group.conditions.forEach(c => {
+				c.value = Array.isArray(c.value) ? [] : '';
+				c.interacted = false;
+			});
+		}
+
+		// 2. Set Phase: Apply new values
+		Object.entries(fieldValues || {}).map(([fieldKey, values]) => {
+			const arr = Array.isArray(values) ? values : [values];
+			const clean = [... new Set(arr.map(String))].filter(Boolean);
+			if (!clean.length) return;
+
+			// Look up form element to ensure we match the correct Type and Operator
+			const formEl = findFormFieldFor(fieldKey);
+			const inferredType = getFormFieldType(formEl);
+			const inferredOp = getOperatorFor(formEl, inferredType);
+
+			// Find existing condition or create new one
+			let condition = group.conditions.find(c => c.fieldKey === fieldKey && (c.op || 'contain') === inferredOp)
+				|| group.conditions.find(c => c.fieldKey === fieldKey);
+
+			if (!condition) {
+				condition = {
+					id: `${fieldKey}_${inferredOp}`,
+					type: inferredType, // IMPORTANT: Correct type allows Finsweet to find the input later
 					fieldKey,
-					value: clean,
-					op: 'equal',
+					op: inferredOp,
+					value: [],
 					filterMatch: 'or',
 					interacted: true,
 					showTag: true,
-					tagValuesDisplay,  // ← Key addition:  'separate' renders one tag per value
+					tagValuesDisplay,
 				};
-			})
-			.filter(Boolean);
+				group.conditions.push(condition);
+			}
 
-		console.log(`[ddg:perf] 🔍 Finsweet: applying ${conditions.length} filter conditions with tagValuesDisplay: ${tagValuesDisplay}`);
-		log('setFilters', { groups: conditions.length, tagValuesDisplay });
+			// Update values
+			condition.value = clean;
+			condition.interacted = true;
+			// Reset tag display setting in case it changed
+			condition.tagValuesDisplay = tagValuesDisplay;
+		});
 
-		// Replace the entire filters model
-		list.filters.value = {
-			groupsMatch: 'and',
-			groups: conditions.length
-				? [
-					{
-						id: '0',
-						conditionsMatch: 'and',
-						conditions,
-					},
-				]
-				: [],
-		};
+		console.log(`[ddg:perf] 🔍 Finsweet: filters applied`);
+
+		// Trigger reactivity
+		list.filters.value = { ...filters };
 
 		// Re-enable two-way binding
 		list.settingFilters = false;
@@ -764,6 +814,164 @@ ddg.fs = (function () {
 		return { init };
 	})();
 
+	const placeholderSearch = (() => {
+		const config = {
+			typeSpeed: 60,
+			deleteSpeed: 40,
+			pauseDuration: 3000,
+		};
+
+		let active = false;
+		let currentTimeout = null;
+		let inputEl = null;
+		let cachedItems = null;
+		let initializing = false;
+
+		const getItemName = (item) => {
+			const nameField = item.fields?.name;
+			if (!nameField?.value) return null;
+
+			const val = Array.isArray(nameField.value) ? nameField.value[0] : nameField.value;
+			return val ? String(val) : null;
+		};
+
+		const typeText = (text, onComplete) => {
+			let i = 0;
+			const type = () => {
+				if (!active || !inputEl) return;
+				if (i <= text.length) {
+					inputEl.placeholder = text.slice(0, i);
+					i++;
+					currentTimeout = setTimeout(type, config.typeSpeed);
+				} else {
+					onComplete?.();
+				}
+			};
+			type();
+		};
+
+		const deleteText = (text, onComplete) => {
+			let i = text.length;
+			const del = () => {
+				if (!active || !inputEl) return;
+				if (i >= 0) {
+					inputEl.placeholder = text.slice(0, i);
+					i--;
+					currentTimeout = setTimeout(del, config.deleteSpeed);
+				} else {
+					onComplete?.();
+				}
+			};
+			del();
+		};
+
+		const cycle = (items) => {
+			if (!active || !inputEl || !items.length) return;
+
+			const item = items[Math.floor(Math.random() * items.length)];
+			const name = getItemName(item);
+
+			if (!name) {
+				currentTimeout = setTimeout(() => cycle(items), 500);
+				return;
+			}
+
+			typeText(name, () => {
+				currentTimeout = setTimeout(() => {
+					deleteText(name, () => {
+						currentTimeout = setTimeout(() => cycle(items), 300);
+					});
+				}, config.pauseDuration);
+			});
+		};
+
+		const clearTimeouts = () => {
+			if (currentTimeout) {
+				clearTimeout(currentTimeout);
+				currentTimeout = null;
+			}
+		};
+
+		const init = async () => {
+			if (initializing || inputEl) {
+				if (inputEl && !active) {
+					active = true;
+					if (cachedItems) cycle(cachedItems);
+				}
+				return;
+			}
+
+			const el = document.querySelector('input[fs-list-field="*"]');
+			if (!el) return;
+
+			initializing = true;
+			inputEl = el;
+
+			if (!cachedItems) {
+				const list = await readyList();
+				if (!list) {
+					ddg.utils.warn('[placeholderSearch] No list instance');
+					initializing = false;
+					return;
+				}
+
+				await list.loadingPaginatedItems;
+
+				const items = list.items?.value ?? list.items;
+				if (!Array.isArray(items) || !items.length) {
+					ddg.utils.warn('[placeholderSearch] No items found');
+					initializing = false;
+					return;
+				}
+
+				const hasNameField = items.some(item => item.fields?.name?.value);
+				if (!hasNameField) {
+					ddg.utils.log('[placeholderSearch] No name field values found in items');
+					initializing = false;
+					return;
+				}
+
+				cachedItems = items;
+			}
+
+			ddg.utils.log(`[placeholderSearch] Starting with ${cachedItems.length} items`);
+
+			active = true;
+
+			const onFocus = () => {
+				clearTimeouts();
+				active = false;
+				if (inputEl) inputEl.placeholder = 'Search';
+			};
+
+			const onBlur = () => {
+				if (inputEl && !inputEl.value && cachedItems) {
+					active = true;
+					cycle(cachedItems);
+				}
+			};
+
+			inputEl.addEventListener('focus', onFocus);
+			inputEl.addEventListener('blur', onBlur);
+
+			cycle(cachedItems);
+		};
+
+		document.addEventListener('ddg:modal-opened', (e) => {
+			if (e.detail?.id === 'filters') {
+				requestAnimationFrame(() => {
+					requestAnimationFrame(() => {
+						init();
+					});
+				});
+			}
+		});
+
+		ddg.utils.log('[placeholderSearch] Ready');
+
+		return { init, config };
+	})();
+
 	let initialized = false;
 	const finsweetRelated = () => {
 		if (initialized) return;
@@ -773,7 +981,9 @@ ddg.fs = (function () {
 		relatedFilters.init();
 		randomFilters.init();
 		loadingFilters.init();
-		activeFiltersCount.init(); // New init call
+		activeFiltersCount.init();
+		placeholderSearch.init();
+
 		log('finsweetRelated: complete');
 	};
 
@@ -781,7 +991,8 @@ ddg.fs = (function () {
 		readyList,
 		finsweetRelated,
 		resolveCurrentItem: currentItem.resolve,
-		setFilters
+		setFilters,
+		placeholderSearch
 	};
 })();
 
@@ -2094,163 +2305,6 @@ function storiesAudioPlayer() {
 	ddg.utils.log('[audio] storiesAudioPlayer initialized');
 }
 
-ddg.placeholderSearch = (() => {
-	const config = {
-		typeSpeed: 60,
-		deleteSpeed: 40,
-		pauseDuration: 3000,
-	};
-
-	let active = false;
-	let currentTimeout = null;
-	let inputEl = null;
-	let cachedItems = null;
-	let initializing = false;
-
-	const getItemName = (item) => {
-		const nameField = item.fields?.name;
-		if (!nameField?.value) return null;
-
-		const val = Array.isArray(nameField.value) ? nameField.value[0] : nameField.value;
-		return val ? String(val) : null;
-	};
-
-	const typeText = (text, onComplete) => {
-		let i = 0;
-		const type = () => {
-			if (!active || !inputEl) return;
-			if (i <= text.length) {
-				inputEl.placeholder = text.slice(0, i);
-				i++;
-				currentTimeout = setTimeout(type, config.typeSpeed);
-			} else {
-				onComplete?.();
-			}
-		};
-		type();
-	};
-
-	const deleteText = (text, onComplete) => {
-		let i = text.length;
-		const del = () => {
-			if (!active || !inputEl) return;
-			if (i >= 0) {
-				inputEl.placeholder = text.slice(0, i);
-				i--;
-				currentTimeout = setTimeout(del, config.deleteSpeed);
-			} else {
-				onComplete?.();
-			}
-		};
-		del();
-	};
-
-	const cycle = (items) => {
-		if (!active || !inputEl || !items.length) return;
-
-		const item = items[Math.floor(Math.random() * items.length)];
-		const name = getItemName(item);
-
-		if (!name) {
-			currentTimeout = setTimeout(() => cycle(items), 500);
-			return;
-		}
-
-		typeText(name, () => {
-			currentTimeout = setTimeout(() => {
-				deleteText(name, () => {
-					currentTimeout = setTimeout(() => cycle(items), 300);
-				});
-			}, config.pauseDuration);
-		});
-	};
-
-	const clearTimeouts = () => {
-		if (currentTimeout) {
-			clearTimeout(currentTimeout);
-			currentTimeout = null;
-		}
-	};
-
-	const init = async () => {
-		if (initializing || inputEl) {
-			if (inputEl && !active) {
-				active = true;
-				if (cachedItems) cycle(cachedItems);
-			}
-			return;
-		}
-
-		const el = document.querySelector('input[fs-list-field="*"]');
-		if (!el) return;
-
-		initializing = true;
-		inputEl = el;
-
-		if (!cachedItems) {
-			const list = await ddg.fs.readyList();
-			if (!list) {
-				ddg.utils.warn('[placeholderSearch] No list instance');
-				initializing = false;
-				return;
-			}
-
-			await list.loadingPaginatedItems;
-
-			const items = list.items?.value ?? list.items;
-			if (!Array.isArray(items) || !items.length) {
-				ddg.utils.warn('[placeholderSearch] No items found');
-				initializing = false;
-				return;
-			}
-
-			const hasNameField = items.some(item => item.fields?.name?.value);
-			if (!hasNameField) {
-				ddg.utils.log('[placeholderSearch] No name field values found in items');
-				initializing = false;
-				return;
-			}
-
-			cachedItems = items;
-		}
-
-		ddg.utils.log(`[placeholderSearch] Starting with ${cachedItems.length} items`);
-
-		active = true;
-
-		const onFocus = () => {
-			clearTimeouts();
-			active = false;
-			if (inputEl) inputEl.placeholder = 'Search';
-		};
-
-		const onBlur = () => {
-			if (inputEl && !inputEl.value && cachedItems) {
-				active = true;
-				cycle(cachedItems);
-			}
-		};
-
-		inputEl.addEventListener('focus', onFocus);
-		inputEl.addEventListener('blur', onBlur);
-
-		cycle(cachedItems);
-	};
-
-	document.addEventListener('ddg:modal-opened', (e) => {
-		if (e.detail?.id === 'filters') {
-			requestAnimationFrame(() => {
-				requestAnimationFrame(() => {
-					init();
-				});
-			});
-		}
-	});
-
-	ddg.utils.log('[placeholderSearch] Ready');
-
-	return { init, config };
-})();
 
 function joinButtons() {
 	const stickyButton = document.querySelector('.join_sticky');
@@ -2308,7 +2362,6 @@ ddg.boot = function boot() {
 		share();
 		storiesAudioPlayer();
 		joinButtons();
-		ddg.placeholderSearch.init();
 
 		ddg.utils.perf.end('boot');
 		ddg.utils.perf.memory();
